@@ -7,13 +7,13 @@ pub const JsonToken = union(enum) {
   // Structural
 
   /// {
-  left_brace,
+  open_brace,
   /// }
-  right_brace,
+  close_brace,
   /// [
-  left_bracket,
+  open_bracket,
   /// ]
-  right_bracket,
+  close_bracket,
   /// :
   colon,
   /// ,
@@ -67,8 +67,67 @@ const Tokenizer = struct {
   str: []const u8 = "",
   kind: documentKind = documentKind.JSONC,
 
+  const Literal = enum {
+      true_,
+      false_,
+      null_,
+  };
+
+  pub fn tokenize(self: *Tokenizer) ![]const JsonToken {
+    errdefer self.tokens.deinit(self.allocator);
+    try self.tokens.ensureTotalCapacity(self.allocator, self.str.len + 1);
+
+    while(self.char()) |c| {
+      try self.addToken(switch (c) {
+        '{' => .open_brace,
+        '}' => .close_brace,
+        '[' => .open_bracket,
+        ']' => .close_bracket,
+        ':' => .colon,
+        ',' => .comma,
+        't' => try self.findLiteral(.true_),
+        'f' => try self.findLiteral(.false_),
+        'n' => try self.findLiteral(.null_),
+        '"' => try self.string(),
+        '/' => try self.comment(),
+        '0','1','2','3','4','5','6','7','8','9','-' => try self.number(),
+        ' ', '\t', '\n', '\r' => try self.getWhitespace(),
+        else => {
+          log.err("Found: {c}", .{c});
+          return TokenizeError.UnexpectedToken;
+        }
+      });
+    }
+
+    try self.addToken(.end_of_file);
+    return try self.tokens.toOwnedSlice(self.allocator);
+  }
+
+  fn findLiteral(self: *const Tokenizer, kind: Literal) TokenizeError!JsonToken {
+    switch (kind) {
+      .null_ => { if (self.matches("null")) return .null_; },
+      .true_ => { if (self.matches("true")) return .true_; },
+      .false_ => { if (self.matches("false")) return .false_; },
+    }
+    log.err("Broken literal", .{});
+    return TokenizeError.UnexpectedToken;
+  }
+
+  /// Collects all whitespace and returns it as a token.
+  /// Can return null. `addToken` checks for null.
+  fn getWhitespace(self: *Tokenizer) TokenizeError!JsonToken {
+    const start = self.index;
+    while (self.char()) |c| {
+      if (!std.ascii.isWhitespace(c)) break;
+      self.index += 1;
+    }
+    const end = self.index;
+    if (start == end) unreachable;
+    return .{ .whitespace = self.str[start..end]};
+  }
+
   /// Given a JSON string, returns token array
-  pub fn tokenize(self: *Tokenizer) TokenizeError![]const JsonToken {
+  pub fn old_tokenize(self: *Tokenizer) TokenizeError![]const JsonToken {
     // Prefer provided string over struct string
     //if (self.str.len == 0 and str != null) {
     //  self.str = str;
@@ -76,6 +135,7 @@ const Tokenizer = struct {
     errdefer self.tokens.deinit(self.allocator);
     try self.tokens.ensureTotalCapacity(self.allocator, self.str.len + 1);
     try self.tokenizeValue();
+    try self.addToken(.end_of_file);
     return try self.tokens.toOwnedSlice(self.allocator);
   }
 
@@ -93,7 +153,7 @@ const Tokenizer = struct {
   fn addToken(self: *Tokenizer, token: JsonToken) TokenizeError!void {
     try self.tokens.append(self.allocator, token);
     switch (token) {
-      .left_bracket, .right_bracket, .left_brace, .right_brace,
+      .open_bracket, .close_bracket, .open_brace, .close_brace,
       .colon, .comma => self.index += 1,
       .true_, .null_ => self.index += 4,
       .false_ => self.index += 5,
@@ -294,13 +354,13 @@ const Tokenizer = struct {
 
   fn tokenizeObject(self: *Tokenizer) TokenizeError!void {
     // Presence of left bracket already confirmed by `tokenizeValue()`
-    try self.addToken(.left_brace);
+    try self.addToken(.open_brace);
     self.optionalWhitespace();
     if (
       (self.char() orelse return error.UnexpectedEndOfInput)
       == '}'
     ) {
-      try self.addToken(.right_brace);
+      try self.addToken(.close_brace);
       return;
     }
 
@@ -313,13 +373,13 @@ const Tokenizer = struct {
 
       // Allow trailing commas for JSONC/JSON5
       if (self.kind != .JSON and (self.char() orelse return error.UnexpectedEndOfInput) == '}') {
-        try self.addToken(.right_brace);
+        try self.addToken(.close_brace);
         return;
       }
     }
 
     if ((self.char() orelse return error.UnexpectedEndOfInput) == '}') {
-      try self.addToken(.right_brace);
+      try self.addToken(.close_brace);
     } else return error.MissingCloseBrace;
   }
 
@@ -343,13 +403,13 @@ const Tokenizer = struct {
 
   fn tokenizeArray(self: *Tokenizer) TokenizeError!void {
     // Presence of left brace already confirmed by `tokenizeValue()`
-    try self.addToken(.left_bracket);
+    try self.addToken(.open_bracket);
 
     self.optionalWhitespace(); // Possibly redundant if array is not empty
 
     if ((self.char() orelse return error.UnexpectedEndOfInput) == ']'){
       // Empty array detected. Return early.
-      try self.addToken(.right_bracket);
+      try self.addToken(.close_bracket);
       return;
     }
 
@@ -363,7 +423,7 @@ const Tokenizer = struct {
     }
 
     if ((self.char() orelse return error.UnexpectedEndOfInput) == ']') {
-      try self.addToken(.right_bracket);
+      try self.addToken(.close_bracket);
     } else return error.MissingCloseBracket;
   }
 
@@ -412,11 +472,12 @@ test "Tokenizer: array no whitespace" {
   try testTokenizer(
     \\["hello","there"]
     , &.{
-      .left_bracket,
+      .open_bracket,
       .{ .string = "hello" },
       .comma,
       .{ .string = "there" },
-      .right_bracket,
+      .close_bracket,
+      .end_of_file
     }
   );
 }
@@ -426,7 +487,7 @@ test "Tokenizer: whitespace" {
     " [ \"hello\" ,  \"there\" ] "
     , &.{
       .{ .whitespace = " "},
-      .left_bracket,
+      .open_bracket,
       .{ .whitespace = " "},
       .{ .string = "hello" },
       .{ .whitespace = " "},
@@ -434,15 +495,16 @@ test "Tokenizer: whitespace" {
       .{ .whitespace = "  "},
       .{ .string = "there" },
       .{ .whitespace = " "},
-      .right_bracket,
+      .close_bracket,
       .{ .whitespace = " "},
+      .end_of_file
     }
   );
   try testTokenizer(
     " { \"hello\" :  \"there\" } "
     , &.{
       .{ .whitespace = " "},
-      .left_brace,
+      .open_brace,
       .{ .whitespace = " "},
       .{ .string = "hello" },
       .{ .whitespace = " "},
@@ -450,8 +512,9 @@ test "Tokenizer: whitespace" {
       .{ .whitespace = "  "},
       .{ .string = "there" },
       .{ .whitespace = " "},
-      .right_brace,
+      .close_brace,
       .{ .whitespace = " "},
+      .end_of_file
     }
   );
 }
@@ -460,18 +523,19 @@ test "Tokenizer: object with array" {
   try testTokenizer(
     \\{"array": ["hello" ,  "there"]}
     , &.{
-      .left_brace,
+      .open_brace,
       .{ .string = "array"},
       .colon,
       .{ .whitespace = " "},
-      .left_bracket,
+      .open_bracket,
       .{ .string = "hello" },
       .{ .whitespace = " "},
       .comma,
       .{ .whitespace = "  "},
       .{ .string = "there" },
-      .right_bracket,
-      .right_brace,
+      .close_bracket,
+      .close_brace,
+      .end_of_file
     }
   );
 }
@@ -480,7 +544,7 @@ test "primitives" {
   try testTokenizer(
     \\[true, false, null, "string", 40334]
     , &.{
-      .left_bracket,
+      .open_bracket,
       .true_,
       .comma,
       .{ .whitespace = " " },
@@ -494,7 +558,8 @@ test "primitives" {
       .comma,
       .{ .whitespace = " " },
       .{ .number = "40334" },
-      .right_bracket,
+      .close_bracket,
+      .end_of_file
     }
   );
 }
@@ -503,7 +568,7 @@ test "numbers" {
   try testTokenizer(
     \\[1,-1,0,0.2,12e+3,1e10]
     , &.{
-      .left_bracket,
+      .open_bracket,
       .{ .number = "1"},
       .comma,
       .{ .number = "-1"},
@@ -515,7 +580,8 @@ test "numbers" {
       .{ .number = "12e+3"},
       .comma,
       .{ .number = "1e10"},
-      .right_bracket,
+      .close_bracket,
+      .end_of_file
     }
   );
 }
@@ -524,15 +590,17 @@ test "tokenizer: empty object/array" {
   try testTokenizer(
     \\[]
     , &.{
-      .left_bracket,
-      .right_bracket,
+      .open_bracket,
+      .close_bracket,
+      .end_of_file
     }
   );
   try testTokenizer(
     \\{}
     , &.{
-      .left_brace,
-      .right_brace,
+      .open_brace,
+      .close_brace,
+      .end_of_file
     }
   );
 }
