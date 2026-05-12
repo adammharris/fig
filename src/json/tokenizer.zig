@@ -4,57 +4,44 @@ const testing = std.testing;
 const JsonFormat = @import("json.zig").JsonFormat;
 const Span = @import("../util/span.zig");
 
-pub const Token = struct {
-  pub const Kind = enum {
-    // Structural
-    /// {
-    open_brace,
-    /// }
-    close_brace,
-    /// [
-    open_bracket,
-    /// ]
-    close_bracket,
+pub const Token = @import("../token.zig").Token(Kind);
 
-    colon,
-    comma,
-    end_of_file,
+pub const Kind = enum {
+  // Structural
+  /// {
+  open_brace,
+  /// }
+  close_brace,
+  /// [
+  open_bracket,
+  /// ]
+  close_bracket,
 
-    // Literals
-    true_,
-    false_,
-    null_,
+  colon,
+  comma,
+  end_of_file,
 
-    // variable-length
-    string,
-    number,
-    comment,
-    whitespace,
+  // Literals
+  true_,
+  false_,
+  null_,
 
-    /// Find length of token kind. Returns null for variable-length tokens.
-    pub fn len(self: Kind) ?usize {
-      return switch (self) {
-        .end_of_file => 0,
-        .open_brace, .close_brace, .open_bracket, .close_bracket,
-        .colon, .comma => 1,
-        .true_, .null_ => 4,
-        .false_ => 5,
-        else => null
-      };
-    }
-  };
+  // variable-length
+  string,
+  number,
+  comment,
+  whitespace,
 
-  kind: Kind,
-  span: Span,
-
-  pub fn init(kind: Token.Kind, span: Span) Token {
-    return .{ .kind = kind, .span = span };
-  }
-
-  /// Auto-detects token size based on Token.Kind.len()
-  pub fn fixed(kind: Token.Kind, start: usize) Token {
-    const len = kind.len() orelse unreachable;
-    return .{ .kind = kind, .span = .init(start, start + len) };
+  /// Find length of token kind. Returns null for variable-length tokens.
+  pub fn len(self: Kind) ?usize {
+    return switch (self) {
+      .end_of_file => 0,
+      .open_brace, .close_brace, .open_bracket, .close_bracket,
+      .colon, .comma => 1,
+      .true_, .null_ => 4,
+      .false_ => 5,
+      else => null
+    };
   }
 };
 

@@ -1,12 +1,14 @@
+//! The parser turns JSON tokens into a concrete syntax tree.
+//! Depends on the tokenizer and the abstract Document struct
+
 const std = @import("std");
 const Document = @import("../document.zig");
 
 // TODO: This file is WIP and does not yet compile
 
-const ValueNode = struct {
-    value: Value,
-    token_start: usize,
-    token_end: usize,
+const Node = struct {
+  kind: NodeKind,
+  span: Span,
 };
 
 const Parser = struct {

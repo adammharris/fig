@@ -3,20 +3,31 @@ const token = @This();
 const Span = @import("util/span.zig");
 
 pub fn Token(comptime KindType: type) type {
-    return struct {
-        const Self = @This();
+  comptime {
+    if (!@hasDecl(KindType, "len")) {
+      @compileError("Token KindType must define pub fn len(self: Kind) ?usize");
+    }
+  }
 
-        pub const Kind = KindType;
+  return struct {
+    const Self = @This();
 
-        kind: Kind,
-        span: Span,
+    pub const Kind = KindType;
 
-        pub fn init(kind: Kind, span: Span) Self {
-            return .{ .kind = kind, .span = span };
-        }
+    kind: Kind,
+    span: Span,
 
-        pub fn source(self: Self, bytes: []const u8) []const u8 {
-            return bytes[self.span.start..self.span.end];
-        }
-    };
+    pub fn init(kind: Kind, span: Span) Self {
+      return .{ .kind = kind, .span = span };
+    }
+
+    pub fn source(self: Self, bytes: []const u8) []const u8 {
+      return bytes[self.span.start..self.span.end];
+    }
+
+    pub fn fixed(kind: Kind, start: usize) Self {
+      const len = kind.len() orelse unreachable;
+      return .{ .kind = kind, .span = Span.init(start, start + len) };
+    }
+  };
 }
