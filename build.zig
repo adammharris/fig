@@ -115,11 +115,16 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    const test_filters =
+        b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
+        orelse &.{};
+
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
         .root_module = mod,
+        .filters = test_filters,
     });
 
     // A run step that will run the test executable.
@@ -130,6 +135,7 @@ pub fn build(b: *std.Build) void {
     // hence why we have to create two separate ones.
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
+        .filters = test_filters,
     });
 
     // A run step that will run the second test executable.
@@ -153,4 +159,5 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+
 }
