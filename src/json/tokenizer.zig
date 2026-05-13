@@ -62,7 +62,6 @@ const TokenizeError = error{
 
 const Tokenizer = struct {
   // State
-  recursion_depth: usize = 0,
   tokens: std.ArrayList(Token) = .empty,
   index: usize = 0,
 
@@ -70,25 +69,6 @@ const Tokenizer = struct {
   allocator: std.mem.Allocator,
   str: []const u8 = "",
   kind: JsonFormat = JsonFormat.JSONC,
-
-  pub fn abstractTokenize(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    kind: JsonFormat,
-  ) ![]const Token {
-    var tokenizer: Tokenizer = .{
-      .allocator = allocator,
-      .str = input,
-      .kind = kind,
-    };
-    var abstract_tokens: std.ArrayList(Token) = .empty;
-    const json_tokens = tokenizer.tokenize();
-    for (json_tokens) |token| {
-      try abstract_tokens.append(allocator, .{ .JsonToken = token });
-    }
-    return abstract_tokens;
-  }
-
 
   pub fn tokenize(self: *Tokenizer) ![]const Token {
     errdefer self.tokens.deinit(self.allocator);

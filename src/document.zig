@@ -6,52 +6,40 @@
 
 const Document = @This();
 const std = @import("std");
-const json = @import("json/json.zig");
-
-allocator: std.mem.Allocator,
-value: Value,
-source: Source,
+const Span = @import("util/span.zig");
 
 const Format = union(enum) {
-    json: json.JsonFormat,
+    json: @import("json/json.zig").JsonFormat,
     // TODO: support more formats
     // yaml: YamlFormat,
     // toml: TomlFormat,
     // others
 };
 
-/// The "universal" config value representation.
-/// The meaning of a document is contained in nested Values.
-const Value = union(enum) {
-  // Scalars
-  empty,
-  boolean: bool,
-  integer: i64,
-  decimal: f64,
-  string: []const u8,
-  /// Sequence: a list of other values
-  /// Ordered; accessed by index
-  /// Implemented here with a simple slice/array
-  sequence: []Value,
-  /// Mapping: key:value pairs
-  /// Unordered; accessed by key string
-  /// Implemented here by StringHashMapUnmanaged
-  mapping: std.StringHashMapUnmanaged(Value),
+pub const Node = struct {
+  pub const Id = u32;
+  pub const Kind = union(enum) {
+    null_,
+    boolean,
+    string,
+    number,
+    sequence: ?Id,
+    mapping: ?Id,
+    keyvalue: struct { key: Id, value: Id },
+  };
+
+  /// IDs are arbitrary, but should be deterministic.
+  id: Id,
+  kind: Kind,
+  /// Refers to string slice in Document.source
+  span: Span,
+
+  /// Indicates "next" value when inside a sequence/mapping.
+  /// Null indicates this node is a terminal.
+  next_sibling: ?Id = null,
 };
 
-const Source = struct {
-  format: Format,
-  raw: []const u8,
-  tokens: []Token,
-  // Abstract tokens?
-};
-
-const Token = struct {
-  kind: Format,
-  span: Span
-};
-
-const Span = struct {
-  start: usize,
-  end: usize,
-};
+format: Format,
+root: Node.Id,
+nodes: []Node,
+source: []const u8,
