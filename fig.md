@@ -36,3 +36,7 @@ Out of scope:
 - Many advanced config language features
 - References
 - Multi-document files
+
+***
+
+License: Either MIT or Apache 2.0
