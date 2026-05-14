@@ -13,9 +13,7 @@ pub fn Token(comptime KindType: type) type {
     const Self = @This();
 
     pub const Kind = KindType;
-    pub const Id = u32;
 
-    id: Id,
     kind: Kind,
     span: Span,
 

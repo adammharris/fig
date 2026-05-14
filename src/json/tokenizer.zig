@@ -142,6 +142,7 @@ const Tokenizer = struct {
 
   /// Checks if the index is on a given sequence of characters.
   fn matches(self: *const Tokenizer, str: []const u8) bool {
+    // TODO: can read out of bounds in `matches()` for truncated literals like `tru`, `fals`, or `n`. Check `self.index + str.len <= self.str.len` before indexing.
     var local_index = self.index;
     for (str) |c| {
       if (self.str[local_index] != c) return false;
@@ -182,6 +183,8 @@ const Tokenizer = struct {
           return .init(.string, .init(start, end));
         },
         '\\' => {
+          //TODO: accepts invalid escapes like `\x`, raw
+          // newlines/control bytes, and incomplete `\u` escapes
           self.index += 1; // skip backslash
           if (self.char() == null) return error.UnclosedString;
           self.index += 1; // skip escaped character
@@ -196,6 +199,7 @@ const Tokenizer = struct {
   /// Negative, decimal, exponent
   /// Checks for leading zero as well.
   fn number(self: *Tokenizer) TokenizeError!Token {
+    // TODO: accepts several invalid JSON numbers: `-`, `-.2`, `1.`, `1e+`; it also accepts `-012` but rejects valid forms like `0e1`. Number scanning needs a stricter grammar: optional `-`, integer part, optional fraction with at least one digit, optional exponent with optional sign and at least one digit.
     const start = self.index;
 
     var isDecimal = false;
@@ -274,6 +278,7 @@ const Tokenizer = struct {
   /// Collects all bytes until arriving at a newline
   /// Never returns null, but can be empty
   fn comment(self: *Tokenizer) TokenizeError!Token {
+    //TODO: treats any `/` as a JSONC line comment and skips two bytes without confirming the second byte is `/`. Bare `/` can produce a span past the input length.
     // Comments are not supported in the canonical JSON format
     if (self.kind == JsonFormat.JSON) return error.UnexpectedSlash;
     const start = self.index;

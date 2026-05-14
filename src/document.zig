@@ -8,7 +8,7 @@ const Document = @This();
 const std = @import("std");
 const Span = @import("util/span.zig");
 
-const Format = union(enum) {
+pub const Format = union(enum) {
     json: @import("json/json.zig").JsonFormat,
     // TODO: support more formats
     // yaml: YamlFormat,
@@ -35,7 +35,7 @@ pub const Node = struct {
   span: Span,
 
   /// Indicates "next" value when inside a sequence/mapping.
-  /// Null indicates this node is a terminal.
+  /// Null indicates that this is the last node in the sequence/mapping.
   next_sibling: ?Id = null,
 };
 
