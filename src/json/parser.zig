@@ -6,18 +6,15 @@ const Document = @import("../document.zig");
 const testing = std.testing;
 const log = std.log.scoped(.parser);
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const JsonFormat = @import("json.zig");
-
-// TODO: This file is WIP and does not yet compile
-//
-
-
+const json = @import("json.zig");
+const Span = @import("../util/span.zig");
 
 const Parser = struct {
+  const ContainerKind = enum { array, object };
   /// Either an array or object in the process of being parsed.
   const OpenContainer = struct {
     id: Document.Node.Id,
-    kind: enum { array, object },
+    kind: ContainerKind,
     first_child: ?Document.Node.Id = null,
     last_child: ?Document.Node.Id = null,
     pending_key: ?Document.Node.Id = null,
@@ -28,6 +25,8 @@ const Parser = struct {
   state: State = .ExpectValue,
   nodes: std.ArrayList(Document.Node) = .empty,
   container_stack: std.ArrayList(OpenContainer) = .empty,
+
+  root: ?Document.Node.Id = null,
 
   // Initial fields
   allocator: std.mem.Allocator,
@@ -57,32 +56,32 @@ const Parser = struct {
   };
 
   /// Expects "true" or "false", translates to boolean
-  pub fn getBool(json: []const u8) ParseError!bool {
-    if (std.mem.eql(json, "true")) return true;
-    if (std.mem.eql(json, "false")) return false;
-    log.err("Tried to parse invalid value as boolean: `{s}`", .{json});
+  pub fn getBool(slice: []const u8) ParseError!bool {
+    if (std.mem.eql(slice, "true")) return true;
+    if (std.mem.eql(slice, "false")) return false;
+    log.err("Tried to parse invalid value as boolean: `{s}`", .{slice});
     return .InvalidBool;
   }
 
   /// Simply removes double quotes from a JSON string.
-  pub fn getString(json: []const u8) ParseError![]const u8 {
+  pub fn getString(slice: []const u8) ParseError![]const u8 {
     // Loop through string.
     var isValid = false;
-    for (json, 0..) |char, index| {
+    for (slice, 0..) |char, index| {
       // If string doesn't start with a double quote, it is invalid.
       if (index == 0 and char != '"') break;
       // Check if any middle characters are double quotes.
       if (char == '"' and index != 0 and index != 1) {
         // OK if they are escaped.
-        if (json[index - 1] == '\\' and json[index - 2] != '\\') continue;
+        if (slice[index - 1] == '\\' and slice[index - 2] != '\\') continue;
         // If not escaped, json is invalid.
         break;
       }
       // String needs to end with a double quote
-      if (index == json.len - 1 and json[index] == '"') isValid = true;
+      if (index == slice.len - 1 and slice[index] == '"') isValid = true;
     }
-    if (isValid) return json[1..json.len - 1];
-    log.err("Tried to parse invalid value as string: `{s}`", .{json});
+    if (isValid) return slice[1..slice.len - 1];
+    log.err("Tried to parse invalid value as string: `{s}`", .{slice});
     return .UnclosedString;
   }
 
@@ -100,13 +99,13 @@ const Parser = struct {
   };
 
   /// Returns lossless struct representation of a number
-  pub fn getNumber(json: []const u8) ParseError!Number {
+  pub fn getNumber(slice: []const u8) ParseError!Number {
     var numDots = 0;
-    for (json) |char| {
+    for (slice) |char| {
       if (char == '.') numDots += 1;
     }
     return .{
-      .raw = json,
+      .raw = slice,
       .kind = switch (numDots) {
         0 => .Integer,
         1 => .Float,
@@ -115,10 +114,10 @@ const Parser = struct {
     };
   }
 
-  pub fn parse(self: *Parser, input: []const u8, kind: JsonFormat) ParseError!Document {
+  pub fn parse(self: *Parser, input: []const u8, kind: json.JsonFormat) !Document {
     // A document needs format, slice of nodes, root node ID, and source text.
-    // const source = input;
-    // const format = Document.Format(kind);
+    const source = input;
+    const format: Document.Format = .{ .json = kind };
 
     var tokenizer: Tokenizer = .{
       .allocator = self.allocator,
@@ -126,16 +125,14 @@ const Parser = struct {
       .kind = kind,
     };
 
-    const tokens = tokenizer.tokenize();
+    const tokens = try tokenizer.tokenize();
     defer self.allocator.free(tokens);
-
-    var iterator = tokens.iterator();
 
     // Each Document.Node has an id, a kind, a span, and a next_sibling ID.
     // We produce them from the tokens.
 
     //TODO: parse tokens
-    while (iterator.next()) |token| {
+    for (tokens) |token| {
       if (token.kind == .whitespace) continue;
       if (token.kind == .comment) continue;
 
@@ -144,28 +141,30 @@ const Parser = struct {
           // TODO: update state
           switch (token.kind) {
             .open_brace => {
-              self.addNode(.mapping, token.span);
+              const id = try self.addNode(.{ .mapping = null}, token.span);
+              try self.openContainer(.object, id);
               self.state = .ExpectObjectKeyOrEnd;
             },
             .open_bracket => {
-              self.addNode(.sequence, token.span);
+              const id = try self.addNode(.{ .sequence = null}, token.span);
+              try self.openContainer(.array, id);
               self.state = .ExpectArrayValueOrEnd;
             },
             .null_ => {
-              self.addNode(.null_, token.span);
-              self.state = self.nextStateAfterValue();
+              const id = try self.addNode(.null_, token.span);
+              try self.finishValue(id);
             },
             .true_, .false_ => {
-              self.addNode(.boolean, token.span);
-              self.state = self.nextStateAfterValue();
+              const id = try self.addNode(.boolean, token.span);
+              try self.finishValue(id);
             },
             .string => {
-              self.addNode(.string, token.span);
-              self.state = self.nextStateAfterValue();
+              const id = try self.addNode(.string, token.span);
+              try self.finishValue(id);
             },
             .number => {
-              self.addNumber(.number, token.span);
-              self.state = self.nextStateAfterValue();
+              const id = try self.addNode(.number, token.span);
+              try self.finishValue(id);
             },
             else => return ParseError.UnexpectedToken,
           }
@@ -173,26 +172,35 @@ const Parser = struct {
 
         .ExpectArrayValueOrEnd => {
           switch (token.kind) {
-            //.open_brace => self.addNode(.mapping, token.span),
-            .open_bracket => self.addNode(.sequence, token.span),
+            .open_bracket => {
+              const id = try self.addNode(.{ .sequence = null}, token.span);
+              try self.openContainer(.array, id);
+              self.state = .ExpectArrayValueOrEnd;
+            },
+            .open_brace => {
+              const id = try self.addNode(.{ .mapping = null }, token.span);
+              try self.openContainer(.object, id);
+              self.state = .ExpectObjectKeyOrEnd;
+            },
             .null_ => {
-              self.addNode(.null_, token.span);
-              self.state = .ExpectArrayCommaOrEnd;
+              const id = try self.addNode(.null_, token.span);
+              try self.finishValue(id);
             },
             .true_, .false_ => {
-              self.addNode(.boolean, token.span);
-              self.state = .ExpectArrayCommaOrEnd;
+              const id = try self.addNode(.boolean, token.span);
+              try self.finishValue(id);
             },
             .string => {
-              self.addNode(.string, token.span);
-              self.state = .ExpectArrayCommaOrEnd;
+              const id = try self.addNode(.string, token.span);
+              try self.finishValue(id);
             },
             .number => {
-              self.addNumber(.number, token.span);
-              self.state = .ExpectArrayCommaOrEnd;
+              const id = try self.addNode(.number, token.span);
+              try self.finishValue(id);
             },
             .close_bracket => {
-              // TODO: update span of node
+              const id = try self.closeContainer(token.span.end);
+              try self.finishValue(id);
             },
             else => return ParseError.UnexpectedToken,
           }
@@ -200,66 +208,75 @@ const Parser = struct {
         .ExpectArrayCommaOrEnd => {
           switch (token.kind) {
             .close_bracket => {
-              // TODO: update span of beginning token
-              // TODO: check stack to know what state is next
+              const id = try self.closeContainer(token.span.end);
+              try self.finishValue(id);
             },
             .comma => {
               self.state = .ExpectValue;
             },
-            else => return ParseError.UnexpectedToken
+            else => return ParseError.UnexpectedToken,
           }
         },
 
         .ExpectObjectKeyOrEnd => {
-          .string => {
-            const id = try self.addNode(.string, token.span);
-            try self.finishValue(id);
-          },
-          .close_brace => self.addNode(.mapping, token.span),
-          else => return ParseError.UnexpectedToken
+          switch (token.kind) {
+            .string => {
+              const key_id = try self.addNode(.string, token.span);
+              const parent = &self.container_stack.items[self.container_stack.items.len - 1];
+              parent.pending_key = key_id;
+              self.state = .ExpectObjectColon;
+            },
+            .close_brace => {
+              const id = try self.closeContainer(token.span.end);
+              try self.finishValue(id);
+            },
+            else => return ParseError.UnexpectedToken,
+          }
         },
         .ExpectObjectColon => {
           switch (token.kind) {
             .colon => {
-              // TODO: change state to ExpectObjectValue
+              self.state = .ExpectObjectValue;
             },
-            else => return ParseError.UnexpectedToken
+            else => return ParseError.UnexpectedToken,
           }
         },
         .ExpectObjectValue => {
           switch (token.kind) {
             .open_brace => {
-              self.addNode(.{.mapping = null}, token.span);
+              const id = try self.addNode(.{ .mapping = null}, token.span);
+              try self.openContainer(.object, id);
               self.state = .ExpectObjectKeyOrEnd;
             },
             .open_bracket => {
-              self.addNode(.sequence, token.span);
+              const id = try self.addNode(.{ .sequence = null}, token.span);
+              try self.openContainer(.array, id);
               self.state = .ExpectArrayValueOrEnd;
             },
             .null_ => {
-              self.addNode(.null_, token.span);
-              self.state = .ExpectObjectCommaOrEnd;
+              const id = try self.addNode(.null_, token.span);
+              try self.finishValue(id);
             },
             .true_, .false_ => {
-              self.addNode(.boolean, token.span);
-              self.state = .ExpectObjectCommaOrEnd;
+              const id = try self.addNode(.boolean, token.span);
+              try self.finishValue(id);
             },
             .string => {
-              self.addNode(.string, token.span);
-              self.state = .ExpectObjectCommaOrEnd;
+              const id = try self.addNode(.string, token.span);
+              try self.finishValue(id);
             },
             .number => {
-              self.addNumber(.number, token.span);
-              self.state = .ExpectObjectCommaOrEnd;
-            }
+              const id = try self.addNode(.number, token.span);
+              try self.finishValue(id);
+            },
             else => return ParseError.UnexpectedToken,
           }
         },
         .ExpectObjectCommaOrEnd => {
           switch (token.kind) {
             .close_brace => {
-              // TODO: update span of beginning token
-              // TODO: check stack to know what state is next
+              const id = try self.closeContainer(token.span.end);
+              try self.finishValue(id);
             },
             .comma => {
               self.state = .ExpectObjectKeyOrEnd; // TODO: allow trailing comma?
@@ -269,15 +286,28 @@ const Parser = struct {
         },
 
         .ExpectEndOfFile => {
-          // TODO: end
+          switch (token.kind) {
+            .end_of_file => continue,
+            else => return ParseError.UnexpectedToken,
+          }
         },
       }
 
     }
+
+    // while loop completed.
+    // Ready to return a Document!
+    return .{
+      .source = source,
+      .format = format,
+      .root = self.nodes.items[0].id,
+      .nodes = try self.nodes.toOwnedSlice(self.allocator),
+    };
   }
 
   pub fn deinit(self: *Parser) void {
-    self.allocator.free(self.nodes);
+    self.container_stack.deinit(self.allocator);
+    self.nodes.deinit(self.allocator);
   }
 
   // ===============
@@ -297,19 +327,17 @@ const Parser = struct {
   }
 
   /// Attaches a completed child to the current open container.
-  fn attachChild(self: *Parser, child_id: Document.Node.Id) !void {
-    // TODO: attach directly if array, attach completed keyvalues if object
-  }
-
-  fn nextStateAfterValue(self: *Parser) ParseState {
-    if (self.frames.items.len == 0) {
-      return .ExpectEndOfFile;
-    },
-
-    return switch (self.frames.items[self.frames.items.len - 1]) {
-      .array => .ExpectArrayCommaOrEnd,
-      .object => .ExpectObjectCommaOrEnd,
-    },
+  fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id) void {
+    if (parent.first_child != null) {
+      self.nodes.items[parent.last_child.?].next_sibling = child_id;
+    } else {
+      parent.first_child = child_id;
+      switch (parent.kind) {
+        .array => self.nodes.items[parent.id].kind = .{ .sequence = child_id },
+        .object => self.nodes.items[parent.id].kind = .{ .mapping = child_id },
+      }
+    }
+    parent.last_child = child_id;
   }
 
   fn finishValue(self: *Parser, value_id: Document.Node.Id) !void {
@@ -324,7 +352,7 @@ const Parser = struct {
 
     switch (parent.kind) {
       .array => {
-        try self.attachChildToOpenContainer(parent, value_id);
+        self.attachChild(parent, value_id);
         self.state = .ExpectArrayCommaOrEnd;
       },
       .object => {
@@ -342,13 +370,26 @@ const Parser = struct {
             .end = value_span.end,
         });
 
-        try self.attachChildToOpenContainer(parent, pair_id);
+        self.attachChild(parent, pair_id);
         self.state = .ExpectObjectCommaOrEnd;
       },
     }
   }
 
+  /// Pushes stack metadata for a container node that already exists in self.nodes
+  fn openContainer(self: *Parser, kind: ContainerKind, node_id: Document.Node.Id) !void {
+    try self.container_stack.append(self.allocator, .{
+      .id = node_id,
+      .kind = kind,
+    });
+  }
 
+  /// Pops the current container, patches its node span end, and returns the node ID
+  fn closeContainer(self: *Parser, span_end: usize) !Document.Node.Id {
+    if (self.container_stack.items.len == 0) return ParseError.UnexpectedToken;
+    const container = self.container_stack.pop().?;
+    self.nodes.items[container.id].span.end = span_end;
+    return container.id;
   }
 };
 
@@ -358,9 +399,11 @@ const Parser = struct {
 
 fn testParser(input: []const u8, expected: Document) !void {
   var parser: Parser = .{ .allocator = testing.allocator, };
-  const doc = try parser.parse(input, .JSON);
   defer parser.deinit();
-  try testing.expectEqualDocument(expected, doc);
+
+  const doc = try parser.parse(input, json.JsonFormat.JSON);
+  defer testing.allocator.free(doc.nodes);
+  try expectEqualDocument(expected, doc);
 }
 
 fn expectEqualDocument(expected: Document, actual: Document) !void {
@@ -385,37 +428,37 @@ test "simple JSON document" {
       .format = .{ .json = .JSON },
       .root = 0,
       .source = \\[{"hello":"world"}]
-      , .nodes = [_]Document.Node {
+      , .nodes = &[_]Document.Node{
         .{
           .id = 0,
-          .kind = .sequence(.Id(1)),
+          .kind = .{ .sequence = 1 },
           .span = .{ .start = 0, .end = 19 },
           .next_sibling = null
         },
         .{
           .id = 1,
-          .kind = .mapping(.Id(2)),
+          .kind = .{ .mapping = 4 },
           .span = .{ .start = 1, .end = 18 },
           .next_sibling = null,
         },
         .{
           .id = 2,
-          .kind = .keyvalue(.{ .key = 3, .value = 4}),
-          .span = .{ .start = 2, .end = 17 },
-          .next_sibling = null,
-        },
-        .{
-          .id = 3,
           .kind = .string,
           .span = .{ .start = 2, .end = 9 },
           .next_sibling = null,
         },
         .{
-          .id = 4,
+          .id = 3,
           .kind = .string,
           .span = .{ .start = 10, .end = 17 },
           .next_sibling = null,
-        }
+        },
+        .{
+          .id = 4,
+          .kind = .{ .keyvalue = .{ .key = 2, .value = 3} },
+          .span = .{ .start = 2, .end = 17 },
+          .next_sibling = null,
+        },
       }
     }
   );

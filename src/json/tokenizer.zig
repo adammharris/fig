@@ -60,7 +60,7 @@ const TokenizeError = error{
 };
 
 
-const Tokenizer = struct {
+pub const Tokenizer = struct {
   // State
   tokens: std.ArrayList(Token) = .empty,
   index: usize = 0,

@@ -41,5 +41,5 @@ pub const Node = struct {
 
 format: Format,
 root: Node.Id,
-nodes: []Node,
+nodes: []const Node,
 source: []const u8,
