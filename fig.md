@@ -41,4 +41,4 @@ Out of scope:
 
 ***
 
-License: Either MIT or Apache 2.0, at your discretion
+**License**: Not licensed for now. Please contact me at amh421@icloud.com if you would like to use this code in your work!

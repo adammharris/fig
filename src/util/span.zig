@@ -10,3 +10,7 @@ pub fn init(start: usize, end: usize) Span {
 pub fn len(self: Span) usize {
     return self.end - self.start;
 }
+
+pub fn equals(self: Span, other: Span) bool {
+  return self.start == other.start and self.end == other.end;
+}

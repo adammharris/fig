@@ -9,7 +9,7 @@ const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const json = @import("json.zig");
 const Span = @import("../util/span.zig");
 
-const Parser = struct {
+pub const Parser = struct {
   const ContainerKind = enum { array, object };
   /// Either an array or object in the process of being parsed.
   const OpenContainer = struct {
@@ -403,21 +403,7 @@ fn testParser(input: []const u8, expected: Document) !void {
 
   const doc = try parser.parse(input, json.JsonFormat.JSON);
   defer testing.allocator.free(doc.nodes);
-  try expectEqualDocument(expected, doc);
-}
-
-fn expectEqualDocument(expected: Document, actual: Document) !void {
-  try testing.expectEqual(expected.format, actual.format);
-  try testing.expectEqual(expected.root, actual.root);
-  try testing.expectEqualStrings(expected.source, actual.source);
-  try testing.expectEqual(expected.nodes.len, actual.nodes.len);
-
-  for (expected.nodes, actual.nodes, 0..) |expected_node, actual_node, i| {
-    errdefer std.log.err("node {d}: expected {any}, actual {any}", .{
-      i, expected_node, actual_node,
-    });
-    try testing.expectEqual(expected_node, actual_node);
-  }
+  try testing.expect(expected.equals(doc));
 }
 
 

@@ -8,4 +8,5 @@ pub fn add(a: i32, b: i32) i32 {
 test {
   _ = @import("json/tokenizer.zig");
   _ = @import("json/parser.zig");
+  _ = @import("editor.zig");
 }
