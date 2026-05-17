@@ -3,19 +3,6 @@ const std = @import("std");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
 const json = @import("json/json.zig");
-const JsonParser = @import("json/parser.zig").Parser;
-
-pub const JsonLanguage = struct {
-  pub const Parser = JsonParser;
-  pub const Format = json.JsonFormat;
-  pub const default_format: Format = .JSON;
-
-  pub fn parse(parser: *Parser, input: []const u8, format: Format) !Document {
-    return parser.parse(input, format);
-  }
-};
-
-pub const JsonEditor = Editor(JsonLanguage);
 
 pub fn Editor(comptime Language: type) type {
   return struct {
@@ -24,7 +11,7 @@ pub fn Editor(comptime Language: type) type {
     allocator: std.mem.Allocator,
     source: std.ArrayList(u8) = .empty,
     document: ?Document = null,
-    format: Language.Format = Language.default_format,
+    format: Language.Type = Language.default_type,
 
     pub fn init(self: *Self, input: []const u8) !void {
       if (self.source.items.len != 0 or self.document != null) return error.MultipleInit;
@@ -79,7 +66,7 @@ pub fn Editor(comptime Language: type) type {
 // =======
 
 fn testEditor(input: []const u8, span: Span, text: []const u8, expected: []const u8) !void {
-  var editor: JsonEditor = .{ .allocator = std.testing.allocator };
+  var editor: Editor(json.Language) = .{ .allocator = std.testing.allocator };
   try editor.init(input);
   defer editor.deinit();
   try editor.replaceNode(span, text);

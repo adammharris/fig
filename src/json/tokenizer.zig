@@ -1,7 +1,7 @@
 const std = @import("std");
 const log = std.log.scoped(.tokenizer);
 const testing = std.testing;
-const JsonFormat = @import("json.zig").JsonFormat;
+const JsonFormat = @import("json.zig").Language.Type;
 const Span = @import("../util/span.zig");
 
 pub const Token = @import("../token.zig").Token(Kind);
