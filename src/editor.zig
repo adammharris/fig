@@ -87,7 +87,7 @@ pub fn Editor(comptime Language: type) type {
 // TESTING
 // =======
 
-fn testEditor(input: []const u8, path: []const Document.PathSegment, text: []const u8, expected: []const u8, key_or_val: enum { key, val }) !void {
+fn testEditor(input: []const u8, path: []const Document.PathSegment, key_or_val: enum { key, val }, text: []const u8, expected: []const u8) !void {
   var editor: Editor(json.Language) = .{ .allocator = std.testing.allocator };
   try editor.init(input);
   defer editor.deinit();
@@ -105,9 +105,8 @@ test "simple value edit" {
   try testEditor(
     "[{\"hello\":\"world\"}]",
     &[_]Document.PathSegment{ .{ .index = 0 }, .{ .key = "\"hello\""} },
-    "\"person!\"",
+     .val, "\"person!\"",
     "[{\"hello\":\"person!\"}]",
-    .val
   );
 }
 
@@ -115,8 +114,7 @@ test "simple key edit" {
   try testEditor(
     "[{\"hello\":\"world\"}]",
     &[_]Document.PathSegment{ .{ .index = 0 }, .{ .key = "\"hello\""} },
-    "\"greetings\"",
-    "[{\"greetings\":\"world\"}]",
-    .key
+    .key, "\"greetings\"",
+    "[{\"greetings\":\"world\"}]"
   );
 }
