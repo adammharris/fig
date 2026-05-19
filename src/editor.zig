@@ -18,6 +18,13 @@ pub fn Editor(comptime Language: type) type {
     document: ?Document = null,
     format: Language.Type = Language.default_type,
 
+    fn getDoc(self: *const Self) !Document {
+      return self.document orelse {
+        log.err("Not initialized!", .{});
+        return error.NotInitialized;
+      };
+    }
+
     pub fn init(self: *Self, input: []const u8) !void {
       if (self.source.items.len != 0 or self.document != null) return error.MultipleInit;
       try self.source.appendSlice(self.allocator, input);
@@ -30,14 +37,16 @@ pub fn Editor(comptime Language: type) type {
       try self.reparse();
     }
 
-    pub fn replaceAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
-      if (self.document) |doc| {
-        const span = (try doc.getNode(path)).span;
-        try self.replaceAtSpan(span, replacement);
-      } else {
-        log.err("Not initialized!", .{});
-        return error.NotInitialized;
-      }
+    pub fn replaceValAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
+      const doc = try self.getDoc();
+      const span = (try doc.getNodeVal(path)).span;
+      try self.replaceAtSpan(span, replacement);
+    }
+
+    pub fn replaceKeyAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
+      const doc = try self.getDoc();
+      const span = (try doc.getNodeKey(path)).span;
+      try self.replaceAtSpan(span, replacement);
     }
 
     /// Replace a span of bytes with a new span of bytes.
@@ -78,19 +87,36 @@ pub fn Editor(comptime Language: type) type {
 // TESTING
 // =======
 
-fn testEditor(input: []const u8, path: []const Document.PathSegment, text: []const u8, expected: []const u8) !void {
+fn testEditor(input: []const u8, path: []const Document.PathSegment, text: []const u8, expected: []const u8, key_or_val: enum { key, val }) !void {
   var editor: Editor(json.Language) = .{ .allocator = std.testing.allocator };
   try editor.init(input);
   defer editor.deinit();
-  try editor.replaceAtPath(path, text);
-  try std.testing.expect(std.mem.eql(u8, expected, editor.document.?.source));
+  switch (key_or_val) {
+    .key => try editor.replaceKeyAtPath(path, text),
+    .val => try editor.replaceValAtPath(path, text),
+  }
+  const actual = editor.document.?.source;
+  errdefer log.err("actual: {s}", .{actual});
+  errdefer log.err("expected: {s}", .{expected});
+  try std.testing.expect(std.mem.eql(u8, expected, actual));
 }
 
-test "simple edit" {
+test "simple value edit" {
   try testEditor(
     "[{\"hello\":\"world\"}]",
-    &[_]Document.PathSegment{ .{ .index = 0 }, .{ .field = "\"hello\""} },
+    &[_]Document.PathSegment{ .{ .index = 0 }, .{ .key = "\"hello\""} },
     "\"person!\"",
     "[{\"hello\":\"person!\"}]",
+    .val
+  );
+}
+
+test "simple key edit" {
+  try testEditor(
+    "[{\"hello\":\"world\"}]",
+    &[_]Document.PathSegment{ .{ .index = 0 }, .{ .key = "\"hello\""} },
+    "\"greetings\"",
+    "[{\"greetings\":\"world\"}]",
+    .key
   );
 }

@@ -6,10 +6,15 @@ const Document = @This();
 const std = @import("std");
 const Span = @import("util/span.zig");
 
+/// Represents a unit of data in a document.
+/// Has an ID, a kind, and a span.
 pub const Node = struct {
+  /// Node.Ids are arbitrary, but should be deterministic.
   pub const Id = u32;
+  /// Can be terminal: null, bool, string, number.
+  /// Or point to other nodes: sequence, mapping, keyvalue.
   pub const Kind = union(enum) {
-    // TODO: trivia,
+    // TODO?: trivia,
     null_,
     boolean,
     string,
@@ -32,7 +37,7 @@ pub const Node = struct {
     }
   };
 
-  /// IDs are arbitrary, but should be deterministic.
+  /// Should guarantee that document.nodes[node.id] == node
   id: Id,
   kind: Kind,
   /// Refers to string slice in Document.source
@@ -50,11 +55,15 @@ pub const Node = struct {
   }
 };
 
+/// Usually equal to 0 (so that self.nodes[0] == root node)
+/// Points to first sequence/mapping that contains all other nodes.
 root: Node.Id,
+/// Complete node tree. Accessed by node id: self.nodes[node_id] = node
 nodes: []const Node,
+/// Plaintext document, to ground nodes in original truth
 source: []const u8,
 
-/// function to tell if two documents are equal
+/// Function to tell if two documents are equal.
 pub fn equals(self: Document, b: Document) bool {
   if (self.root != b.root) return false;
   //if (!std.mem.eql(u8, self.source, b.source)) return false;
@@ -73,22 +82,43 @@ pub fn deinit(self: Document, allocator: std.mem.Allocator) void {
 // Document Path Helpers
 
 /// Represents part of a path in the Document structure.
-/// Elements can only be nested in either mappings or
+/// Nodes can only be nested in either mappings or sequences.
 pub const PathSegment = union(enum) {
-  field: []const u8,
+  key: []const u8,
   index: usize,
 };
 
 // Used like:
 // &[_]Document.PathSegment{
 //   .{ .index = 0 },
-//   .{ .field = "hello" }
+//   .{ .key = "hello" }
 // }
 
+/// Get a node by path.
+/// Can return a keyvalue node that should be deconstructed.
 pub fn getNode(self: *const Document, path: []const PathSegment) !Node {
   return self.nodes[try self.getId(path)];
 }
 
+/// Same as getNode, but if a keyvalue is found, always returns key
+pub fn getNodeKey(self: *const Document, path: []const PathSegment) !Node {
+  const node = self.nodes[try self.getId(path)];
+  if (std.meta.activeTag(node.kind) == .keyvalue) {
+    return self.nodes[node.kind.keyvalue.key];
+  }
+  return node;
+}
+
+/// Same as getNode, but if a keyvalue is found, always returns value
+pub fn getNodeVal(self: *const Document, path: []const PathSegment) !Node {
+  const node = self.nodes[try self.getId(path)];
+  if (std.meta.activeTag(node.kind) == .keyvalue) {
+    return self.nodes[node.kind.keyvalue.value];
+  }
+  return node;
+}
+
+/// Takes a PathSegment array and runs getChildNodeId for each one.
 fn getId(self: *const Document, path: []const PathSegment) !Node.Id {
   var current_node = self.root;
   for (path) |segment| {
@@ -97,21 +127,23 @@ fn getId(self: *const Document, path: []const PathSegment) !Node.Id {
   return current_node;
 }
 
+/// Traverses down node tree according to segment
+/// Can return keyvalue node that must be deconstructed.
 fn getChildNodeId(self: *const Document, parent_id: Node.Id, segment: PathSegment) !Node.Id {
   var current_node = parent_id;
   switch (segment) {
-    .field => {
+    .key => {
       // node is a mapping. Find the first child keyvalue
       current_node = self.nodes[current_node].kind.mapping orelse return error.NotFound;
       // Loop through keyvalue siblings to find matching key
       while (true) {
         const span = self.nodes[self.nodes[current_node].kind.keyvalue.key].span;
         const node_key = self.source[span.start..span.end];
-        if (std.mem.eql(u8, segment.field, node_key)) break;
+        if (std.mem.eql(u8, segment.key, node_key)) break;
         current_node = self.nodes[current_node].next_sibling orelse return error.NotFound;
       }
       // We found the right keyvalue node! Return the value node
-      return self.nodes[current_node].kind.keyvalue.value;
+      return current_node;
     },
     .index => {
       // node is a sequence. Find first value.
