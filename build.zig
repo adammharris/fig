@@ -43,6 +43,10 @@ pub fn build(b: *std.Build) void {
         .filters = test_filters,
     });
 
+    const install_mod_tests = b.addInstallArtifact(mod_tests, .{
+        .dest_sub_path = "fig-tests",
+    });
+
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
@@ -56,4 +60,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    const install_tests_step = b.step("install-tests", "Install test executables for debugging");
+    install_tests_step.dependOn(&install_mod_tests.step);
 }

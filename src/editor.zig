@@ -1,10 +1,15 @@
+//! Editor module, generic over Language.
+//! TODO: make API accessible via object notation instead of spans
+
 const std = @import("std");
 
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
 const json = @import("json/json.zig");
+const log = std.log.scoped(.editor);
 
 pub fn Editor(comptime Language: type) type {
+  @import("language.zig").validate(Language);
   return struct {
     const Self = @This();
 
@@ -20,9 +25,19 @@ pub fn Editor(comptime Language: type) type {
     }
 
     /// Replace a span with a new span. Keeps self.document valid if parsing succeeds.
-    pub fn replaceNode(self: *Self, span: Span, text: []const u8) !void {
-      try self.replaceSource(span, text);
+    pub fn replaceAtSpan(self: *Self, span: Span, replacement: []const u8) !void {
+      try self.replaceSource(span, replacement);
       try self.reparse();
+    }
+
+    pub fn replaceAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
+      if (self.document) |doc| {
+        const span = (try doc.getNode(path)).span;
+        try self.replaceAtSpan(span, replacement);
+      } else {
+        log.err("Not initialized!", .{});
+        return error.NotInitialized;
+      }
     }
 
     /// Replace a span of bytes with a new span of bytes.
@@ -42,9 +57,7 @@ pub fn Editor(comptime Language: type) type {
     }
 
     fn parseSource(self: *Self) !Document {
-      var parser: Language.Parser = .{ .allocator = self.allocator };
-      defer parser.deinit();
-      return Language.parse(&parser, self.source.items, self.format);
+      return Language.Parser.parse(self.allocator, self.source.items, self.format);
     }
 
     fn freeDocument(self: *Self) void {
@@ -65,19 +78,19 @@ pub fn Editor(comptime Language: type) type {
 // TESTING
 // =======
 
-fn testEditor(input: []const u8, span: Span, text: []const u8, expected: []const u8) !void {
+fn testEditor(input: []const u8, path: []const Document.PathSegment, text: []const u8, expected: []const u8) !void {
   var editor: Editor(json.Language) = .{ .allocator = std.testing.allocator };
   try editor.init(input);
   defer editor.deinit();
-  try editor.replaceNode(span, text);
+  try editor.replaceAtPath(path, text);
   try std.testing.expect(std.mem.eql(u8, expected, editor.document.?.source));
 }
 
 test "simple edit" {
   try testEditor(
     "[{\"hello\":\"world\"}]",
-    .{ .start = 11, .end = 16 },
-    "person!",
+    &[_]Document.PathSegment{ .{ .index = 0 }, .{ .field = "\"hello\""} },
+    "\"person!\"",
     "[{\"hello\":\"person!\"}]",
   );
 }

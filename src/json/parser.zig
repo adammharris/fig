@@ -115,7 +115,13 @@ pub fn getNumber(slice: []const u8) ParseError!Number {
   };
 }
 
-pub fn parse(self: *Parser, input: []const u8, kind: Type) !Document {
+pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
+  var parser: Parser = .{ .allocator = allocator };
+  defer parser.deinit();
+  return parser.parse_once(input, format);
+}
+
+fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
   // A document needs format, slice of nodes, root node ID, and source text.
   const source = input;
 
@@ -297,10 +303,12 @@ pub fn parse(self: *Parser, input: []const u8, kind: Type) !Document {
 
   // while loop completed.
   // Ready to return a Document!
+  const nodes = try self.nodes.toOwnedSlice(self.allocator);
+  self.nodes = .empty;
   return .{
     .source = source,
-    .root = self.nodes.items[0].id,
-    .nodes = try self.nodes.toOwnedSlice(self.allocator),
+    .root = nodes[0].id,
+    .nodes = nodes,
   };
 }
 
@@ -396,11 +404,8 @@ fn closeContainer(self: *Parser, span_end: usize) !Document.Node.Id {
 // =======
 
 fn testParser(input: []const u8, expected: Document) !void {
-  var parser: Parser = .{ .allocator = testing.allocator, };
-  defer parser.deinit();
-
-  const doc = try parser.parse(input, .JSON);
-  defer testing.allocator.free(doc.nodes);
+  const doc = try Parser.parse(testing.allocator, input, .JSON);
+  defer doc.deinit(testing.allocator);
   try testing.expect(expected.equals(doc));
 }
 

@@ -65,3 +65,61 @@ pub fn equals(self: Document, b: Document) bool {
   }
   return true;
 }
+
+pub fn deinit(self: Document, allocator: std.mem.Allocator) void {
+  allocator.free(self.nodes);
+}
+
+// Document Path Helpers
+
+/// Represents part of a path in the Document structure.
+/// Elements can only be nested in either mappings or
+pub const PathSegment = union(enum) {
+  field: []const u8,
+  index: usize,
+};
+
+// Used like:
+// &[_]Document.PathSegment{
+//   .{ .index = 0 },
+//   .{ .field = "hello" }
+// }
+
+pub fn getNode(self: *const Document, path: []const PathSegment) !Node {
+  return self.nodes[try self.getId(path)];
+}
+
+fn getId(self: *const Document, path: []const PathSegment) !Node.Id {
+  var current_node = self.root;
+  for (path) |segment| {
+    current_node = try self.getChildNodeId(current_node, segment);
+  }
+  return current_node;
+}
+
+fn getChildNodeId(self: *const Document, parent_id: Node.Id, segment: PathSegment) !Node.Id {
+  var current_node = parent_id;
+  switch (segment) {
+    .field => {
+      // node is a mapping. Find the first child keyvalue
+      current_node = self.nodes[current_node].kind.mapping orelse return error.NotFound;
+      // Loop through keyvalue siblings to find matching key
+      while (true) {
+        const span = self.nodes[self.nodes[current_node].kind.keyvalue.key].span;
+        const node_key = self.source[span.start..span.end];
+        if (std.mem.eql(u8, segment.field, node_key)) break;
+        current_node = self.nodes[current_node].next_sibling orelse return error.NotFound;
+      }
+      // We found the right keyvalue node! Return the value node
+      return self.nodes[current_node].kind.keyvalue.value;
+    },
+    .index => {
+      // node is a sequence. Find first value.
+      current_node = self.nodes[current_node].kind.sequence orelse return error.NotFound;
+      for (0..segment.index) |_| {
+        current_node = self.nodes[current_node].next_sibling orelse return error.NotFound;
+      }
+      return current_node;
+    }
+  }
+}
