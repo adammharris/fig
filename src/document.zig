@@ -53,6 +53,37 @@ pub const Node = struct {
     if (!self.kind.equals(other.kind)) return false;
     return true;
   }
+  pub fn dump(self: *const Node, writer: *std.Io.Writer, source: []const u8, depth: usize, nodes: []const Node) !void {
+    for (0..depth) |_| { try writer.print(" ", .{}); }
+    switch (self.kind) {
+      .null_ => try writer.writeAll("null\n"),
+      .boolean => try writer.print("bool={s}\n", .{source[self.span.start..self.span.end]}),
+      .string => try writer.print("string={s}\n", .{source[self.span.start..self.span.end]}),
+      .number => try writer.print("number={s}\n", .{source[self.span.start..self.span.end]}),
+      .sequence => |child| {
+        try writer.print("sequence\n", .{});
+        if (child) |c| {
+          try nodes[c].dump(writer, source, depth+1, nodes);
+        }
+      },
+      .mapping => |child| {
+        try writer.print("mapping\n", .{});
+        if (child) |c| {
+          try nodes[c].dump(writer, source, depth+1, nodes);
+        }
+      },
+      .keyvalue => |kv| {
+        try writer.print("key:\n", .{});
+        try nodes[kv.key].dump(writer, source, depth+1, nodes);
+        for (0..depth) |_| { try writer.print(" ", .{}); }
+        try writer.print("value:\n", .{});
+        try nodes[kv.value].dump(writer, source, depth+1, nodes);
+      }
+    }
+    if (self.next_sibling) |ns| {
+      try nodes[ns].dump(writer, source, depth, nodes);
+    }
+  }
 };
 
 /// Usually equal to 0 (so that self.nodes[0] == root node)
@@ -154,4 +185,9 @@ fn getChildNodeId(self: *const Document, parent_id: Node.Id, segment: PathSegmen
       return current_node;
     }
   }
+}
+
+pub fn dump(self: *const Document, writer: *std.Io.Writer) !void {
+  try self.nodes[self.root].dump(writer, self.source, 0, self.nodes);
+  try writer.flush();
 }

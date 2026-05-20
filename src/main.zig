@@ -20,7 +20,7 @@ const help_string =
 var current_file: []const u8 = "";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
-const max_size = 10 * 1024 * 1024; // 10 MB limit
+const max_size = Io.Limit.limited(10 * 1024 * 1024); // 10 MB limit
 
 const CliAction = enum {
   print, // default
@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
 	var stderr_buf: [512]u8 = undefined;
 	var stdout = Io.File.stdout().writer(io, &stdout_buf);
 	var stderr = Io.File.stdout().writer(io, &stderr_buf);
-	const stderr_terminal = std.Io.Terminal{ .writer = &stderr.interface, .mode = stderr_color_mode };
+	var stderr_terminal = std.Io.Terminal{ .writer = &stderr.interface, .mode = stderr_color_mode };
 	var stdout_terminal = std.Io.Terminal{ .writer = &stdout.interface, .mode = stdout_color_mode };
 
 	// Accessing command line arguments:
@@ -90,8 +90,8 @@ pub fn main(init: std.process.Init) !void {
 	// Now, act on config
 	if (config.show_help) {
 	// TODO: if config.action, show help for action
-	  try print(stderr_terminal, title_string);
-		try print(stderr_terminal, help_string);
+	  try print(&stderr_terminal, title_string);
+		try print(&stderr_terminal, help_string);
 		return;
 	}
 
@@ -130,27 +130,35 @@ pub fn main(init: std.process.Init) !void {
 
 	switch (config.action) {
   	.print => {
-      // Get file reader
-      var read_buffer: [4096]u8 = undefined;
-      var file_reader = input.reader(io, &read_buffer);
-      // Stream file contents
-      _ = file_reader.interface.streamRemaining(stdout_terminal.writer) catch |err| switch (err)  {
-        error.ReadFailed => return file_reader.err.?,
-        else => return err,
-      };
-      try stdout_terminal.writer.flush();
+      if (std.mem.endsWith(u8, config.file_path.?, ".json")) {
+        try printJsonDocument(arena, io, &stdout_terminal, input);
+      } else {
+        try print(&stderr_terminal, "Unsupported document type.\n");
+      }
     },
     .edit => {
-      try print(stderr_terminal, "Edits not supported yet!\n");
+      try print(&stderr_terminal, "Edits not supported yet!\n");
     }
 	}
 }
 
-fn print(term: Io.Terminal, str: []const u8) !void {
+fn print(term: *Io.Terminal, str: []const u8) !void {
 	const view = try std.unicode.Utf8View.init(str);
 	var iter = view.iterator();
 	while (iter.nextCodepoint()) |codepoint| {
 			try term.writer.print("{u}", .{codepoint});
 	}
 	try term.writer.flush();
+}
+
+fn printJsonDocument(allocator: std.mem.Allocator, io: Io, term: *Io.Terminal, file: Io.File) !void {
+  // Get file reader
+  var read_buffer: [4096]u8 = undefined;
+  var file_reader = file.reader(io, &read_buffer);
+  // Stream file contents
+  const content = try file_reader.interface.allocRemaining(allocator, max_size);
+  defer allocator.free(content);
+
+  const doc = try fig.Language.JSON.Parser.parse(allocator, content, .JSON);
+  try doc.dump(term.writer);
 }

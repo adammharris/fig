@@ -1,9 +1,10 @@
 //! By convention, root.zig is the root source file when making a package.
 const std = @import("std");
 
-pub fn add(a: i32, b: i32) i32 {
-    return a + b;
-}
+pub const Language = @import("language.zig");
+// TODO: Language.detect(file: []const u8);
+
+pub const Editor = @import("editor.zig").Editor;
 
 test {
   _ = @import("json/tokenizer.zig");
