@@ -5,6 +5,7 @@ pub const Language = @import("language.zig");
 // TODO: Language.detect(file: []const u8);
 
 pub const Editor = @import("editor.zig").Editor;
+pub const Document = @import("document.zig");
 
 test {
   _ = @import("json/tokenizer.zig");
