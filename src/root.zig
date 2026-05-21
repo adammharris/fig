@@ -8,7 +8,7 @@ pub const Editor = @import("editor.zig").Editor;
 pub const Document = @import("document.zig");
 
 test {
-  _ = @import("json/tokenizer.zig");
-  _ = @import("json/parser.zig");
-  _ = @import("editor.zig");
+    _ = @import("json/tokenizer.zig");
+    _ = @import("json/parser.zig");
+    _ = @import("editor.zig");
 }

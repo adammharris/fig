@@ -12,5 +12,5 @@ pub fn len(self: Span) usize {
 }
 
 pub fn equals(self: Span, other: Span) bool {
-  return self.start == other.start and self.end == other.end;
+    return self.start == other.start and self.end == other.end;
 }
