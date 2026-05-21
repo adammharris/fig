@@ -23,6 +23,7 @@ const CliAction = enum {
   print, p,
   edit, e,
   // TODO: more actions
+  get, g
 };
 
 const CliActionOptions = union(CliAction) {
@@ -38,6 +39,11 @@ const CliActionOptions = union(CliAction) {
     replacement: []const u8,
     requested_help: bool = false,
   }, e,
+  get: struct {
+    file: []const u8,
+    path: []fig.Document.PathSegment,
+    requested_help: bool = false,
+  }, g
 };
 
 const CliConfig = struct {
@@ -77,6 +83,16 @@ const Help = struct {
   fn edit(term: *Io.Terminal, binary_name: []const u8) !void {
     try term.writer.print(
       \\Usage: {s} edit <file> <path> <replacement>
+      \\  path format: dot syntax for keys, bracket syntax for indices
+      \\    example: school.class[0].student[3]
+      \\
+    , .{binary_name});
+    try term.writer.flush();
+  }
+
+  fn get(term: *Io.Terminal, binary_name: []const u8) !void {
+    try term.writer.print(
+      \\Usage: {s} get <file> <path>
       \\  path format: dot syntax for keys, bracket syntax for indices
       \\    example: school.class[0].student[3]
       \\
@@ -133,11 +149,12 @@ pub fn main(init: std.process.Init) !void {
 		},
 		.print, .p => {
 		  if (args.next()) |file_path| {
-				const input = try getInput(io, file_path);
+				const input = try getInput(io, file_path, .read_only);
         // TODO: don't close if stdin (also in edit branch)
   			defer input.close(io);
         if (std.mem.endsWith(u8, file_path, ".json")) {
-          try printJsonDocument(init.arena.allocator(), io, &stdout_terminal, input);
+          const doc = try parseJsonDocument(init.arena.allocator(), io, input);
+          try doc.dump(stdout_terminal.writer);
         } else {
           log.err("Unsupported document type.\n", .{});
           std.process.exit(2);
@@ -150,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
     },
     .edit, .e => {
       if (args.next()) |file_path| {
-        const input = try getInput(io, file_path);
+        const input = try getInput(io, file_path, .read_write);
         defer input.close(io);
         // Get path and replacement from CLI args
         var path: []fig.Document.PathSegment = undefined;
@@ -168,7 +185,9 @@ pub fn main(init: std.process.Init) !void {
           std.process.exit(2);
         }
         if (std.mem.endsWith(u8, file_path, ".json")) {
-          try editJsonDocument(init.arena.allocator(), io, &stdout_terminal, input, path, replacement);
+          // Add quotes around the replacement (for JSON)
+          replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{replacement});
+          try editJsonDocument(init.arena.allocator(), io, input, path, replacement);
         } else log.err("Unsupported document type.\n", .{});
       } else {
         log.err("No file provided.\n", .{});
@@ -176,6 +195,31 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
       }
     },
+    .get, .g => {
+      if (args.next()) |file_path| {
+        const input = try getInput(io, file_path, .read_only);
+        defer input.close(io);
+        // Get path and replacement from CLI args
+        var path: []fig.Document.PathSegment = undefined;
+        if (args.next()) |p| {
+          path = try parsePath(init.arena.allocator(), p);
+        } else {
+          log.err("No path provided.\n", .{});
+          try Help.edit(&stderr_terminal, config.binary_name);
+          std.process.exit(2);
+        }
+        if (std.mem.endsWith(u8, file_path, ".json")) {
+          const doc = try parseJsonDocument(init.arena.allocator(), io, input);
+          const node = try doc.getNode(path);
+          // TODO: differentiate between sequence, mapping, keyvalue
+          try print(&stdout_terminal, doc.source[node.span.start..node.span.end]);
+        } else log.err("Unsupported document type.\n", .{});
+      } else {
+        log.err("No file provided.\n", .{});
+        try Help.get(&stderr_terminal, config.binary_name);
+        std.process.exit(2);
+      }
+    }
 	};
 }
 
@@ -188,22 +232,18 @@ fn print(term: *Io.Terminal, str: []const u8) !void {
 	try term.writer.flush();
 }
 
-fn printJsonDocument(allocator: std.mem.Allocator, io: Io, term: *Io.Terminal, file: Io.File) !void {
+fn parseJsonDocument(allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
   // Get file reader
   var read_buffer: [4096]u8 = undefined;
   var file_reader = file.reader(io, &read_buffer);
   // Stream file contents
   const content = try file_reader.interface.allocRemaining(allocator, max_size);
-  defer allocator.free(content);
-
-  const doc = try fig.Language.JSON.Parser.parse(allocator, content, .JSON);
-  try doc.dump(term.writer);
+  return try fig.Language.JSON.Parser.parse(allocator, content, .JSON);
 }
 
 fn editJsonDocument(
   allocator: std.mem.Allocator,
   io: Io,
-  term: *Io.Terminal,
   file: Io.File,
   path: []fig.Document.PathSegment,
   replacement: []const u8
@@ -219,11 +259,11 @@ fn editJsonDocument(
   try editor.init(content);
   defer editor.deinit();
   try editor.replaceValAtPath(path, replacement);
-  // Now write to term
-  try print(term, editor.source.items);
+  try file.writePositionalAll(io, editor.source.items, 0);
+  try file.setLength(io, editor.source.items.len);
 }
 
-fn getInput(io: Io, file_path: ?[]const u8) !Io.File {
+fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !Io.File {
   // Get input file descriptor
 	if (file_path) |fp| {
 	  if (std.mem.eql(u8, fp, "-")) {
@@ -240,7 +280,7 @@ fn getInput(io: Io, file_path: ?[]const u8) !Io.File {
        defer dir.close(io);
 
        // Open file, handle if it doesn't exist
-       return dir.openFile(io, fp, .{});
+       return dir.openFile(io, fp, .{ .mode = mode });
 		}
 	} else {
 	  log.err("No file provided.", .{});
@@ -254,26 +294,31 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.Document.Pat
   while (i < path.len) {
     switch (path[i]) {
       '.' => {
-        // Dot is a separator. The next loop iteration parses the key.
+        // Dot is a separator. Else branch parses the key.
         i += 1;
       },
       '[' => {
+        // Skip open bracket
         const start = i + 1;
         i = start;
+        // Loop until end or close bracket
         while (i < path.len and path[i] != ']') : (i += 1) {}
         if (i >= path.len or i == start) return error.InvalidPath;
 
+        // Add number to path_in_progress
         log.debug("number: {s}", .{path[start..i]});
         try path_in_progress.append(allocator,
           .{ .index = try std.fmt.parseInt(usize, path[start..i], 10)}
         );
+        // Skip close bracket
         i += 1;
       },
       else => {
         const start = i;
+        // Loop until a dot or open bracket
         while (i < path.len and path[i] != '.' and path[i] != '[') : (i += 1) {}
         if (i == start) return error.InvalidPath;
-
+        // TODO: only quote the key if JSON
         const key = path[start..i];
         const json_key = if (key.len >= 2 and key[0] == '"' and key[key.len - 1] == '"')
           key
