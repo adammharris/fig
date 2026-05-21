@@ -62,7 +62,8 @@ const Help = struct {
         \\  help: prints this text (default action)
         \\  version: prints version number
         \\  print: prints generic representation of file to stdout
-        \\  edit: edits part of file (not yet implemented)
+        \\  edit: edits part of file
+        \\  get: print a specific part of file to stdout
         \\
         \\For information on action options, pass --help or -h
         \\to the action you would like to learn about.
