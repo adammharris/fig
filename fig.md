@@ -41,7 +41,7 @@ Contributions are welcome, subject to my approval.
 
 **AI Use**
 
-`fig`, like many deceptively simple systems-level codebases, require careful thought and intention. Therefore, I have chosen to limit the use of AI code generation in this codebase.
+`fig`, like many deceptively simple systems-level codebases, require careful thought and intention. AI tools can generate code rapidly, often at the cost of this important design thinking. Therefore, I have chosen to limit the use of AI code generation in this codebase.
 
 I started writing this library by hand (no AI) for my own education, and for use in my larger project, [Diaryx](https://diaryx.org). After writing a JSON tokenizer and parser by hand, and designing the Document, Token, and Language abstractions, I have decided to make use of the Codex AI tool to generate specific portions of the code that would otherwise require hours of tedious, repetitive work. So far, this includes:
 
