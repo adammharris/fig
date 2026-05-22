@@ -17,6 +17,7 @@ pub const Kind = enum {
     colon,
     scalar,
     comment,
+    whitespace,
     end_of_file,
 
     pub fn len(self: Kind) ?usize {
@@ -126,7 +127,11 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
 
     while (cursor < line.end) {
         switch (self.source[cursor]) {
-            ' ' => cursor += 1,
+            ' ' => {
+                const end = whitespaceEnd(self.source, cursor, line.end);
+                try self.addToken(.init(.whitespace, .init(cursor, end)));
+                cursor = end;
+            },
             '#' => {
                 try self.addToken(.init(.comment, .init(cursor, line.end)));
                 return;
@@ -188,6 +193,14 @@ fn trimRightSpaces(source: []const u8, start: usize, end: usize) usize {
     return trimmed;
 }
 
+fn whitespaceEnd(source: []const u8, start: usize, line_end: usize) usize {
+    var end = start;
+    while (end < line_end and (source[end] == ' ' or source[end] == '\t')) {
+        end += 1;
+    }
+    return end;
+}
+
 // =======
 // Testing
 // =======
@@ -209,10 +222,12 @@ test "yaml flat mapping" {
         &.{
             tok(.scalar, 0, 4),
             tok(.colon, 4, 5),
+            tok(.whitespace, 5, 6),
             tok(.scalar, 6, 9),
             tok(.newline, 9, 10),
             tok(.scalar, 10, 13),
             tok(.colon, 13, 14),
+            tok(.whitespace, 14, 15),
             tok(.scalar, 15, 17),
             tok(.newline, 17, 18),
             tok(.end_of_file, 18, 18),
@@ -225,9 +240,11 @@ test "yaml flat sequence" {
         "- one\n- two\n",
         &.{
             tok(.dash, 0, 1),
+            tok(.whitespace, 1, 2),
             tok(.scalar, 2, 5),
             tok(.newline, 5, 6),
             tok(.dash, 6, 7),
+            tok(.whitespace, 7, 8),
             tok(.scalar, 8, 11),
             tok(.newline, 11, 12),
             tok(.end_of_file, 12, 12),
@@ -249,11 +266,13 @@ test "yaml nested indentation" {
             tok(.indent, 6, 8),
             tok(.scalar, 8, 13),
             tok(.colon, 13, 14),
+            tok(.whitespace, 14, 15),
             tok(.scalar, 15, 20),
             tok(.newline, 20, 21),
             tok(.dedent, 21, 21),
             tok(.scalar, 21, 25),
             tok(.colon, 25, 26),
+            tok(.whitespace, 26, 27),
             tok(.scalar, 27, 32),
             tok(.newline, 32, 33),
             tok(.end_of_file, 33, 33),
