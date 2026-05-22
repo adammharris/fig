@@ -20,9 +20,9 @@ Any contributions are welcome, subject to my approval.
 Progress so far:
 
 - [x] Design token, parser, document architecture
-- [ ] Design cross-config interface (public Zig API)
+- [ ] Design cross-config interface (public Zig API) (still work to be done)
 - [ ] Embedded config (i.e. markdown frontmatter)
-- [ ] Command-line interface
+- [x] Command-line interface
 - [ ] C ABI
 - [ ] Quality check
 - [ ] Publish
