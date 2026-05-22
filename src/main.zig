@@ -156,13 +156,13 @@ pub fn main(init: std.process.Init) !void {
                 const input = try getInput(io, file_path, .read_only);
                 // TODO: don't close if stdin (also in edit branch)
                 defer input.close(io);
-                if (std.mem.endsWith(u8, file_path, ".json")) {
-                    const doc = try parseJsonDocument(init.arena.allocator(), io, input);
-                    try doc.dump(stdout_terminal.writer);
-                } else {
-                    log.err("Unsupported document type.\n", .{});
-                    std.process.exit(2);
+                // Detect kind of file
+                var doc: fig.Document = undefined;
+                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
+                    .json => doc = try parseDocument(fig.Language.JSON, init.arena.allocator(), io, input),
+                    .yaml => doc = try parseDocument(fig.Language.YAML, init.arena.allocator(), io, input),
                 }
+                try doc.dump(stdout_terminal.writer);
             } else {
                 log.err("No file provided.\n", .{});
                 try Help.print(&stderr_terminal, config.binary_name);
@@ -200,11 +200,15 @@ pub fn main(init: std.process.Init) !void {
                     try Help.edit(&stderr_terminal, config.binary_name);
                     std.process.exit(2);
                 }
-                if (std.mem.endsWith(u8, file_path, ".json")) {
-                    // Add quotes around the replacement (for JSON)
-                    replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{replacement});
-                    try editJsonDocument(init.arena.allocator(), io, input, path, replacement, edit_key);
-                } else log.err("Unsupported document type.\n", .{});
+                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
+                    .json => {
+                        replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{replacement});
+                        try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, path, replacement, edit_key);
+                    },
+                    .yaml => {
+                        try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, path, replacement, edit_key);
+                    }
+                }
             } else {
                 log.err("No file provided.\n", .{});
                 try Help.edit(&stderr_terminal, config.binary_name);
@@ -228,14 +232,16 @@ pub fn main(init: std.process.Init) !void {
                     try Help.edit(&stderr_terminal, config.binary_name);
                     std.process.exit(2);
                 }
-                if (std.mem.endsWith(u8, file_path, ".json")) {
-                    const doc = try parseJsonDocument(init.arena.allocator(), io, input);
-                    const node = try doc.getNodeVal(path);
-                    log.debug("node: {s}", .{doc.source[node.span.start..node.span.end]});
-                    try node.dump(stdout_terminal.writer, doc.source, 0, doc.nodes);
-                    try stdout_terminal.writer.flush();
-                    //try print(&stdout_terminal, doc.source[node.span.start..node.span.end]);
-                } else log.err("Unsupported document type.\n", .{});
+                // Detect kind of file
+                var doc: fig.Document = undefined;
+                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
+                    .json => doc = try parseDocument(fig.Language.JSON, init.arena.allocator(), io, input),
+                    .yaml => doc = try parseDocument(fig.Language.YAML, init.arena.allocator(), io, input),
+                }
+                const node = try doc.getNodeVal(path);
+                log.debug("node: {s}", .{doc.source[node.span.start..node.span.end]});
+                try node.dump(stdout_terminal.writer, doc.source, 0, doc.nodes);
+                try stdout_terminal.writer.flush();
             } else {
                 log.err("No file provided.\n", .{});
                 try Help.get(&stderr_terminal, config.binary_name);
@@ -254,16 +260,22 @@ fn print(term: *Io.Terminal, str: []const u8) !void {
     try term.writer.flush();
 }
 
-fn parseJsonDocument(allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
+fn parseDocument(
+    comptime Lang: type,
+    allocator: std.mem.Allocator,
+    io: Io,
+    file: Io.File
+) !fig.Document {
     // Get file reader
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
     // Stream file contents
     const content = try file_reader.interface.allocRemaining(allocator, max_size);
-    return try fig.Language.JSON.Parser.parse(allocator, content, .JSON);
+    return try Lang.Parser.parse(allocator, content, Lang.default_type);
 }
 
-fn editJsonDocument(
+fn editDocument(
+    comptime Lang: type,
     allocator: std.mem.Allocator,
     io: Io,
     file: Io.File,
@@ -278,7 +290,7 @@ fn editJsonDocument(
     const content = try file_reader.interface.allocRemaining(allocator, max_size);
     defer allocator.free(content);
 
-    var editor: fig.Editor(fig.Language.JSON) = .{ .allocator = allocator };
+    var editor: fig.Editor(Lang) = .{ .allocator = allocator };
     try editor.init(content);
     defer editor.deinit();
     if (edit_key) {
@@ -356,4 +368,10 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.Document.Pat
         }
     }
     return path_in_progress.toOwnedSlice(allocator);
+}
+
+fn languageFromPath(file_path: []const u8) ?enum { json, yaml } {
+    if (std.mem.endsWith(u8, file_path, ".json")) return .json;
+    if (std.mem.endsWith(u8, file_path, ".yaml") or std.mem.endsWith(u8, file_path, ".yml")) return .yaml;
+    return null;
 }
