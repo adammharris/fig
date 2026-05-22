@@ -12,6 +12,6 @@ pub const Language = struct {
     pub const Parser = yaml.Parser;
     pub const default_type: Type = .v1_2;
     pub fn parse(parser: *yaml.Parser, input: []const u8, format: Type) !Document {
-        return parser.parse(input, format);
+        return parser.parseOnce(input, format);
     }
 };

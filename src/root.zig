@@ -11,5 +11,6 @@ test {
     _ = @import("json/tokenizer.zig");
     _ = @import("json/parser.zig");
     _ = @import("yaml/tokenizer.zig");
+    _ = @import("yaml/parser.zig");
     _ = @import("editor.zig");
 }
