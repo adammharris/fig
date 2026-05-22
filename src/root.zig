@@ -10,5 +10,6 @@ pub const Document = @import("document.zig");
 test {
     _ = @import("json/tokenizer.zig");
     _ = @import("json/parser.zig");
+    _ = @import("yaml/tokenizer.zig");
     _ = @import("editor.zig");
 }

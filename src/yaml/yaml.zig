@@ -1,7 +1,8 @@
 const yaml = @This();
 const Document = @import("../document.zig");
 
-//pub const Parser = @import("parser.zig");
+pub const Parser = @import("parser.zig");
+pub const Tokenizer = @import("tokenizer.zig");
 
 pub const Language = struct {
     pub const Type = enum {

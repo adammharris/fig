@@ -3,9 +3,7 @@
 const Tokenizer = @This();
 
 const std = @import("std");
-const log = std.log.scoped(.tokenizer);
 const testing = std.testing;
-const Span = @import("../util/span.zig");
 const Type = @import("yaml.zig").Language.Type;
 
 pub const Token = @import("../token.zig").Token(Kind);
@@ -14,7 +12,7 @@ pub const Kind = enum {
     // Structural
     indent,
     dedent,
-    newline, //size: 1
+    newline,
     dash,
     colon,
     scalar,
@@ -30,11 +28,16 @@ pub const Kind = enum {
     }
 };
 
+const TokenizeError = error{ InvalidIndent, TabIndent, OutOfMemory };
+
 const Line = struct {
     start: usize,
     content_start: usize, // if blank line, equals end
     end: usize, // excludes newline
     newline_end: usize, // includes newline if present
+    fn isBlank(self: *const Line) bool {
+        return self.content_start == self.end;
+    }
 };
 
 tokens: std.ArrayList(Token) = .empty,
@@ -42,87 +45,218 @@ i: usize = 0,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
-type: Type,
+type: Type = .v1_2,
 
-pub fn tokenize(self: *Tokenizer) ![] const Token {
+pub fn tokenize(self: *Tokenizer) ![]const Token {
     errdefer self.tokens.deinit(self.allocator);
     try self.tokens.ensureTotalCapacity(self.allocator, self.source.len + 1);
 
-    var current_indent = 0;
+    var current_indent: usize = 0;
     var indent_stack: std.ArrayList(usize) = .empty;
+    defer indent_stack.deinit(self.allocator);
+    try indent_stack.append(self.allocator, 0);
+
     // YAML is whitespace-sensitive, so we parse line-by-line.
-    while (self.getLine()) |line| {
-        const lineinfo = countLeadingSpaces(line);
-        if (lineinfo.spaces > current_indent) {
-            indent_stack.append(lineinfo.spaces);
-            self.tokens.appendAssumeCapacity(
-                .init(.indent, .init(self.i - line.len, self.i))
-            );
-            current_indent = lineinfo.spaces;
-        } else if (lineinfo.spaces < current_indent) {
-            while (lineinfo.spaces < current_indent) {
-                while (lineinfo.spaces < current_indent) {
-                    self.tokens.appendAssumeCapacity(.fixed(.dedent, self.i));
-                    current_indent = indent_stack.pop();
-                }
-                if (lineinfo.spaces != current_indent) return error.InvalidToken;
+    while (try self.getLine()) |line| {
+        if (line.isBlank()) continue;
+
+        const indent = line.content_start - line.start;
+        if (indent > current_indent) {
+            try indent_stack.append(self.allocator, indent);
+            try self.addToken(.init(.indent, .init(line.start, line.content_start)));
+            current_indent = indent;
+        } else if (indent < current_indent) {
+            while (indent < current_indent) {
+                _ = indent_stack.pop();
+                current_indent = indent_stack.getLast();
+                try self.addToken(.fixed(.dedent, line.content_start));
             }
-        }
-        // Now parse scalar/colon/dash
-        while (self.i - line.len)
-        switch (self.getChar()) {
-            '-' => {
-                self.tokens.appendAssumeCapacity(.fixed(.dash, self.i));
-            },
-            '#' => {}, //TODO: parse comment
-            else => {
-                self.scalar()
-            }
+            if (indent != current_indent) return TokenizeError.InvalidIndent;
         }
 
-        // On to the next line!
-        self.tokens.appendAssumeCapacity(.init(.newline, .init(self.i, self.i+1)));
+        try self.tokenizeLineContent(line);
+        if (line.newline_end > line.end) {
+            try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+        }
     }
 
     while (indent_stack.items.len != 0) {
-        while (lineinfo.spaces < current_indent) {
-            self.tokens.appendAssumeCapacity(.fixed(.dedent, self.i));
-            current_indent = indent_stack.pop();
-        }
+        _ = indent_stack.pop();
+        if (indent_stack.items.len == 0) break;
+        try self.addToken(.fixed(.dedent, self.i));
     }
+
     try self.addToken(.fixed(.end_of_file, self.i));
     return try self.tokens.toOwnedSlice(self.allocator);
 }
 
-fn getLine(self: *Tokenizer) ?Line {
+fn getLine(self: *Tokenizer) TokenizeError!?Line {
     if (self.i >= self.source.len) return null;
+
     const start = self.i;
     while (self.i < self.source.len and self.source[self.i] != '\n') {
         self.i += 1;
     }
+
     const end = self.i;
-    const line: Line = .{
+    if (self.i < self.source.len and self.source[self.i] == '\n') {
+        self.i += 1;
+    }
+
+    var content_start = start;
+    while (content_start < end and self.source[content_start] == ' ') {
+        content_start += 1;
+    }
+    if (content_start < end and self.source[content_start] == '\t') {
+        // Tabs are not allowed in YAML indentation.
+        return TokenizeError.TabIndent;
+    }
+
+    return .{
         .start = start,
-        .content_start:
+        .content_start = content_start,
+        .end = end,
+        .newline_end = self.i,
     };
 }
 
-fn countLeadingSpaces(line: []const u8) struct { spaces: u32, char: u8} {
-    var spaces = 0;
-    var char = "";
-    for (line) |c| {
-        if (c == ' ') {
-            spaces += 1;
-        } else {
-            char = c;
-            break;
+fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
+    var cursor = line.content_start;
+    var at_content_start = true;
+
+    while (cursor < line.end) {
+        switch (self.source[cursor]) {
+            ' ' => cursor += 1,
+            '#' => {
+                try self.addToken(.init(.comment, .init(cursor, line.end)));
+                return;
+            },
+            ':' => {
+                try self.addToken(.fixed(.colon, cursor));
+                cursor += 1;
+                at_content_start = false;
+            },
+            '-' => {
+                if (at_content_start) {
+                    try self.addToken(.fixed(.dash, cursor));
+                    cursor += 1;
+                    at_content_start = false;
+                } else {
+                    const end = scalarEnd(self.source, cursor, line.end);
+                    try self.addScalar(cursor, end);
+                    cursor = end;
+                    at_content_start = false;
+                }
+            },
+            else => {
+                const end = scalarEnd(self.source, cursor, line.end);
+                try self.addScalar(cursor, end);
+                cursor = end;
+                at_content_start = false;
+            },
         }
     }
-    return .{ .spaces = spaces, .char = char };
 }
 
+fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
+    try self.tokens.append(self.allocator, token);
+}
 
-test "parse line" {
-    const line = "   - hello\n";
-    Parser.
+fn addScalar(self: *Tokenizer, start: usize, end: usize) TokenizeError!void {
+    const trimmed_end = trimRightSpaces(self.source, start, end);
+    if (trimmed_end > start) {
+        try self.addToken(.init(.scalar, .init(start, trimmed_end)));
+    }
+}
+
+fn scalarEnd(source: []const u8, start: usize, line_end: usize) usize {
+    var end = start;
+    while (end < line_end) : (end += 1) {
+        switch (source[end]) {
+            ':', '#' => break,
+            else => {},
+        }
+    }
+    return end;
+}
+
+fn trimRightSpaces(source: []const u8, start: usize, end: usize) usize {
+    var trimmed = end;
+    while (trimmed > start and source[trimmed - 1] == ' ') {
+        trimmed -= 1;
+    }
+    return trimmed;
+}
+
+// =======
+// Testing
+// =======
+
+fn testTokenizer(input: []const u8, expected: []const Token) !void {
+    var tokenizer: Tokenizer = .{ .allocator = testing.allocator, .source = input };
+    const tokens = try tokenizer.tokenize();
+    defer testing.allocator.free(tokens);
+    try testing.expectEqualSlices(Token, expected, tokens);
+}
+
+fn tok(kind: Token.Kind, start: usize, end: usize) Token {
+    return Token.init(kind, .init(start, end));
+}
+
+test "yaml flat mapping" {
+    try testTokenizer(
+        "name: Ada\nage: 37\n",
+        &.{
+            tok(.scalar, 0, 4),
+            tok(.colon, 4, 5),
+            tok(.scalar, 6, 9),
+            tok(.newline, 9, 10),
+            tok(.scalar, 10, 13),
+            tok(.colon, 13, 14),
+            tok(.scalar, 15, 17),
+            tok(.newline, 17, 18),
+            tok(.end_of_file, 18, 18),
+        },
+    );
+}
+
+test "yaml flat sequence" {
+    try testTokenizer(
+        "- one\n- two\n",
+        &.{
+            tok(.dash, 0, 1),
+            tok(.scalar, 2, 5),
+            tok(.newline, 5, 6),
+            tok(.dash, 6, 7),
+            tok(.scalar, 8, 11),
+            tok(.newline, 11, 12),
+            tok(.end_of_file, 12, 12),
+        },
+    );
+}
+
+test "yaml nested indentation" {
+    try testTokenizer(
+\\root:
+\\  child: value
+\\next: value
+\\
+        ,
+        &.{
+            tok(.scalar, 0, 4),
+            tok(.colon, 4, 5),
+            tok(.newline, 5, 6),
+            tok(.indent, 6, 8),
+            tok(.scalar, 8, 13),
+            tok(.colon, 13, 14),
+            tok(.scalar, 15, 20),
+            tok(.newline, 20, 21),
+            tok(.dedent, 21, 21),
+            tok(.scalar, 21, 25),
+            tok(.colon, 25, 26),
+            tok(.scalar, 27, 32),
+            tok(.newline, 32, 33),
+            tok(.end_of_file, 33, 33),
+        },
+    );
 }
