@@ -20,6 +20,7 @@ const OpenContainer = struct {
     pending_key: ?Document.Node.Id = null,
     pending_value_span: usize = 0,
     pending_sequence_item_span: ?usize = null,
+    continues_sequence_item: bool = false,
 };
 
 nodes: std.ArrayList(Document.Node) = .empty,
@@ -61,7 +62,11 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         self.skipTriviaNoNewline();
         switch (self.peek().kind) {
             .indent => {
-                self.force_new_container = true;
+                if (self.container_stack.items.len > 0 and self.currentContainer().continues_sequence_item) {
+                    self.currentContainer().continues_sequence_item = false;
+                } else {
+                    self.force_new_container = true;
+                }
                 _ = self.advance();
             },
             .dedent => {
@@ -71,8 +76,12 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 try self.finishValue(id);
             },
             .newline => _ = self.advance(),
-            .dash => try self.parseSequenceEntry(),
+            .dash => {
+                try self.closeSequenceItemContinuation();
+                try self.parseSequenceEntry();
+            },
             .scalar => {
+                try self.closeSequenceItemContinuation();
                 if (!self.isMappingStart()) return ParseError.UnexpectedToken;
                 try self.parseMappingEntry();
             },
@@ -117,9 +126,8 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
         .scalar => {
             if (self.isMappingStart()) {
                 const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
+                self.containerById(mapping_id).continues_sequence_item = true;
                 try self.parseMappingEntry();
-                const id = try self.closeContainer(self.nodes.items[mapping_id].span.end);
-                try self.finishValue(id);
             } else {
                 const value_id = try self.parseScalar();
                 try self.finishValue(value_id);
@@ -255,6 +263,16 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
     }
 }
 
+fn closeSequenceItemContinuation(self: *Parser) ParserError!void {
+    if (self.container_stack.items.len == 0) return;
+    if (!self.currentContainer().continues_sequence_item) return;
+
+    self.currentContainer().continues_sequence_item = false;
+    try self.closePendingEmptyValue();
+    const id = try self.closeContainer(self.nodes.items[self.currentContainer().id].span.end);
+    try self.finishValue(id);
+}
+
 fn clearPendingSequenceItem(self: *Parser, sequence_id: Document.Node.Id) void {
     const parent = self.containerById(sequence_id);
     parent.pending_sequence_item_span = null;
@@ -276,6 +294,8 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id
 }
 
 fn scalarKind(source: []const u8) Document.Node.Kind {
+    if (std.mem.eql(u8, source, "{}")) return .{ .mapping = null };
+    if (std.mem.eql(u8, source, "[]")) return .{ .sequence = null };
     if (std.mem.eql(u8, source, "null") or std.mem.eql(u8, source, "~")) return .null_;
     if (std.mem.eql(u8, source, "true") or std.mem.eql(u8, source, "false")) return .boolean;
     if (isNumber(source)) return .number;
@@ -442,4 +462,58 @@ test "yaml nested mapping" {
             .{ .id = 9, .kind = .{ .keyvalue = .{ .key = 7, .value = 8 } }, .span = .{ .start = 21, .end = 31 }, .next_sibling = null },
         } },
     );
+}
+
+test "yaml sequence item mapping continuation" {
+    const input =
+        \\- adapter: CodeLLDB
+        \\  label: Debug library tests
+        \\  build:
+        \\    command: zig
+        \\    args:
+        \\      - build
+        \\      - install-tests
+        \\
+    ;
+
+    const doc = try Parser.parse(testing.allocator, input, .v1_2);
+    defer doc.deinit(testing.allocator);
+
+    const label = try doc.getNodeVal(&.{
+        .{ .index = 0 },
+        .{ .key = "label" },
+    });
+    try testing.expectEqualSlices(u8, "Debug library tests", input[label.span.start..label.span.end]);
+
+    const build = try doc.getNodeVal(&.{
+        .{ .index = 0 },
+        .{ .key = "build" },
+    });
+    try testing.expect(std.meta.activeTag(build.kind) == .mapping);
+
+    var args_pair_id = build.kind.mapping.?;
+    while (!std.mem.eql(u8, "args", nodeSource(doc, doc.nodes[doc.nodes[args_pair_id].kind.keyvalue.key]))) {
+        args_pair_id = doc.nodes[args_pair_id].next_sibling orelse return error.NotFound;
+    }
+
+    const args = doc.nodes[doc.nodes[args_pair_id].kind.keyvalue.value];
+    try testing.expect(std.meta.activeTag(args.kind) == .sequence);
+    const first_arg_id = args.kind.sequence.?;
+    const second_arg = doc.nodes[doc.nodes[first_arg_id].next_sibling.?];
+    try testing.expectEqualSlices(u8, "install-tests", input[second_arg.span.start..second_arg.span.end]);
+}
+
+test "yaml empty flow collection scalars" {
+    const doc = try Parser.parse(testing.allocator, "env: {}\ntags: []\n", .v1_2);
+    defer doc.deinit(testing.allocator);
+
+    const env = try doc.getNodeVal(&.{.{ .key = "env" }});
+    try testing.expectEqual(@as(?Document.Node.Id, null), env.kind.mapping);
+
+    const tags = try doc.getNodeVal(&.{.{ .key = "tags" }});
+    try testing.expectEqual(@as(?Document.Node.Id, null), tags.kind.sequence);
+}
+
+fn nodeSource(doc: Document, node: Document.Node) []const u8 {
+    return doc.source[node.span.start..node.span.end];
 }
