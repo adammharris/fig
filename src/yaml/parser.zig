@@ -420,8 +420,8 @@ fn advance(self: *Parser) Token {
 
 fn testParser(input: []const u8, expected: AST) !void {
     const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
-    defer testing.allocator.free(doc.nodes);
-    try testing.expect(expected.eql(doc));
+    defer doc.deinit(testing.allocator);
+    try testing.expect(expected.eql(doc.ast));
 }
 
 test "simple YAML document" {
@@ -498,39 +498,39 @@ test "yaml sequence item mapping continuation" {
     ;
 
     const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
-    defer testing.allocator.free(doc.nodes);
+    defer doc.deinit(testing.allocator);
 
-    const label = try doc.getValByPath(&.{
+    const label = try doc.ast.getValByPath(&.{
         .{ .index = 0 },
         .{ .key = "label" },
     });
     try testing.expectEqualSlices(u8, "Debug library tests", label.kind.string);
 
-    const build = try doc.getValByPath(&.{
+    const build = try doc.ast.getValByPath(&.{
         .{ .index = 0 },
         .{ .key = "build" },
     });
     try testing.expect(std.meta.activeTag(build.kind) == .mapping);
 
     var args_pair_id = build.kind.mapping.?;
-    while (!std.mem.eql(u8, "args", doc.nodes[doc.nodes[args_pair_id].kind.keyvalue.key].kind.string)) {
-        args_pair_id = doc.nodes[args_pair_id].next_sibling orelse return error.NotFound;
+    while (!std.mem.eql(u8, "args", doc.ast.nodes[doc.ast.nodes[args_pair_id].kind.keyvalue.key].kind.string)) {
+        args_pair_id = doc.ast.nodes[args_pair_id].next_sibling orelse return error.NotFound;
     }
 
-    const args = doc.nodes[doc.nodes[args_pair_id].kind.keyvalue.value];
+    const args = doc.ast.nodes[doc.ast.nodes[args_pair_id].kind.keyvalue.value];
     try testing.expect(std.meta.activeTag(args.kind) == .sequence);
     const first_arg_id = args.kind.sequence.?;
-    const second_arg = doc.nodes[doc.nodes[first_arg_id].next_sibling.?];
+    const second_arg = doc.ast.nodes[doc.ast.nodes[first_arg_id].next_sibling.?];
     try testing.expectEqualSlices(u8, "install-tests", second_arg.kind.string);
 }
 
 test "yaml empty flow collection scalars" {
     const doc = try Parser.parse(testing.allocator, "env: {}\ntags: []\n", .v1_2_2);
-    defer testing.allocator.free(doc.nodes);
+    defer doc.deinit(testing.allocator);
 
-    const env = try doc.getValByPath(&.{.{ .key = "env" }});
+    const env = try doc.ast.getValByPath(&.{.{ .key = "env" }});
     try testing.expectEqual(@as(?AST.Node.Id, null), env.kind.mapping);
 
-    const tags = try doc.getValByPath(&.{.{ .key = "tags" }});
+    const tags = try doc.ast.getValByPath(&.{.{ .key = "tags" }});
     try testing.expectEqual(@as(?AST.Node.Id, null), tags.kind.sequence);
 }

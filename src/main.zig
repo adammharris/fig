@@ -360,15 +360,10 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
                 // Loop until a dot or open bracket
                 while (i < path.len and path[i] != '.' and path[i] != '[') : (i += 1) {}
                 if (i == start) return error.InvalidPath;
-                // TODO: only quote the key if JSON
                 const key = path[start..i];
-                const json_key = if (key.len >= 2 and key[0] == '"' and key[key.len - 1] == '"')
-                    key
-                else
-                    try std.fmt.allocPrint(allocator, "\"{s}\"", .{key});
 
-                log.debug("key: {s}", .{json_key});
-                try path_in_progress.append(allocator, .{ .key = json_key });
+                log.debug("key: {s}", .{key});
+                try path_in_progress.append(allocator, .{ .key = key });
             },
         }
     }
