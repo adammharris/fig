@@ -2,7 +2,9 @@
 //! Depends on the tokenizer and the abstract Document struct.
 
 const std = @import("std");
+const AST = @import("../ast.zig");
 const Document = @import("../document.zig");
+const Span = @import("../util/span.zig");
 const testing = std.testing;
 const Tokenizer = @import("tokenizer.zig");
 const Token = Tokenizer.Token;
@@ -12,21 +14,24 @@ const Parser = @This();
 
 const ContainerKind = enum { sequence, mapping };
 const OpenContainer = struct {
-    id: Document.Node.Id,
+    id: AST.Node.Id,
     kind: ContainerKind,
-    first_child: ?Document.Node.Id = null,
-    last_child: ?Document.Node.Id = null,
-    pending_key: ?Document.Node.Id = null,
+    first_child: ?AST.Node.Id = null,
+    last_child: ?AST.Node.Id = null,
+    pending_key: ?AST.Node.Id = null,
+    pending_value_span: usize = 0,
+    pending_sequence_item_span: ?usize = null,
     pending_sequence_item: bool = false,
     continues_sequence_item: bool = false,
 };
 
-nodes: std.ArrayList(Document.Node) = .empty,
+nodes: std.ArrayList(AST.Node) = .empty,
+node_spans: std.ArrayList(Span) = .empty,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 tokens: []const Token = &.{},
 index: usize = 0,
 force_new_container: bool = false,
-root: ?Document.Node.Id = null,
+root: ?AST.Node.Id = null,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
@@ -36,7 +41,13 @@ const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
 /// Pass allocator, input, and type, and get a Document.
-pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
+pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
+    const parsed = try parseParsed(allocator, input, format);
+    allocator.free(parsed.node_spans);
+    return parsed.document;
+}
+
+pub fn parseParsed(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
     var parser: Parser = .{ .allocator = allocator };
     defer parser.deinit();
     return parser.parseOnce(input, format);
@@ -69,8 +80,8 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
             },
             .dedent => {
                 try self.closePendingEmptyValue();
-                const id = try self.closeContainer();
-                _ = self.advance();
+                const dedent = self.advance();
+                const id = try self.closeContainer(dedent.span.end);
                 try self.finishValue(id);
             },
             .newline => _ = self.advance(),
@@ -92,26 +103,33 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
 
     while (self.container_stack.items.len > 0) {
         try self.closePendingEmptyValue();
-        const id = try self.closeContainer();
+        const id = try self.closeContainer(self.peek().span.end);
         try self.finishValue(id);
     }
 
     const root = self.root orelse return ParseError.EmptyDocument;
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     self.nodes = .empty;
+    const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
+    self.node_spans = .empty;
     return .{
-        .root = root,
-        .nodes = nodes,
+        .source = input,
+        .document = .{
+            .root = root,
+            .nodes = nodes,
+        },
+        .node_spans = node_spans,
     };
 }
 
 pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
+    self.node_spans.deinit(self.allocator);
 }
 
 fn parseSequenceEntry(self: *Parser) ParserError!void {
-    _ = self.advance();
+    const dash = self.advance();
     const sequence_id = try self.ensureContainer(.sequence);
     self.clearPendingSequenceItem(sequence_id);
     self.skipTriviaNoNewline();
@@ -119,10 +137,11 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
     switch (self.peek().kind) {
         .newline, .dedent, .end_of_file => {
             self.currentContainer().pending_sequence_item = true;
+            self.currentContainer().pending_sequence_item_span = dash.span.end;
         },
         .scalar => {
             if (self.isMappingStart()) {
-                const mapping_id = try self.openContainer(.mapping);
+                const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
                 self.containerById(mapping_id).continues_sequence_item = true;
                 try self.parseMappingEntry();
             } else {
@@ -142,20 +161,21 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
     const key_id = try self.parseScalar();
     self.skipTriviaNoNewline();
     if (self.peek().kind != .colon) return ParseError.UnexpectedToken;
-    _ = self.advance();
+    const colon = self.advance();
 
     {
         const parent = self.containerById(mapping_id);
         parent.pending_key = key_id;
+        parent.pending_value_span = colon.span.end;
     }
 
     self.skipTriviaNoNewline();
     switch (self.peek().kind) {
         .scalar => {
             if (self.isMappingStart()) {
-                _ = try self.openContainer(.mapping);
+                const child_id = try self.openContainer(.mapping, self.peek().span.start);
                 try self.parseMappingEntry();
-                const id = try self.closeContainer();
+                const id = try self.closeContainer(self.node_spans.items[child_id].end);
                 try self.finishValue(id);
             } else {
                 const value_id = try self.parseScalar();
@@ -163,9 +183,9 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
             }
         },
         .dash => {
-            _ = try self.openContainer(.sequence);
+            const child_id = try self.openContainer(.sequence, self.peek().span.start);
             try self.parseSequenceEntry();
-            const id = try self.closeContainer();
+            const id = try self.closeContainer(self.node_spans.items[child_id].end);
             try self.finishValue(id);
         },
         .newline, .dedent, .end_of_file => {},
@@ -173,27 +193,27 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
     }
 }
 
-fn parseScalar(self: *Parser) ParserError!Document.Node.Id {
+fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
     if (self.peek().kind != .scalar) return ParseError.UnexpectedToken;
     const token = self.advance();
-    return self.addNode(try scalarKind(token.source(self.source)));
+    return self.addNode(try scalarKind(token.source(self.source)), token.span);
 }
 
-fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!Document.Node.Id {
+fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
     if (!self.force_new_container and self.container_stack.items.len > 0) {
         const current = self.currentContainer();
         if (current.kind == kind) return current.id;
     }
 
     self.force_new_container = false;
-    return self.openContainer(kind);
+    return self.openContainer(kind, startOfCurrentToken(self));
 }
 
-fn openContainer(self: *Parser, kind: ContainerKind) ParserError!Document.Node.Id {
+fn openContainer(self: *Parser, kind: ContainerKind, start: usize) ParserError!AST.Node.Id {
     const id = try self.addNode(switch (kind) {
         .sequence => .{ .sequence = null },
         .mapping => .{ .mapping = null },
-    });
+    }, .init(start, start));
 
     try self.container_stack.append(self.allocator, .{
         .id = id,
@@ -203,13 +223,16 @@ fn openContainer(self: *Parser, kind: ContainerKind) ParserError!Document.Node.I
     return id;
 }
 
-fn closeContainer(self: *Parser) ParserError!Document.Node.Id {
+fn closeContainer(self: *Parser, span_end: usize) ParserError!AST.Node.Id {
     if (self.container_stack.items.len == 0) return ParseError.UnexpectedToken;
     const container = self.container_stack.pop().?;
+    if (container.first_child == null) {
+        self.node_spans.items[container.id].end = span_end;
+    }
     return container.id;
 }
 
-fn finishValue(self: *Parser, value_id: Document.Node.Id) ParserError!void {
+fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
     if (self.container_stack.items.len == 0) {
         self.root = value_id;
         return;
@@ -220,15 +243,21 @@ fn finishValue(self: *Parser, value_id: Document.Node.Id) ParserError!void {
         .sequence => {
             self.attachChild(parent, value_id);
             parent.pending_sequence_item = false;
+            parent.pending_sequence_item_span = null;
         },
         .mapping => {
             const key_id = parent.pending_key orelse return ParseError.UnexpectedToken;
             parent.pending_key = null;
 
+            const key_span = self.node_spans.items[key_id];
+            const value_span = self.node_spans.items[value_id];
             const pair_id = try self.addNode(.{ .keyvalue = .{
                 .key = key_id,
                 .value = value_id,
-            } });
+            } }, .{
+                .start = key_span.start,
+                .end = value_span.end,
+            });
 
             self.attachChild(parent, pair_id);
         },
@@ -241,11 +270,12 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
     const parent = self.currentContainer();
     switch (parent.kind) {
         .sequence => if (parent.pending_sequence_item) {
-            const value_id = try self.addNode(.null_);
+            const span = parent.pending_sequence_item_span orelse 0;
+            const value_id = try self.addNode(.null_, .init(span, span));
             try self.finishValue(value_id);
         },
         .mapping => if (parent.pending_key != null) {
-            const value_id = try self.addNode(.null_);
+            const value_id = try self.addNode(.null_, .init(parent.pending_value_span, parent.pending_value_span));
             try self.finishValue(value_id);
         },
     }
@@ -257,16 +287,17 @@ fn closeSequenceItemContinuation(self: *Parser) ParserError!void {
 
     self.currentContainer().continues_sequence_item = false;
     try self.closePendingEmptyValue();
-    const id = try self.closeContainer();
+    const id = try self.closeContainer(self.node_spans.items[self.currentContainer().id].end);
     try self.finishValue(id);
 }
 
-fn clearPendingSequenceItem(self: *Parser, sequence_id: Document.Node.Id) void {
+fn clearPendingSequenceItem(self: *Parser, sequence_id: AST.Node.Id) void {
     const parent = self.containerById(sequence_id);
     parent.pending_sequence_item = false;
+    parent.pending_sequence_item_span = null;
 }
 
-fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id) void {
+fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) void {
     if (parent.first_child) |_| {
         self.nodes.items[parent.last_child.?].next_sibling = child_id;
     } else {
@@ -278,9 +309,10 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id
     }
 
     parent.last_child = child_id;
+    self.node_spans.items[parent.id].end = self.node_spans.items[child_id].end;
 }
 
-fn scalarKind(source: []const u8) ParserError!Document.Node.Kind {
+fn scalarKind(source: []const u8) ParserError!AST.Node.Kind {
     if (std.mem.eql(u8, source, "{}")) return .{ .mapping = null };
     if (std.mem.eql(u8, source, "[]")) return .{ .sequence = null };
     if (std.mem.eql(u8, source, "null") or std.mem.eql(u8, source, "~")) return .null_;
@@ -337,21 +369,26 @@ fn isMappingStart(self: *const Parser) bool {
     return false;
 }
 
-fn addNode(self: *Parser, kind: Document.Node.Kind) ParserError!Document.Node.Id {
-    const id: Document.Node.Id = @intCast(self.nodes.items.len);
+fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.Id {
+    const id: AST.Node.Id = @intCast(self.nodes.items.len);
     try self.nodes.append(self.allocator, .{
         .id = id,
         .kind = kind,
         .next_sibling = null,
     });
+    try self.node_spans.append(self.allocator, span);
     return id;
+}
+
+fn startOfCurrentToken(self: *const Parser) usize {
+    return self.peek().span.start;
 }
 
 fn currentContainer(self: *Parser) *OpenContainer {
     return &self.container_stack.items[self.container_stack.items.len - 1];
 }
 
-fn containerById(self: *Parser, id: Document.Node.Id) *OpenContainer {
+fn containerById(self: *Parser, id: AST.Node.Id) *OpenContainer {
     for (self.container_stack.items) |*container| {
         if (container.id == id) return container;
     }
@@ -381,16 +418,16 @@ fn advance(self: *Parser) Token {
 // Testing
 // =======
 
-fn testParser(input: []const u8, expected: Document) !void {
-    const doc = try Parser.parse(testing.allocator, input, .v1_2);
-    defer doc.deinit(testing.allocator);
+fn testParser(input: []const u8, expected: AST) !void {
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer testing.allocator.free(doc.nodes);
     try testing.expect(expected.eql(doc));
 }
 
 test "simple YAML document" {
     try testParser(
         \\- hello: world
-    , .{ .root = 0, .nodes = &[_]Document.Node{
+    , .{ .root = 0, .nodes = &[_]AST.Node{
         .{ .id = 0, .kind = .{ .sequence = 1 }, .next_sibling = null },
         .{
             .id = 1,
@@ -418,7 +455,7 @@ test "simple YAML document" {
 test "yaml flat mapping" {
     try testParser(
         "name: Ada\nage: 37\n",
-        .{ .root = 0, .nodes = &[_]Document.Node{
+        .{ .root = 0, .nodes = &[_]AST.Node{
             .{ .id = 0, .kind = .{ .mapping = 3 }, .next_sibling = null },
             .{ .id = 1, .kind = .{ .string = "name" }, .next_sibling = null },
             .{ .id = 2, .kind = .{ .string = "Ada" }, .next_sibling = null },
@@ -433,7 +470,7 @@ test "yaml flat mapping" {
 test "yaml nested mapping" {
     try testParser(
         "root:\n  child: value\nnext: true\n",
-        .{ .root = 0, .nodes = &[_]Document.Node{
+        .{ .root = 0, .nodes = &[_]AST.Node{
             .{ .id = 0, .kind = .{ .mapping = 6 }, .next_sibling = null },
             .{ .id = 1, .kind = .{ .string = "root" }, .next_sibling = null },
             .{ .id = 2, .kind = .{ .mapping = 5 }, .next_sibling = null },
@@ -460,8 +497,8 @@ test "yaml sequence item mapping continuation" {
         \\
     ;
 
-    const doc = try Parser.parse(testing.allocator, input, .v1_2);
-    defer doc.deinit(testing.allocator);
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer testing.allocator.free(doc.nodes);
 
     const label = try doc.getValByPath(&.{
         .{ .index = 0 },
@@ -488,12 +525,12 @@ test "yaml sequence item mapping continuation" {
 }
 
 test "yaml empty flow collection scalars" {
-    const doc = try Parser.parse(testing.allocator, "env: {}\ntags: []\n", .v1_2);
-    defer doc.deinit(testing.allocator);
+    const doc = try Parser.parse(testing.allocator, "env: {}\ntags: []\n", .v1_2_2);
+    defer testing.allocator.free(doc.nodes);
 
     const env = try doc.getValByPath(&.{.{ .key = "env" }});
-    try testing.expectEqual(@as(?Document.Node.Id, null), env.kind.mapping);
+    try testing.expectEqual(@as(?AST.Node.Id, null), env.kind.mapping);
 
     const tags = try doc.getValByPath(&.{.{ .key = "tags" }});
-    try testing.expectEqual(@as(?Document.Node.Id, null), tags.kind.sequence);
+    try testing.expectEqual(@as(?AST.Node.Id, null), tags.kind.sequence);
 }

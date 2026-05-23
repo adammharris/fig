@@ -2,31 +2,34 @@
 //! Depends on the tokenizer and the abstract Document struct
 
 const std = @import("std");
+const AST = @import("../ast.zig");
 const Document = @import("../document.zig");
 const testing = std.testing;
 const log = std.log.scoped(.parser);
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
 const Type = @import("json.zig").Language.Type;
 const Token = @import("../token.zig").Token(@import("tokenizer.zig").Kind);
+const Span = @import("../util/span.zig");
 
 const Parser = @This();
 
 const ContainerKind = enum { array, object };
 /// Either an array or object in the process of being parsed.
 const OpenContainer = struct {
-    id: Document.Node.Id,
+    id: AST.Node.Id,
     kind: ContainerKind,
-    first_child: ?Document.Node.Id = null,
-    last_child: ?Document.Node.Id = null,
-    pending_key: ?Document.Node.Id = null,
+    first_child: ?AST.Node.Id = null,
+    last_child: ?AST.Node.Id = null,
+    pending_key: ?AST.Node.Id = null,
 };
 
 // State
 state: State = .ExpectValue,
-nodes: std.ArrayList(Document.Node) = .empty,
+nodes: std.ArrayList(AST.Node) = .empty,
+node_spans: std.ArrayList(Span) = .empty,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 
-root: ?Document.Node.Id = null,
+root: ?AST.Node.Id = null,
 
 // Initial fields
 allocator: std.mem.Allocator,
@@ -65,7 +68,7 @@ pub fn getString(slice: []const u8) ParseError![]const u8 {
 }
 
 /// Returns lossless struct representation of a number
-pub fn getNumber(slice: []const u8) ParseError!Document.Node.Kind.Number {
+pub fn getNumber(slice: []const u8) ParseError!AST.Node.Kind.Number {
     var numDots: usize = 0;
     for (slice) |char| {
         if (char == '.') numDots += 1;
@@ -75,6 +78,13 @@ pub fn getNumber(slice: []const u8) ParseError!Document.Node.Kind.Number {
         1 => .float,
         else => return error.InvalidNumber,
     } };
+}
+
+/// Main entry function
+pub fn parseAbstract(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
+    const parsed = try parse(allocator, input, format);
+    allocator.free(parsed.node_spans);
+    return parsed.document;
 }
 
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
@@ -106,12 +116,12 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
                 // TODO: update state
                 switch (token.kind) {
                     .open_brace => {
-                        const id = try self.addNode(.{ .mapping = null });
+                        const id = try self.addNode(.{ .mapping = null }, token.span);
                         try self.openContainer(.object, id);
                         self.state = .ExpectObjectKeyOrEnd;
                     },
                     .open_bracket => {
-                        const id = try self.addNode(.{ .sequence = null });
+                        const id = try self.addNode(.{ .sequence = null }, token.span);
                         try self.openContainer(.array, id);
                         self.state = .ExpectArrayValueOrEnd;
                     },
@@ -138,12 +148,12 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
             .ExpectArrayValueOrEnd => {
                 switch (token.kind) {
                     .open_bracket => {
-                        const id = try self.addNode(.{ .sequence = null });
+                        const id = try self.addNode(.{ .sequence = null }, token.span);
                         try self.openContainer(.array, id);
                         self.state = .ExpectArrayValueOrEnd;
                     },
                     .open_brace => {
-                        const id = try self.addNode(.{ .mapping = null });
+                        const id = try self.addNode(.{ .mapping = null }, token.span);
                         try self.openContainer(.object, id);
                         self.state = .ExpectObjectKeyOrEnd;
                     },
@@ -164,7 +174,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
                         try self.finishValue(id);
                     },
                     .close_bracket => {
-                        const id = try self.closeContainer();
+                        const id = try self.closeContainer(token.span.end);
                         try self.finishValue(id);
                     },
                     else => return ParseError.UnexpectedToken,
@@ -173,7 +183,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
             .ExpectArrayCommaOrEnd => {
                 switch (token.kind) {
                     .close_bracket => {
-                        const id = try self.closeContainer();
+                        const id = try self.closeContainer(token.span.end);
                         try self.finishValue(id);
                     },
                     .comma => {
@@ -192,7 +202,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
                         self.state = .ExpectObjectColon;
                     },
                     .close_brace => {
-                        const id = try self.closeContainer();
+                        const id = try self.closeContainer(token.span.end);
                         try self.finishValue(id);
                     },
                     else => return ParseError.UnexpectedToken,
@@ -209,12 +219,12 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
             .ExpectObjectValue => {
                 switch (token.kind) {
                     .open_brace => {
-                        const id = try self.addNode(.{ .mapping = null });
+                        const id = try self.addNode(.{ .mapping = null }, token.span);
                         try self.openContainer(.object, id);
                         self.state = .ExpectObjectKeyOrEnd;
                     },
                     .open_bracket => {
-                        const id = try self.addNode(.{ .sequence = null });
+                        const id = try self.addNode(.{ .sequence = null }, token.span);
                         try self.openContainer(.array, id);
                         self.state = .ExpectArrayValueOrEnd;
                     },
@@ -240,7 +250,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
             .ExpectObjectCommaOrEnd => {
                 switch (token.kind) {
                     .close_brace => {
-                        const id = try self.closeContainer();
+                        const id = try self.closeContainer(token.span.end);
                         try self.finishValue(id);
                     },
                     .comma => {
@@ -263,15 +273,22 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
     // Ready to return a Document!
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     self.nodes = .empty;
+    const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
+    self.node_spans = .empty;
     return .{
-        .root = self.root orelse return ParseError.UnexpectedToken,
-        .nodes = nodes,
+        .source = input,
+        .document = .{
+            .root = self.root orelse return ParseError.UnexpectedToken,
+            .nodes = nodes,
+        },
+        .node_spans = node_spans,
     };
 }
 
 pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
+    self.node_spans.deinit(self.allocator);
 }
 
 // ===============
@@ -279,21 +296,22 @@ pub fn deinit(self: *Parser) void {
 // ===============
 
 /// Add an incomplete node to self.nodes. Called as soon as `[` or `{` is found.
-fn addNode(self: *Parser, kind: Document.Node.Kind) !Document.Node.Id {
-    const id: Document.Node.Id = @intCast(self.nodes.items.len);
+fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) !AST.Node.Id {
+    const id: AST.Node.Id = @intCast(self.nodes.items.len);
     try self.nodes.append(self.allocator, .{
         .id = id,
         .kind = kind,
         .next_sibling = null, // Update if there is a next sibling
     });
+    try self.node_spans.append(self.allocator, span);
     return id;
 }
 
-fn addTokenNode(self: *Parser, input: []const u8, token: Token) !Document.Node.Id {
-    return self.addNode(try tokenKind(input, token));
+fn addTokenNode(self: *Parser, input: []const u8, token: Token) !AST.Node.Id {
+    return self.addNode(try tokenKind(input, token), token.span);
 }
 
-fn tokenKind(input: []const u8, token: Token) ParseError!Document.Node.Kind {
+fn tokenKind(input: []const u8, token: Token) ParseError!AST.Node.Kind {
     const raw = token.source(input);
     return switch (token.kind) {
         .null_ => .null_,
@@ -305,7 +323,7 @@ fn tokenKind(input: []const u8, token: Token) ParseError!Document.Node.Kind {
 }
 
 /// Attaches a completed child to the current open container.
-fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id) void {
+fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) void {
     if (parent.first_child != null) {
         self.nodes.items[parent.last_child.?].next_sibling = child_id;
     } else {
@@ -318,7 +336,7 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: Document.Node.Id
     parent.last_child = child_id;
 }
 
-fn finishValue(self: *Parser, value_id: Document.Node.Id) !void {
+fn finishValue(self: *Parser, value_id: AST.Node.Id) !void {
     // If there is no parent, the parsing is complete
     if (self.container_stack.items.len == 0) {
         self.root = value_id;
@@ -337,10 +355,15 @@ fn finishValue(self: *Parser, value_id: Document.Node.Id) !void {
             const key_id = parent.pending_key orelse return ParseError.UnexpectedToken;
             parent.pending_key = null;
 
+            const key_span = self.node_spans.items[key_id];
+            const value_span = self.node_spans.items[value_id];
             const pair_id = try self.addNode(.{ .keyvalue = .{
                 .key = key_id,
                 .value = value_id,
-            } });
+            } }, .{
+                .start = key_span.start,
+                .end = value_span.end,
+            });
 
             self.attachChild(parent, pair_id);
             self.state = .ExpectObjectCommaOrEnd;
@@ -349,17 +372,18 @@ fn finishValue(self: *Parser, value_id: Document.Node.Id) !void {
 }
 
 /// Pushes stack metadata for a container node that already exists in self.nodes
-fn openContainer(self: *Parser, kind: ContainerKind, node_id: Document.Node.Id) !void {
+fn openContainer(self: *Parser, kind: ContainerKind, node_id: AST.Node.Id) !void {
     try self.container_stack.append(self.allocator, .{
         .id = node_id,
         .kind = kind,
     });
 }
 
-/// Pops the current container and returns the node ID.
-fn closeContainer(self: *Parser) !Document.Node.Id {
+/// Pops the current container, patches its span end, and returns the node ID.
+fn closeContainer(self: *Parser, span_end: usize) !AST.Node.Id {
     if (self.container_stack.items.len == 0) return ParseError.UnexpectedToken;
     const container = self.container_stack.pop().?;
+    self.node_spans.items[container.id].end = span_end;
     return container.id;
 }
 
@@ -367,16 +391,16 @@ fn closeContainer(self: *Parser) !Document.Node.Id {
 // Testing
 // =======
 
-fn testParser(input: []const u8, expected: Document) !void {
-    const doc = try Parser.parse(testing.allocator, input, .JSON);
-    defer doc.deinit(testing.allocator);
+fn testParser(input: []const u8, expected: AST) !void {
+    const doc = try Parser.parseAbstract(testing.allocator, input, .JSON);
+    defer testing.allocator.free(doc.nodes);
     try testing.expect(expected.eql(doc));
 }
 
 test "simple JSON document" {
     try testParser(
         \\[{"hello":"world"}]
-    , .{ .root = 0, .nodes = &[_]Document.Node{
+    , .{ .root = 0, .nodes = &[_]AST.Node{
         .{ .id = 0, .kind = .{ .sequence = 1 }, .next_sibling = null },
         .{
             .id = 1,

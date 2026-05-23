@@ -1,20 +1,20 @@
-const std = @import("std");
+const Allocator = @import("std").mem.Allocator;
 
 pub const Language = @This();
 
 pub const JSON = @import("json/json.zig").Language;
 pub const YAML = @import("yaml/yaml.zig").Language;
 
-pub fn detect(allocator: std.mem.Allocator, input: []const u8) ?JSON.Type {
+pub fn detect(allocator: Allocator, input: []const u8) ?JSON.Type {
     var parser = JSON.Parser{ .allocator = allocator };
 
     if (JSON.parse(&parser, input, .JSON)) |doc| {
-        doc.deinit(allocator);
+        allocator.free(doc.nodes);
         return .JSON;
     } else |_| {}
 
     if (JSON.parse(&parser, input, .JSONC)) |doc| {
-        doc.deinit(allocator);
+        allocator.free(doc.nodes);
         return .JSONC;
     } else |_| {}
 

@@ -46,7 +46,7 @@ i: usize = 0,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
-type: Type = .v1_2,
+type: Type = .v1_2_2,
 
 pub fn tokenize(self: *Tokenizer) ![]const Token {
     errdefer self.tokens.deinit(self.allocator);
