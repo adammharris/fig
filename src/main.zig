@@ -22,8 +22,6 @@ const CliAction = enum {
     version,
     @"--version",
     @"-v",
-    print,
-    p,
     edit,
     e,
     // TODO: more actions
@@ -31,10 +29,10 @@ const CliAction = enum {
     g,
 };
 
-const CliActionOptions = union(CliAction) { help, @"--help", @"-h", version, @"--version", @"-v", print: struct {
+const CliActionOptions = union(CliAction) { help, @"--help", @"-h", version, @"--version", @"-v": struct {
     file: []const u8,
     requested_help: bool = false,
-}, p, edit: struct {
+}, edit: struct {
     file: []const u8,
     path: []fig.AST.PathSegment,
     replacement: []const u8,
@@ -71,15 +69,6 @@ const Help = struct {
         try term.writer.flush();
     }
 
-    fn print(term: *Io.Terminal, binary_name: []const u8) !void {
-        try term.writer.print(
-            \\Usage: {s} print <file>
-            \\  Formatting options planned in the future.
-            \\
-        , .{binary_name});
-        try term.writer.flush();
-    }
-
     fn edit(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
             \\Usage: {s} edit [--key] <file> <path> <replacement>
@@ -93,7 +82,7 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get <file> <path>
+            \\Usage: {s} get <file> [path]
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\
@@ -146,33 +135,6 @@ pub fn main(init: std.process.Init) !void {
         .version, .@"--version", .@"-v" => {
             try stdout_terminal.writer.print("{s}\n", .{version});
             try stdout_terminal.writer.flush();
-        },
-        .print, .p => {
-            if (args.next()) |file_path| {
-                if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
-                    try Help.print(&stdout_terminal, config.binary_name);
-                    return;
-                }
-                const input = try getInput(io, file_path, .read_only);
-                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
-                // Detect kind of file
-                const lang = languageFromPath(file_path) orelse return error.UnsupportedDocumentType;
-                switch (lang) {
-                    .json => {
-                        const doc = try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input);
-                        try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
-                    },
-                    .yaml => {
-                        const doc = try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input);
-                        try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
-                    },
-                }
-
-            } else {
-                log.err("No file provided.\n", .{});
-                try Help.print(&stderr_terminal, config.binary_name);
-                std.process.exit(2);
-            }
         },
         .edit, .e => {
             var edit_key = false;
@@ -229,25 +191,25 @@ pub fn main(init: std.process.Init) !void {
                 const input = try getInput(io, file_path, .read_only);
                 defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
                 // Get path and replacement from CLI args
-                var path: []fig.AST.PathSegment = undefined;
+                var path: ?[]fig.AST.PathSegment = null;
                 if (args.next()) |p| {
                     path = try parsePath(init.arena.allocator(), p);
-                } else {
-                    log.err("No path provided.\n", .{});
-                    try Help.get(&stderr_terminal, config.binary_name);
-                    std.process.exit(2);
                 }
                 // Detect kind of file
                 switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
                     .json => {
                         const doc = try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input);
-                        const node = try doc.ast.getValByPath(path);
-                        try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                        if (path) |p| {
+                            const node = try doc.ast.getValByPath(p);
+                            try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                        } else try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
                     },
                     .yaml => {
                         const doc = try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input);
-                        const node = try doc.ast.getValByPath(path);
-                        try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                        if (path) |p| {
+                            const node = try doc.ast.getValByPath(p);
+                            try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                        } else try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
                     },
                 }
                 try stdout_terminal.writer.flush();
