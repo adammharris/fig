@@ -254,11 +254,11 @@ test "yaml flat sequence" {
 
 test "yaml nested indentation" {
     try testTokenizer(
-\\root:
-\\  child: value
-\\next: value
-\\
-        ,
+        \\root:
+        \\  child: value
+        \\next: value
+        \\
+    ,
         &.{
             tok(.scalar, 0, 4),
             tok(.colon, 4, 5),

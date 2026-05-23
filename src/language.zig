@@ -31,5 +31,7 @@ pub fn validate(comptime Lang: type) void {
 
         if (!@hasDecl(Lang, "parse"))
             @compileError("Language must define parse");
+        if (!@hasDecl(Lang, "print"))
+            @compileError("Language must define print");
     }
 }

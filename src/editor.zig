@@ -39,13 +39,13 @@ pub fn Editor(comptime Language: type) type {
 
         pub fn replaceValAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
             const doc = try self.getDoc();
-            const span = (try doc.getNodeVal(path)).span;
+            const span = (try doc.getValByPath(path)).span;
             try self.replaceAtSpan(span, replacement);
         }
 
         pub fn replaceKeyAtPath(self: *Self, path: []const Document.PathSegment, replacement: []const u8) !void {
             const doc = try self.getDoc();
-            const span = (try doc.getNodeKey(path)).span;
+            const span = (try doc.getKeyByPath(path)).span;
             try self.replaceAtSpan(span, replacement);
         }
 

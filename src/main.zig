@@ -207,7 +207,7 @@ pub fn main(init: std.process.Init) !void {
                     },
                     .yaml => {
                         try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, path, replacement, edit_key);
-                    }
+                    },
                 }
             } else {
                 log.err("No file provided.\n", .{});
@@ -260,12 +260,7 @@ fn print(term: *Io.Terminal, str: []const u8) !void {
     try term.writer.flush();
 }
 
-fn parseDocument(
-    comptime Lang: type,
-    allocator: std.mem.Allocator,
-    io: Io,
-    file: Io.File
-) !fig.Document {
+fn parseDocument(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
     // Get file reader
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
