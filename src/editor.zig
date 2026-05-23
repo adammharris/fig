@@ -39,14 +39,14 @@ pub fn Editor(comptime Language: type) type {
 
         pub fn replaceValAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
             const parsed = try self.getParsed();
-            const node = try parsed.document.getValByPath(path);
+            const node = try parsed.ast.getValByPath(path);
             const span = parsed.span(node);
             try self.replaceAtSpan(span, replacement);
         }
 
         pub fn replaceKeyAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
             const parsed = try self.getParsed();
-            const node = try parsed.document.getKeyByPath(path);
+            const node = try parsed.ast.getKeyByPath(path);
             const span = parsed.span(node);
             try self.replaceAtSpan(span, replacement);
         }

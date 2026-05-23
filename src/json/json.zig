@@ -17,7 +17,7 @@ pub const Language = struct {
     pub fn parse(parser: *json.Parser, input: []const u8, format: Type) !Document {
         return json.Parser.parse(parser.allocator, input, format);
     }
-    pub fn print(writer: *@import("std").Io.Writer, document: *const AST) !void {
-        return json.Printer.print(writer, document);
-    }
+    pub const print = Printer.print;
+    pub const printNode = Printer.printNode;
+
 };

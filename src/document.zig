@@ -9,12 +9,12 @@ const Span = @import("util/span.zig");
 /// `source` is borrowed. `document.nodes` and `node_spans` are owned by this
 /// value and freed by `deinit`.
 source: []const u8,
-document: AST,
+ast: AST,
 /// Indexed by node id: `node_spans[node.id]` is that node's source span.
 node_spans: []const Span,
 
 pub fn deinit(self: Document, allocator: std.mem.Allocator) void {
-    allocator.free(self.document.nodes);
+    allocator.free(self.ast.nodes);
     allocator.free(self.node_spans);
 }
 

@@ -16,7 +16,6 @@ pub const Language = struct {
     pub fn parse(parser: *yaml.Parser, input: []const u8, format: Type) !Document {
         return yaml.Parser.parse(parser.allocator, input, format);
     }
-    pub fn print(writer: *@import("std").Io.Writer, document: *const AST) !void {
-        return yaml.Printer.print(writer, document);
-    }
+    pub const print = Printer.print;
+    pub const printNode = Printer.printNode;
 };

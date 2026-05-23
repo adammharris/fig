@@ -84,7 +84,7 @@ pub fn getNumber(slice: []const u8) ParseError!AST.Node.Kind.Number {
 pub fn parseAbstract(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
     const parsed = try parse(allocator, input, format);
     allocator.free(parsed.node_spans);
-    return parsed.document;
+    return parsed.ast;
 }
 
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
@@ -277,7 +277,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
     self.node_spans = .empty;
     return .{
         .source = input,
-        .document = .{
+        .ast = .{
             .root = self.root orelse return ParseError.UnexpectedToken,
             .nodes = nodes,
         },

@@ -36,12 +36,12 @@ const CliActionOptions = union(CliAction) { help, @"--help", @"-h", version, @"-
     requested_help: bool = false,
 }, p, edit: struct {
     file: []const u8,
-    path: []fig.Document.PathSegment,
+    path: []fig.AST.PathSegment,
     replacement: []const u8,
     requested_help: bool = false,
 }, e, get: struct {
     file: []const u8,
-    path: []fig.Document.PathSegment,
+    path: []fig.AST.PathSegment,
     requested_help: bool = false,
 }, g };
 
@@ -157,12 +157,18 @@ pub fn main(init: std.process.Init) !void {
                 // TODO: don't close if stdin (also in edit branch)
                 defer input.close(io);
                 // Detect kind of file
-                var doc: fig.Document = undefined;
-                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
-                    .json => doc = try parseDocument(fig.Language.JSON, init.arena.allocator(), io, input),
-                    .yaml => doc = try parseDocument(fig.Language.YAML, init.arena.allocator(), io, input),
+                const lang = languageFromPath(file_path) orelse return error.UnsupportedDocumentType;
+                switch (lang) {
+                    .json => {
+                        const doc = try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input);
+                        try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
+                    },
+                    .yaml => {
+                        const doc = try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input);
+                        try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
+                    },
                 }
-                try doc.dump(stdout_terminal.writer);
+
             } else {
                 log.err("No file provided.\n", .{});
                 try Help.print(&stderr_terminal, config.binary_name);
@@ -186,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
                 const input = try getInput(io, file_path, .read_write);
                 defer input.close(io);
                 // Get path and replacement from CLI args
-                var path: []fig.Document.PathSegment = undefined;
+                var path: []fig.AST.PathSegment = undefined;
                 var replacement: []const u8 = undefined;
                 if (args.next()) |p| {
                     path = try parsePath(init.arena.allocator(), p);
@@ -224,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
                 const input = try getInput(io, file_path, .read_only);
                 defer input.close(io);
                 // Get path and replacement from CLI args
-                var path: []fig.Document.PathSegment = undefined;
+                var path: []fig.AST.PathSegment = undefined;
                 if (args.next()) |p| {
                     path = try parsePath(init.arena.allocator(), p);
                 } else {
@@ -233,14 +239,18 @@ pub fn main(init: std.process.Init) !void {
                     std.process.exit(2);
                 }
                 // Detect kind of file
-                var doc: fig.Document = undefined;
                 switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
-                    .json => doc = try parseDocument(fig.Language.JSON, init.arena.allocator(), io, input),
-                    .yaml => doc = try parseDocument(fig.Language.YAML, init.arena.allocator(), io, input),
+                    .json => {
+                        const doc = try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input);
+                        const node = try doc.ast.getValByPath(path);
+                        try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                    },
+                    .yaml => {
+                        const doc = try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input);
+                        const node = try doc.ast.getValByPath(path);
+                        try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
+                    },
                 }
-                const node = try doc.getNodeVal(path);
-                log.debug("node: {s}", .{doc.source[node.span.start..node.span.end]});
-                try node.dump(stdout_terminal.writer, doc.source, 0, doc.nodes);
                 try stdout_terminal.writer.flush();
             } else {
                 log.err("No file provided.\n", .{});
@@ -260,7 +270,7 @@ fn print(term: *Io.Terminal, str: []const u8) !void {
     try term.writer.flush();
 }
 
-fn parseDocument(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
+fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
     // Get file reader
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
@@ -274,7 +284,7 @@ fn editDocument(
     allocator: std.mem.Allocator,
     io: Io,
     file: Io.File,
-    path: []fig.Document.PathSegment,
+    path: []fig.AST.PathSegment,
     replacement: []const u8,
     edit_key: bool,
 ) !void {
@@ -322,8 +332,8 @@ fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mod
     }
 }
 
-fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.Document.PathSegment {
-    var path_in_progress: std.ArrayList(fig.Document.PathSegment) = .empty;
+fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegment {
+    var path_in_progress: std.ArrayList(fig.AST.PathSegment) = .empty;
     var i: usize = 0;
     while (i < path.len) {
         switch (path[i]) {

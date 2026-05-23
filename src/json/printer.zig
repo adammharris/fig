@@ -4,25 +4,25 @@ const AST = @import("../ast.zig");
 const Writer = std.Io.Writer;
 
 /// Prints a given document in JSON format.
-pub fn print(writer: *Writer, document: *const AST) Writer.Error!void {
-    try printNode(writer, document, document.root, 0);
+pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
+    try printNode(writer, ast, ast.root, 0);
     try writer.writeByte('\n');
     try writer.flush();
 }
 
-fn printNode(writer: *Writer, document: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
-    const node = document.nodes[id];
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+    const node = ast.nodes[id];
     switch (node.kind) {
         .null_ => try writer.writeAll("null"),
         .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
         .number => |value| try writer.writeAll(value.raw),
         .string => |value| try writeJsonString(writer, value),
-        .sequence => |first_child| try printSequence(writer, document, first_child, depth),
-        .mapping => |first_child| try printMapping(writer, document, first_child, depth),
+        .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
+        .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
         .keyvalue => |kv| {
-            try printNode(writer, document, kv.key, depth);
+            try printNode(writer, ast, kv.key, depth);
             try writer.writeAll(": ");
-            try printNode(writer, document, kv.value, depth);
+            try printNode(writer, ast, kv.value, depth);
         },
     }
 }

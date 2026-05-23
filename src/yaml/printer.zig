@@ -4,13 +4,13 @@ const AST = @import("../ast.zig");
 const Writer = std.Io.Writer;
 
 /// Prints a given document in YAML block format.
-pub fn print(writer: *Writer, document: *const AST) Writer.Error!void {
-    try printNode(writer, document, document.root, 0);
+pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
+    try printNode(writer, ast, ast.root, 0);
     try writer.flush();
 }
 
-fn printNode(writer: *Writer, document: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
-    const node = document.nodes[id];
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+    const node = ast.nodes[id];
     switch (node.kind) {
         .null_ => try writer.writeAll("null\n"),
         .boolean => |value| {
@@ -25,9 +25,9 @@ fn printNode(writer: *Writer, document: *const AST, id: AST.Node.Id, depth: usiz
             try printScalar(writer, value);
             try writer.writeByte('\n');
         },
-        .sequence => |first_child| try printSequence(writer, document, first_child, depth),
-        .mapping => |first_child| try printMapping(writer, document, first_child, depth),
-        .keyvalue => |kv| try printKeyValue(writer, document, kv, depth),
+        .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
+        .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
+        .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth),
     }
 }
 

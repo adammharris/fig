@@ -41,13 +41,13 @@ const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
 /// Pass allocator, input, and type, and get a Document.
-pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
-    const parsed = try parseParsed(allocator, input, format);
+pub fn parseAbstract(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
+    const parsed = try parse(allocator, input, format);
     allocator.free(parsed.node_spans);
-    return parsed.document;
+    return parsed.ast;
 }
 
-pub fn parseParsed(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
+pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
     var parser: Parser = .{ .allocator = allocator };
     defer parser.deinit();
     return parser.parseOnce(input, format);
@@ -114,7 +114,7 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     self.node_spans = .empty;
     return .{
         .source = input,
-        .document = .{
+        .ast = .{
             .root = root,
             .nodes = nodes,
         },
