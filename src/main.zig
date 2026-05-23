@@ -154,8 +154,7 @@ pub fn main(init: std.process.Init) !void {
                     return;
                 }
                 const input = try getInput(io, file_path, .read_only);
-                // TODO: don't close if stdin (also in edit branch)
-                defer input.close(io);
+                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
                 // Detect kind of file
                 const lang = languageFromPath(file_path) orelse return error.UnsupportedDocumentType;
                 switch (lang) {
@@ -190,7 +189,7 @@ pub fn main(init: std.process.Init) !void {
                     return;
                 }
                 const input = try getInput(io, file_path, .read_write);
-                defer input.close(io);
+                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
                 // Get path and replacement from CLI args
                 var path: []fig.AST.PathSegment = undefined;
                 var replacement: []const u8 = undefined;
@@ -228,14 +227,14 @@ pub fn main(init: std.process.Init) !void {
                     return;
                 }
                 const input = try getInput(io, file_path, .read_only);
-                defer input.close(io);
+                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
                 // Get path and replacement from CLI args
                 var path: []fig.AST.PathSegment = undefined;
                 if (args.next()) |p| {
                     path = try parsePath(init.arena.allocator(), p);
                 } else {
                     log.err("No path provided.\n", .{});
-                    try Help.edit(&stderr_terminal, config.binary_name);
+                    try Help.get(&stderr_terminal, config.binary_name);
                     std.process.exit(2);
                 }
                 // Detect kind of file
