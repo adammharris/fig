@@ -6,46 +6,45 @@ const std = @import("std");
 const fig = @import("fig");
 const Io = std.Io;
 
-const log = std.log.scoped(.main);
-const arg_log = std.log.scoped(.arg);
-
 const title_string = "\n=========\n   FIG\n=========\n\n";
 const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
+const Format = enum { json, jsonc, yaml, yml };
 
 const CliAction = enum {
-    help, // default
-    @"--help",
-    @"-h",
+    help,
     version,
-    @"--version",
-    @"-v",
     edit,
-    e,
-    // TODO: more actions
     get,
-    g,
 };
 
-const CliActionOptions = union(CliAction) { help, @"--help", @"-h", version, @"--version", @"-v": struct {
-    file: []const u8,
-    requested_help: bool = false,
-}, edit: struct {
-    file: []const u8,
-    path: []fig.AST.PathSegment,
-    replacement: []const u8,
-    requested_help: bool = false,
-}, e, get: struct {
-    file: []const u8,
-    path: []fig.AST.PathSegment,
-    requested_help: bool = false,
-}, g };
+const CliActionOptions = union(CliAction) {
+    help: struct {
+        requested_help: bool = false,
+    },
+    version: struct {},
+    edit: struct {
+        file: []const u8,
+        path: []fig.AST.PathSegment,
+        replacement: []const u8,
+        key: bool = false,
+        requested_help: bool = false,
+        format: Format,
+    },
+    get: struct {
+        file: []const u8,
+        path: ?[]fig.AST.PathSegment = null,
+        from: Format,
+        to: Format,
+        requested_help: bool = false,
+    },
+};
 
 const CliConfig = struct {
     action: CliAction = .help,
-    options: CliActionOptions = .help,
+    options: CliActionOptions = .{ .help = .{} },
     binary_name: []const u8 = "fig",
     requested_help: bool = false,
 };
@@ -58,9 +57,8 @@ const Help = struct {
             \\Possible actions:
             \\  help: prints this text (default action)
             \\  version: prints version number
-            \\  print: prints generic representation of file to stdout
             \\  edit: edits part of file
-            \\  get: print a specific part of file to stdout
+            \\  get: print a file or a specific part of a file to stdout
             \\
             \\For information on action options, pass --help or -h
             \\to the action you would like to learn about.
@@ -82,7 +80,9 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get <file> [path]
+            \\Usage: {s} get [--input json|yaml] [--output json|yaml] <file> [path]
+            \\  -i, --input: input format of file (defaults to matching the file extension)
+            \\  -o, --output:   output format (defaults to the input format)
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\
@@ -111,124 +111,91 @@ pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(init.gpa);
     defer args.deinit();
 
-    // CLI config structs
-    var config = CliConfig{};
-
-    config.binary_name = args.next() orelse "fig";
-
-    if (args.next()) |arg| {
-        config.action = std.meta.stringToEnum(CliAction, arg) orelse c: {
-            arg_log.err("Action not recognized.", .{});
-            break :c .help;
-        };
-    } else {
-        arg_log.err("Action not provided.", .{});
-        config.action = .help;
-    }
+    const config = parseConfig(init.arena.allocator(), &args) catch |err| switch (err) {
+        ArgError.UnsupportedFileFormat => {
+            try stderr_terminal.writer.print("Try using `--input <format>` to manually specify a format.\n", .{});
+            comptime var supported_formats: []const u8 = "";
+            inline for (@typeInfo(Format).@"enum".fields) |field|
+                supported_formats = supported_formats ++ std.fmt.comptimePrint("\n- {s}", .{field.name});
+            try stderr_terminal.writer.print("Supported formats:{s}\n", .{supported_formats});
+            try stderr_terminal.writer.flush();
+            std.process.exit(2);
+        },
+        ArgError.MissingEditArgument => {
+            try Help.edit(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingGetArgument => {
+            try Help.get(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        else => return err,
+    };
 
     // Now, act on config
     return switch (config.action) {
-        .help, .@"--help", .@"-h" => {
-            try print(&stderr_terminal, title_string);
+        .help => {
+            try stderr_terminal.writer.print(title_string, .{});
             try Help.general(&stderr_terminal, config.binary_name);
         },
-        .version, .@"--version", .@"-v" => {
+        .version => {
             try stdout_terminal.writer.print("{s}\n", .{version});
             try stdout_terminal.writer.flush();
         },
-        .edit, .e => {
-            var edit_key = false;
-            var file_path_arg = args.next();
-            if (file_path_arg) |arg| {
-                if (std.mem.eql(u8, arg, "--key")) {
-                    edit_key = true;
-                    file_path_arg = args.next();
-                }
+        .edit => {
+            const opts = config.options.edit;
+            if (opts.requested_help) {
+                try Help.edit(&stdout_terminal, config.binary_name);
+                return;
             }
-            if (file_path_arg) |file_path| {
-                if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
-                    try Help.edit(&stdout_terminal, config.binary_name);
-                    return;
-                }
-                const input = try getInput(io, file_path, .read_write);
-                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
-                // Get path and replacement from CLI args
-                var path: []fig.AST.PathSegment = undefined;
-                var replacement: []const u8 = undefined;
-                if (args.next()) |p| {
-                    path = try parsePath(init.arena.allocator(), p);
-                } else {
-                    log.err("No path provided.\n", .{});
-                    try Help.edit(&stderr_terminal, config.binary_name);
-                    std.process.exit(2);
-                }
-                if (args.next()) |r| replacement = r else {
-                    log.err("No replacement provided.\n", .{});
-                    try Help.edit(&stderr_terminal, config.binary_name);
-                    std.process.exit(2);
-                }
-                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
-                    .json => {
-                        replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{replacement});
-                        try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, path, replacement, edit_key);
-                    },
-                    .yaml => {
-                        try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, path, replacement, edit_key);
-                    },
-                }
-            } else {
-                log.err("No file provided.\n", .{});
-                try Help.edit(&stderr_terminal, config.binary_name);
-                std.process.exit(2);
+            const input = try getInput(io, opts.file, .read_write);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            switch (opts.format) {
+                .json, .jsonc => {
+                    const replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{opts.replacement});
+                    try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, opts.key);
+                },
+                .yaml, .yml => {
+                    try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key);
+                },
             }
         },
-        .get, .g => {
-            if (args.next()) |file_path| {
-                if (std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h")) {
-                    try Help.get(&stdout_terminal, config.binary_name);
-                    return;
-                }
-                const input = try getInput(io, file_path, .read_only);
-                defer if (!std.mem.eql(u8, file_path, "-")) input.close(io);
-                // Get path and replacement from CLI args
-                var path: ?[]fig.AST.PathSegment = null;
-                if (args.next()) |p| {
-                    path = try parsePath(init.arena.allocator(), p);
-                }
-                // Detect kind of file
-                switch (languageFromPath(file_path) orelse return error.UnsupportedDocumentType) {
-                    .json => {
-                        const doc = try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input);
-                        if (path) |p| {
-                            const node = try doc.ast.getValByPath(p);
-                            try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
-                        } else try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
-                    },
-                    .yaml => {
-                        const doc = try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input);
-                        if (path) |p| {
-                            const node = try doc.ast.getValByPath(p);
-                            try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node.id, 0);
-                        } else try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
-                    },
-                }
-                try stdout_terminal.writer.flush();
-            } else {
-                log.err("No file provided.\n", .{});
-                try Help.get(&stderr_terminal, config.binary_name);
-                std.process.exit(2);
+        .get => {
+            const opts = config.options.get;
+            if (opts.requested_help) {
+                try Help.get(&stdout_terminal, config.binary_name);
+                return;
             }
+            const input = try getInput(io, opts.file, .read_only);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            const doc = switch (opts.from) {
+                .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
+                .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
+            };
+
+            const node_id = if (opts.path) |p| (try doc.ast.getValByPath(p)).id else doc.ast.root;
+
+            switch (opts.to) {
+                .json, .jsonc => {
+                    if (opts.path == null) {
+                        try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
+                    } else {
+                        try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node_id, 0);
+                    }
+                },
+                .yaml, .yml => {
+                    if (opts.path == null) {
+                        try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
+                    } else {
+                        try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node_id, 0);
+                    }
+                },
+            }
+            try stdout_terminal.writer.flush();
         },
     };
-}
-
-fn print(term: *Io.Terminal, str: []const u8) !void {
-    const view = try std.unicode.Utf8View.init(str);
-    var iter = view.iterator();
-    while (iter.nextCodepoint()) |codepoint| {
-        try term.writer.print("{u}", .{codepoint});
-    }
-    try term.writer.flush();
 }
 
 fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
@@ -269,6 +236,7 @@ fn editDocument(
 }
 
 fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !Io.File {
+    const log = std.log.scoped(.getInput);
     // Get input file descriptor
     if (file_path) |fp| {
         if (std.mem.eql(u8, fp, "-")) {
@@ -294,6 +262,7 @@ fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mod
 }
 
 fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegment {
+    const log = std.log.scoped(.parsePath);
     var path_in_progress: std.ArrayList(fig.AST.PathSegment) = .empty;
     var i: usize = 0;
     while (i < path.len) {
@@ -320,7 +289,7 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
                 const start = i;
                 // Loop until a dot or open bracket
                 while (i < path.len and path[i] != '.' and path[i] != '[') : (i += 1) {}
-                if (i == start) return error.InvalidPath;
+                if (i == start) return ArgError.InvalidPath;
                 const key = path[start..i];
 
                 log.debug("key: {s}", .{key});
@@ -331,8 +300,145 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
     return path_in_progress.toOwnedSlice(allocator);
 }
 
-fn languageFromPath(file_path: []const u8) ?enum { json, yaml } {
-    if (std.mem.endsWith(u8, file_path, ".json")) return .json;
-    if (std.mem.endsWith(u8, file_path, ".yaml") or std.mem.endsWith(u8, file_path, ".yml")) return .yaml;
-    return null;
+fn detectLanguageFromFileEnding(file_path: []const u8) !Format {
+    const dot = std.mem.findLast(u8, file_path, ".");
+    return std.meta.stringToEnum(Format, file_path[(dot orelse 0) + 1..file_path.len]) orelse {
+        const recognized_file_format = if (dot) |d| file_path[d..file_path.len] else "(none)";
+        std.log.scoped(.detectLanguage).err("File `{s}` had ending: {s}", .{ file_path, recognized_file_format });
+        return ArgError.UnsupportedFileFormat;
+    };
+}
+
+const ArgError = error { UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+
+fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
+    const log = std.log.scoped(.parseConfig);
+    var config = CliConfig{};
+    config.binary_name = args.next() orelse "fig";
+
+    const action_str = args.next() orelse {
+        config.action = .help;
+        config.options = .{ .help = .{} };
+        return config;
+    };
+
+    if (std.mem.eql(u8, action_str, "help") or std.mem.eql(u8, action_str, "--help") or std.mem.eql(u8, action_str, "-h")) {
+        config.action = .help;
+        config.options = .{ .help = .{ .requested_help = true } };
+    } else if (std.mem.eql(u8, action_str, "version") or std.mem.eql(u8, action_str, "--version") or std.mem.eql(u8, action_str, "-v")) {
+        config.action = .version;
+        config.options = .{ .version = .{} };
+    } else if (std.mem.eql(u8, action_str, "edit") or std.mem.eql(u8, action_str, "e")) {
+        config.action = .edit;
+
+        var edit_key = false;
+        var file_path_arg = args.next();
+        if (file_path_arg) |arg| {
+            if (std.mem.eql(u8, arg, "--key")) {
+                edit_key = true;
+                file_path_arg = args.next();
+            }
+        }
+        const file_path = file_path_arg orelse {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingEditArgument;
+        };
+
+        const requested_help = std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h");
+
+        var path: []fig.AST.PathSegment = &.{};
+        var replacement: []const u8 = "";
+        if (!requested_help) {
+            const path_str = args.next() orelse {
+                log.err("No path provided.\n", .{});
+                return ArgError.MissingEditArgument;
+            };
+            path = try parsePath(allocator, path_str);
+
+            replacement = args.next() orelse {
+                log.err("No replacement provided.\n", .{});
+                return ArgError.MissingEditArgument;
+            };
+        }
+
+        config.options = .{ .edit = .{
+            .file = file_path,
+            .path = path,
+            .replacement = replacement,
+            .key = edit_key,
+            .requested_help = requested_help,
+            .format = try detectLanguageFromFileEnding(file_path),
+        } };
+    } else if (std.mem.eql(u8, action_str, "get") or std.mem.eql(u8, action_str, "g")) {
+        config.action = .get;
+
+        var input_override: ?Format = null;
+        var output_override: ?Format = null;
+        var positionals: std.ArrayList([]const u8) = .empty;
+        defer positionals.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
+                const fmt = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+                if (std.mem.eql(u8, fmt, "json")) {
+                    input_override = .json;
+                } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
+                    input_override = .yaml;
+                } else {
+                    log.err("Unsupported format: {s}\n", .{fmt});
+                    return ArgError.UnsupportedFileFormat;
+                }
+            } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+                const fmt = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+                if (std.mem.eql(u8, fmt, "json")) {
+                    output_override = .json;
+                } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
+                    output_override = .yaml;
+                } else {
+                    log.err("Unsupported format: {s}\n", .{fmt});
+                    return ArgError.UnsupportedFileFormat;
+                }
+            } else {
+                try positionals.append(allocator, arg);
+            }
+        }
+
+        const file_path = if (positionals.items.len > 0) positionals.items[0] else {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingGetArgument;
+        };
+
+        const requested_help = std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h");
+
+        var path: ?[]fig.AST.PathSegment = null;
+        if (!requested_help and positionals.items.len > 1) {
+            path = try parsePath(allocator, positionals.items[1]);
+        }
+
+        const detected_input = if (!requested_help and input_override == null)
+            try detectLanguageFromFileEnding(file_path)
+        else
+            null;
+        const input_format = input_override orelse detected_input orelse .json;
+
+        config.options = .{ .get = .{
+            .file = file_path,
+            .path = path,
+            .from = input_format,
+            .to = output_override orelse input_format,
+            .requested_help = requested_help,
+        } };
+    } else {
+        log.err("Action not recognized: {s}", .{action_str});
+        config.action = .help;
+        config.options = .{ .help = .{ .requested_help = true } };
+    }
+
+    return config;
 }
