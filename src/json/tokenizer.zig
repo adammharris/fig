@@ -76,10 +76,7 @@ pub const Tokenizer = struct {
                 '/' => try self.comment(),
                 '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-' => try self.number(),
                 ' ', '\t', '\n', '\r' => try self.getWhitespace(),
-                else => {
-                    logErr("Found: {c}", .{c});
-                    return TokenizeError.UnexpectedToken;
-                },
+                else => return TokenizeError.UnexpectedToken,
             });
         }
 
@@ -100,7 +97,6 @@ pub const Tokenizer = struct {
             },
             else => return error.UnexpectedToken,
         }
-        logErr("Broken literal", .{});
         return TokenizeError.UnexpectedToken;
     }
 
@@ -135,13 +131,21 @@ pub const Tokenizer = struct {
 
     /// Checks if the index is on a given sequence of characters.
     fn matches(self: *const Tokenizer, str: []const u8) bool {
-        // TODO: can read out of bounds in `matches()` for truncated literals like `tru`, `fals`, or `n`. Check `self.index + str.len <= self.str.len` before indexing.
+        if (str.len > self.str.len - self.index) return false;
         var local_index = self.index;
         for (str) |c| {
             if (self.str[local_index] != c) return false;
             local_index += 1;
         }
         return true;
+    }
+
+    fn isDigit(c: u8) bool {
+        return c >= '0' and c <= '9';
+    }
+
+    fn isHexDigit(c: u8) bool {
+        return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
     }
 
     // ========================
@@ -170,18 +174,32 @@ pub const Tokenizer = struct {
 
         while (self.char()) |c| {
             switch (c) {
-                '"' => {
+                '"' => { // Closing quote
                     self.index += 1; // skip final `"`
                     const end = self.index;
                     return .init(.string, .init(start, end));
                 },
-                '\\' => {
-                    //TODO: accepts invalid escapes like `\x`, raw
-                    // newlines/control bytes, and incomplete `\u` escapes
+                '\\' => { // Escape a character
                     self.index += 1; // skip backslash
-                    if (self.char() == null) return error.UnclosedString;
-                    self.index += 1; // skip escaped character
+                    const escaped = self.char() orelse return TokenizeError.UnclosedString;
+                    switch (escaped) {
+                        // Valid escapes: quote, backslash, whitespace
+                        '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => {
+                            self.index += 1;
+                        },
+                        // Unicode escape. \u<four hex characters>
+                        'u' => {
+                            self.index += 1;
+                            for (0..4) |_| {
+                                const hex = self.char() orelse return TokenizeError.UnclosedString;
+                                if (!isHexDigit(hex)) return TokenizeError.UnexpectedToken;
+                                self.index += 1;
+                            }
+                        },
+                        else => return TokenizeError.UnexpectedToken,
+                    }
                 },
+                0x00...0x1f => return TokenizeError.UnexpectedToken,
                 else => self.index += 1,
             }
         }
@@ -192,75 +210,69 @@ pub const Tokenizer = struct {
     /// Negative, decimal, exponent
     /// Checks for leading zero as well.
     fn number(self: *Tokenizer) TokenizeError!Token {
-        // TODO: accepts several invalid JSON numbers: `-`, `-.2`, `1.`, `1e+`; it also accepts `-012` but rejects valid forms like `0e1`. Number scanning needs a stricter grammar: optional `-`, integer part, optional fraction with at least one digit, optional exponent with optional sign and at least one digit.
         const start = self.index;
-
-        var isDecimal = false;
-        var leadingZero = false;
-        var isExponent = false;
-        var isNegative = false;
 
         // Check for negativity
         if (self.char() == '-') {
             self.index += 1;
-            isNegative = true;
         }
 
-        // Check for leading zero
-        if (self.char() == '0') {
+        switch (self.char() orelse return TokenizeError.UnexpectedEndOfInput) {
+            // Either zero, or illegal leading zero
+            '0' => {
+                self.index += 1;
+                if (self.char()) |c| if (isDigit(c)) return TokenizeError.LeadingZero;
+            },
+            '1'...'9' => {
+                self.index += 1;
+                while (self.char()) |c| {
+                    if (!isDigit(c)) break;
+                    self.index += 1;
+                }
+            },
+            else => return TokenizeError.UnexpectedToken
+        }
+
+        // Check for decimal
+        if (self.char() == '.') {
             self.index += 1;
-            leadingZero = true;
-        }
-
-        // Start collecting numbers.
-        // Watch out for: `.`, `e`, `E`
-        while (true) {
-            switch (self.char() orelse return error.UnexpectedEndOfInput) {
-                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => self.index += 1,
-                '.' => {
-                    if (isDecimal) {
-                        logErr("Already found a period. Slice: {s}", .{self.str[start..self.index]});
-                        return TokenizeError.UnexpectedToken;
-                    }
-                    isDecimal = true;
-                    self.index += 1;
-                },
-                'e', 'E' => {
-                    if (isExponent) {
-                        logErr("Already found an e/E. Slice: {s}", .{self.str[start..self.index]});
-                        return TokenizeError.UnexpectedToken;
-                    }
-                    isExponent = true;
-                    self.index += 1;
-                    switch (self.char() orelse return error.UnexpectedEndOfInput) {
-                        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '-' => self.index += 1,
-                        else => {
-                            logErr("Invalid exponent. Expected +/- or digit, found {c}", .{self.char() orelse 0});
-                            return TokenizeError.UnexpectedToken;
-                        },
-                    }
-                },
-                else => break,
+            const first_fraction = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
+            if (!isDigit(first_fraction)) return TokenizeError.UnexpectedToken;
+            while (self.char()) |c| {
+                if (!isDigit(c)) break;
+                self.index += 1;
             }
         }
 
-        const end = self.index;
+        // Check for exponent
+        if (self.char()) |c| {
+            if (c == 'e' or c == 'E') {
+                self.index += 1;
+                if (self.char()) |sign| {
+                    if (sign == '+' or sign == '-') self.index += 1;
+                }
+                const first_exponent = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
+                if (!isDigit(first_exponent)) return TokenizeError.UnexpectedToken;
 
-        // Error if number has inappropriate leading zero, like "0123"
-        if (leadingZero and !isDecimal and (!isNegative and end - start != 1)) {
-            logErr("Leading zero detected: {s}" ++ "\nleadingZero: {any}" ++ "\nisDecimal: {any}" ++ "\nisNegative: {any}" ++ "\nisExponent: {any}" ++ "\nstart: {any}, end: {any}", .{ self.str[start..end], leadingZero, isDecimal, isNegative, isExponent, start, end });
-            return TokenizeError.LeadingZero;
+                while (self.char()) |digit| {
+                    if (!isDigit(digit)) break;
+                    self.index += 1;
+                }
+            }
         }
 
-        return .init(.number, .init(start, end));
+        return .init(.number, .init(start, self.index));
     }
 
     /// Collects all bytes until arriving at a newline
     /// Never returns null, but can be empty
     fn comment(self: *Tokenizer) TokenizeError!Token {
-        //TODO: treats any `/` as a JSONC line comment and skips two bytes without confirming the second byte is `/`. Bare `/` can produce a span past the input length.
         // Comments are not supported in the canonical JSON format
         if (self.kind == JsonFormat.JSON) return error.UnexpectedSlash;
+
+        // Make sure following character is also a slash
+        if (self.index + 1 >= self.str.len or self.str[self.index + 1] != '/') return TokenizeError.UnexpectedSlash;
+
         const start = self.index;
         self.index += 2; // Skip the '//' characters
         while (self.char()) |c| {
@@ -271,12 +283,6 @@ pub const Tokenizer = struct {
         return .init(.comment, .init(start, end));
     }
 };
-
-fn logErr(comptime fmt: []const u8, args: anytype) void {
-    if (!builtin.cpu.arch.isWasm()) {
-        log.err(fmt, args);
-    }
-}
 
 // =======
 // Testing
@@ -290,12 +296,30 @@ fn tok(kind: Token.Kind, start: usize, end: usize) Token {
 }
 
 fn testTokenizer(input: []const u8, expected: []const Token) !void {
-    var tokenizer: Tokenizer = .{ .allocator = testing.allocator, .str = input };
+    var tokenizer: Tokenizer = .{
+        .allocator = testing.allocator,
+        .str = input
+    };
     const tokens = try tokenizer.tokenize();
     defer testing.allocator.free(tokens);
     //errdefer log.err("expected: {any}", .{expected});
     //errdefer log.err("actual: {any}", .{tokens});
     try testing.expectEqualSlices(Token, expected, tokens);
+}
+
+fn testTokenizerError(input: []const u8, format: JsonFormat, expected_error: anyerror) !void {
+    var tokenizer: Tokenizer = .{
+        .allocator = testing.allocator,
+        .str = input,
+        .kind = format,
+    };
+
+    if (tokenizer.tokenize()) |tokens| {
+        defer testing.allocator.free(tokens);
+        try testing.expect(false);
+    } else |err| {
+        try testing.expectEqual(expected_error, err);
+    }
 }
 
 test "array no whitespace" {
@@ -387,7 +411,7 @@ test "primitives" {
 
 test "numbers" {
     try testTokenizer(
-        \\[1,-1,0,0.2,12e+3,1e10]
+        \\[1,-1,0,0.2,12e+3,1e10,0e1,-0.2,1e+10]
     , &.{
         tok(.open_bracket, 0, 1),
         tok(.number, 1, 2),
@@ -401,8 +425,14 @@ test "numbers" {
         tok(.number, 12, 17),
         tok(.comma, 17, 18),
         tok(.number, 18, 22),
-        tok(.close_bracket, 22, 23),
-        tok(.end_of_file, 23, 23),
+        tok(.comma, 22, 23),
+        tok(.number, 23, 26),
+        tok(.comma, 26, 27),
+        tok(.number, 27, 31),
+        tok(.comma, 31, 32),
+        tok(.number, 32, 37),
+        tok(.close_bracket, 37, 38),
+        tok(.end_of_file, 38, 38),
     });
 }
 
@@ -421,4 +451,43 @@ test "empty object/array" {
         tok(.close_brace, 1, 2),
         tok(.end_of_file, 2, 2),
     });
+}
+
+test "truncated literals are rejected" {
+    try testTokenizerError("tru", .JSONC, error.UnexpectedToken);
+    try testTokenizerError("fals", .JSONC, error.UnexpectedToken);
+    try testTokenizerError("n", .JSONC, error.UnexpectedToken);
+}
+
+test "strings reject invalid JSON escapes and control bytes" {
+    try testTokenizerError("\"\\x\"", .JSONC, error.UnexpectedToken);
+    try testTokenizerError("\"line\nbreak\"", .JSONC, error.UnexpectedToken);
+    try testTokenizerError("\"\\u12", .JSONC, error.UnclosedString);
+    try testTokenizerError("\"\\u12g4\"", .JSONC, error.UnexpectedToken);
+}
+
+test "strict JSON numbers reject invalid forms" {
+    try testTokenizerError("-", .JSONC, error.UnexpectedEndOfInput);
+    try testTokenizerError("-.2", .JSONC, error.UnexpectedToken);
+    try testTokenizerError("1.", .JSONC, error.UnexpectedEndOfInput);
+    try testTokenizerError("1e+", .JSONC, error.UnexpectedEndOfInput);
+    try testTokenizerError("-012", .JSONC, error.LeadingZero);
+    try testTokenizerError("012", .JSONC, error.LeadingZero);
+}
+
+test "JSONC comments require line comment syntax" {
+    try testTokenizer(
+        "[// hi\n1]"
+    , &.{
+        tok(.open_bracket, 0, 1),
+        tok(.comment, 1, 6),
+        tok(.whitespace, 6, 7),
+        tok(.number, 7, 8),
+        tok(.close_bracket, 8, 9),
+        tok(.end_of_file, 9, 9),
+    });
+
+    try testTokenizerError("/", .JSONC, error.UnexpectedSlash);
+    try testTokenizerError("/* hi */", .JSONC, error.UnexpectedSlash);
+    try testTokenizerError("// hi", .JSON, error.UnexpectedSlash);
 }

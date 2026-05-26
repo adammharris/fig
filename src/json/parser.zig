@@ -44,6 +44,7 @@ const State = enum {
     ExpectArrayCommaOrEnd,
 
     ExpectObjectKeyOrEnd,
+    ExpectObjectKey,
     ExpectObjectColon,
     ExpectObjectValue,
     ExpectObjectCommaOrEnd,
@@ -55,7 +56,6 @@ const State = enum {
 pub fn getBool(slice: []const u8) ParseError!bool {
     if (std.mem.eql(u8, slice, "true")) return true;
     if (std.mem.eql(u8, slice, "false")) return false;
-    logErr("Tried to parse invalid value as boolean: `{s}`", .{slice});
     return error.InvalidBool;
 }
 
@@ -64,14 +64,7 @@ pub fn getString(slice: []const u8) ParseError![]const u8 {
     if (slice.len >= 2 and slice[0] == '"' and slice[slice.len - 1] == '"') {
         return slice[1 .. slice.len - 1];
     }
-    logErr("Tried to parse invalid value as string: `{s}`", .{slice});
     return error.UnclosedString;
-}
-
-fn logErr(comptime fmt: []const u8, args: anytype) void {
-    if (!builtin.cpu.arch.isWasm()) {
-        log.err(fmt, args);
-    }
 }
 
 /// Returns lossless struct representation of a number
@@ -113,14 +106,12 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
     // Each Document.Node has an id, a kind, and a next_sibling ID.
     // We produce them from the tokens.
 
-    //TODO: parse tokens
     for (tokens) |token| {
         if (token.kind == .whitespace) continue;
         if (token.kind == .comment) continue;
 
         switch (self.state) {
             .ExpectValue => {
-                // TODO: update state
                 switch (token.kind) {
                     .open_brace => {
                         const id = try self.addNode(.{ .mapping = null }, token.span);
@@ -215,6 +206,17 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
                     else => return ParseError.UnexpectedToken,
                 }
             },
+            .ExpectObjectKey => {
+                switch (token.kind) {
+                    .string => {
+                        const key_id = try self.addTokenNode(input, token);
+                        const parent = &self.container_stack.items[self.container_stack.items.len - 1];
+                        parent.pending_key = key_id;
+                        self.state = .ExpectObjectColon;
+                    },
+                    else => return ParseError.UnexpectedToken,
+                }
+            },
             .ExpectObjectColon => {
                 switch (token.kind) {
                     .colon => {
@@ -260,9 +262,7 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
                         const id = try self.closeContainer(token.span.end);
                         try self.finishValue(id);
                     },
-                    .comma => {
-                        self.state = .ExpectObjectKeyOrEnd; // TODO: allow trailing comma?
-                    },
+                    .comma => self.state = .ExpectObjectKey,
                     else => return ParseError.UnexpectedToken,
                 }
             },
@@ -404,6 +404,15 @@ fn testParser(input: []const u8, expected: AST) !void {
     try testing.expect(expected.eql(doc));
 }
 
+fn testParserError(input: []const u8, expected_error: anyerror) !void {
+    if (Parser.parseAbstract(testing.allocator, input, .JSON)) |ast| {
+        defer testing.allocator.free(ast.nodes);
+        try testing.expect(false);
+    } else |err| {
+        try testing.expectEqual(expected_error, err);
+    }
+}
+
 test "simple JSON document" {
     try testParser(
         \\[{"hello":"world"}]
@@ -430,4 +439,8 @@ test "simple JSON document" {
             .next_sibling = null,
         },
     } });
+}
+
+test "object trailing comma is rejected" {
+    try testParserError("{\"a\":1,}", error.UnexpectedToken);
 }
