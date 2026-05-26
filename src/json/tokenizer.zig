@@ -282,7 +282,7 @@ pub const Tokenizer = struct {
                 }
                 return TokenizeError.UnclosedComment;
             },
-            else => return TokenizeError.UnexpectedSlash;
+            else => return TokenizeError.UnexpectedSlash,
         };
     }
 };
@@ -478,7 +478,7 @@ test "strict JSON numbers reject invalid forms" {
     try testTokenizerError("012", .JSONC, error.LeadingZero);
 }
 
-test "JSONC comments require line comment syntax" {
+test "JSONC comments" {
     try testTokenizer(
         "[// hi\n1]"
     , &.{
@@ -491,6 +491,38 @@ test "JSONC comments require line comment syntax" {
     });
 
     try testTokenizerError("/", .JSONC, error.UnexpectedSlash);
-    try testTokenizerError("/* hi */", .JSONC, error.UnexpectedSlash);
+    //multiline test
+    try testTokenizer("/* hi */", &.{tok(.comment, 0, 8), tok(.end_of_file, 8, 8)});
+    // multiline inline test
+    try testTokenizer("{\"hello\":/* hi */\"world\"}",
+        &.{
+            tok(.open_brace, 0, 1),
+            tok(.string, 1, 8),
+            tok(.colon, 8, 9),
+            tok(.comment, 9, 17),
+            tok(.string, 17, 24),
+            tok(.close_brace, 24, 25),
+            tok(.end_of_file, 25, 25)});
+    try testTokenizer( // multiline comment test
+        \\{
+        \\  "hello": "world"
+        \\/*
+        \\hello, this is  a
+        \\multiline comment
+        \\*/
+        \\}
+        ,
+        &.{
+            tok(.open_brace, 0, 1),
+            tok(.whitespace, 1, 4),
+            tok(.string, 4, 11),
+            tok(.colon, 11, 12),
+            tok(.whitespace, 12, 13),
+            tok(.string, 13, 20),
+            tok(.whitespace, 20, 21),
+            tok(.comment, 21, 62),
+            tok(.whitespace, 62, 63),
+            tok(.close_brace, 63, 64),
+            tok(.end_of_file, 64, 64)});
     try testTokenizerError("// hi", .JSON, error.UnexpectedSlash);
 }
