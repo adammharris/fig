@@ -45,7 +45,7 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ UnexpectedToken, MissingToken, OutOfMemory, UnexpectedSlash, MissingCloseBrace, MissingOpenQuote, MissingColon, MissingCloseBracket, LeadingZero, UnclosedString, UnexpectedEndOfInput };
+const TokenizeError = error{ UnexpectedToken, MissingToken, OutOfMemory, UnexpectedSlash, MissingCloseBrace, MissingOpenQuote, MissingColon, MissingCloseBracket, LeadingZero, UnclosedString, UnexpectedEndOfInput, UnclosedComment };
 
 pub const Tokenizer = struct {
     // State
@@ -152,19 +152,6 @@ pub const Tokenizer = struct {
     // TERMINAL TOKEN FUNCTIONS
     // ========================
 
-    /// Collects all whitespace and returns it as a token.
-    /// Can return null. `addToken` checks for null.
-    fn whitespace(self: *Tokenizer) TokenizeError!?Token {
-        const start = self.index;
-        while (self.char()) |c| {
-            if (!std.ascii.isWhitespace(c)) break;
-            self.index += 1;
-        }
-        const end = self.index;
-        if (start == end) return null;
-        return .init(.whitespace, .init(start, end));
-    }
-
     /// Collects all the bytes of a string and returns a JsonToken.string
     /// Never returns null, but can be an empty string.
     /// Respects escaped values.
@@ -269,18 +256,34 @@ pub const Tokenizer = struct {
     fn comment(self: *Tokenizer) TokenizeError!Token {
         // Comments are not supported in the canonical JSON format
         if (self.kind == JsonFormat.JSON) return error.UnexpectedSlash;
-
-        // Make sure following character is also a slash
-        if (self.index + 1 >= self.str.len or self.str[self.index + 1] != '/') return TokenizeError.UnexpectedSlash;
+        // Make sure there isn't just a random single slash
+        if (self.index + 1 >= self.str.len) return TokenizeError.UnexpectedSlash;
 
         const start = self.index;
-        self.index += 2; // Skip the '//' characters
-        while (self.char()) |c| {
-            if (c == '\n') break;
-            self.index += 1;
-        }
-        const end = self.index;
-        return .init(.comment, .init(start, end));
+        const second = self.str[self.index + 1];
+
+        return switch (second) {
+            '/' => { // Single line comment
+                self.index += 2;
+                while (self.char()) |c| {
+                    if (c == '\n') break;
+                    self.index += 1;
+                }
+                return .init(.comment, .init(start, self.index));
+            },
+            '*' => { // Multi-line comment
+                self.index += 2;
+                while (self.index + 1 < self.str.len) {
+                    if (self.str[self.index] == '*' and self.str[self.index + 1] == '/') {
+                        self.index += 2;
+                        return .init(.comment, .init(start, self.index));
+                    }
+                    self.index += 1;
+                }
+                return TokenizeError.UnclosedComment;
+            },
+            else => return TokenizeError.UnexpectedSlash;
+        };
     }
 };
 
