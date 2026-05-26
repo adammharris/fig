@@ -1,0 +1,9 @@
+[package]
+name = "fig"
+version = "0.0.0"
+edition = "2024"
+links = "fig"
+
+[lib]
+name = "fig"
+path = "src/lib.rs"

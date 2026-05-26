@@ -1,7 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.tokenizer);
 const testing = std.testing;
-const JsonFormat = @import("json.zig").Language.Type;
+const JsonFormat = @import("json.zig").Type;
 const Span = @import("../util/span.zig");
 
 pub const Token = @import("../token.zig").Token(Kind);
@@ -76,7 +77,7 @@ pub const Tokenizer = struct {
                 '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-' => try self.number(),
                 ' ', '\t', '\n', '\r' => try self.getWhitespace(),
                 else => {
-                    log.err("Found: {c}", .{c});
+                    logErr("Found: {c}", .{c});
                     return TokenizeError.UnexpectedToken;
                 },
             });
@@ -99,7 +100,7 @@ pub const Tokenizer = struct {
             },
             else => return error.UnexpectedToken,
         }
-        log.err("Broken literal", .{});
+        logErr("Broken literal", .{});
         return TokenizeError.UnexpectedToken;
     }
 
@@ -218,7 +219,7 @@ pub const Tokenizer = struct {
                 '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => self.index += 1,
                 '.' => {
                     if (isDecimal) {
-                        log.err("Already found a period. Slice: {s}", .{self.str[start..self.index]});
+                        logErr("Already found a period. Slice: {s}", .{self.str[start..self.index]});
                         return TokenizeError.UnexpectedToken;
                     }
                     isDecimal = true;
@@ -226,7 +227,7 @@ pub const Tokenizer = struct {
                 },
                 'e', 'E' => {
                     if (isExponent) {
-                        log.err("Already found an e/E. Slice: {s}", .{self.str[start..self.index]});
+                        logErr("Already found an e/E. Slice: {s}", .{self.str[start..self.index]});
                         return TokenizeError.UnexpectedToken;
                     }
                     isExponent = true;
@@ -234,7 +235,7 @@ pub const Tokenizer = struct {
                     switch (self.char() orelse return error.UnexpectedEndOfInput) {
                         '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '-' => self.index += 1,
                         else => {
-                            log.err("Invalid exponent. Expected +/- or digit, found {c}", .{self.char() orelse 0});
+                            logErr("Invalid exponent. Expected +/- or digit, found {c}", .{self.char() orelse 0});
                             return TokenizeError.UnexpectedToken;
                         },
                     }
@@ -247,7 +248,7 @@ pub const Tokenizer = struct {
 
         // Error if number has inappropriate leading zero, like "0123"
         if (leadingZero and !isDecimal and (!isNegative and end - start != 1)) {
-            log.err("Leading zero detected: {s}" ++ "\nleadingZero: {any}" ++ "\nisDecimal: {any}" ++ "\nisNegative: {any}" ++ "\nisExponent: {any}" ++ "\nstart: {any}, end: {any}", .{ self.str[start..end], leadingZero, isDecimal, isNegative, isExponent, start, end });
+            logErr("Leading zero detected: {s}" ++ "\nleadingZero: {any}" ++ "\nisDecimal: {any}" ++ "\nisNegative: {any}" ++ "\nisExponent: {any}" ++ "\nstart: {any}, end: {any}", .{ self.str[start..end], leadingZero, isDecimal, isNegative, isExponent, start, end });
             return TokenizeError.LeadingZero;
         }
 
@@ -270,6 +271,12 @@ pub const Tokenizer = struct {
         return .init(.comment, .init(start, end));
     }
 };
+
+fn logErr(comptime fmt: []const u8, args: anytype) void {
+    if (!builtin.cpu.arch.isWasm()) {
+        log.err(fmt, args);
+    }
+}
 
 // =======
 // Testing

@@ -8,7 +8,7 @@ const Span = @import("../util/span.zig");
 const testing = std.testing;
 const Tokenizer = @import("tokenizer.zig");
 const Token = Tokenizer.Token;
-const Type = @import("yaml.zig").Language.Type;
+const Type = @import("yaml.zig").Type;
 
 const Parser = @This();
 

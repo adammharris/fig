@@ -3,3 +3,4 @@ zig-out/*
 .zed
 .DS_STORE
 spec.md
+bindings/rust/target/

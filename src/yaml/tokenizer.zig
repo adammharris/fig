@@ -4,7 +4,7 @@ const Tokenizer = @This();
 
 const std = @import("std");
 const testing = std.testing;
-const Type = @import("yaml.zig").Language.Type;
+const Type = @import("yaml.zig").Type;
 
 pub const Token = @import("../token.zig").Token(Kind);
 

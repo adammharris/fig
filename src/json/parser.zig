@@ -2,12 +2,13 @@
 //! Depends on the tokenizer and the abstract Document struct
 
 const std = @import("std");
+const builtin = @import("builtin");
 const AST = @import("../ast.zig");
 const Document = @import("../document.zig");
 const testing = std.testing;
 const log = std.log.scoped(.parser);
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
-const Type = @import("json.zig").Language.Type;
+const Type = @import("json.zig").Type;
 const Token = @import("../token.zig").Token(@import("tokenizer.zig").Kind);
 const Span = @import("../util/span.zig");
 
@@ -54,7 +55,7 @@ const State = enum {
 pub fn getBool(slice: []const u8) ParseError!bool {
     if (std.mem.eql(u8, slice, "true")) return true;
     if (std.mem.eql(u8, slice, "false")) return false;
-    log.err("Tried to parse invalid value as boolean: `{s}`", .{slice});
+    logErr("Tried to parse invalid value as boolean: `{s}`", .{slice});
     return error.InvalidBool;
 }
 
@@ -63,8 +64,14 @@ pub fn getString(slice: []const u8) ParseError![]const u8 {
     if (slice.len >= 2 and slice[0] == '"' and slice[slice.len - 1] == '"') {
         return slice[1 .. slice.len - 1];
     }
-    log.err("Tried to parse invalid value as string: `{s}`", .{slice});
+    logErr("Tried to parse invalid value as string: `{s}`", .{slice});
     return error.UnclosedString;
+}
+
+fn logErr(comptime fmt: []const u8, args: anytype) void {
+    if (!builtin.cpu.arch.isWasm()) {
+        log.err(fmt, args);
+    }
 }
 
 /// Returns lossless struct representation of a number

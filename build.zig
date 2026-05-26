@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const strip = b.option(bool, "strip", "Strip debug information") orelse (optimize == .ReleaseSmall);
+    const resolved_target = target.result;
 
     const mod = b.addModule("fig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -15,6 +17,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = strip,
             .imports = &.{
                 .{ .name = "fig", .module = mod },
             },
@@ -22,6 +25,23 @@ pub fn build(b: *std.Build) void {
     });
 
     b.installArtifact(exe);
+
+    const c_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "fig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .link_libc = !resolved_target.cpu.arch.isWasm(),
+        }),
+    });
+    const install_c_lib = b.addInstallArtifact(c_lib, .{});
+    b.getInstallStep().dependOn(&install_c_lib.step);
+
+    const install_c_lib_step = b.step("install-c-lib", "Install the C ABI static library");
+    install_c_lib_step.dependOn(&install_c_lib.step);
 
     const run_step = b.step("run", "Run the app");
 
