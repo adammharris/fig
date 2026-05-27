@@ -14,7 +14,8 @@ ast: AST,
 node_spans: []const Span,
 
 pub fn deinit(self: Document, allocator: std.mem.Allocator) void {
-    allocator.free(self.ast.nodes);
+    var ast = self.ast;
+    ast.deinit();
     allocator.free(self.node_spans);
 }
 

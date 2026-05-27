@@ -71,13 +71,23 @@ fn writeJsonString(writer: *Writer, value: []const u8) Writer.Error!void {
         switch (char) {
             '"' => try writer.writeAll("\\\""),
             '\\' => try writer.writeAll("\\\\"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
             '\n' => try writer.writeAll("\\n"),
             '\r' => try writer.writeAll("\\r"),
             '\t' => try writer.writeAll("\\t"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writeControlEscape(writer, char),
             else => try writer.writeByte(char),
         }
     }
     try writer.writeByte('"');
+}
+
+fn writeControlEscape(writer: *Writer, char: u8) Writer.Error!void {
+    const hex = "0123456789abcdef";
+    try writer.writeAll("\\u00");
+    try writer.writeByte(hex[char >> 4]);
+    try writer.writeByte(hex[char & 0x0f]);
 }
 
 fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
@@ -87,8 +97,8 @@ fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
 test "prints JSON document" {
     const Parser = @import("parser.zig");
     const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}";
-    const doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
-    defer std.testing.allocator.free(doc.nodes);
+    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
+    defer doc.deinit();
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();

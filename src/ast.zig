@@ -1,18 +1,37 @@
 //! AST = Abstract Syntax Tree
 //!
-//! This data structure represents an abstract form of a document. Two documents of different formats can theoretically have the same AST.
+//! This data structure represents an abstract form of a document.
+//! Two documents of different formats can theoretically have the same AST.
+//!
+//! The AST only uses its allocator when conversion is necessary
+//! to represent a file's data in a normalized, format-independent form.
+//! (For example, when storing decoded escape codes.)
 
 const AST = @This();
 const activeTag = @import("std").meta.activeTag;
+const Allocator = @import("std").mem.Allocator;
 const util = @import("util/util.zig");
+
+pub fn deinit(self: *AST) void {
+    for (self.owned_strings) |string| {
+        self.allocator.free(string);
+    }
+    self.allocator.free(self.owned_strings);
+    self.allocator.free(self.nodes);
+}
+
+allocator: Allocator,
+owned_strings: []const []const u8 = &.{},
 
 /// Points to first sequence/mapping that contains all other nodes.
 root: Node.Id,
+
 /// Complete node tree, such that `ast.nodes[node.id] == node`
 nodes: []const Node,
 
 /// Represents a unit of data in an AST.
 pub const Node = struct {
+    /// Unique number identifier for this node.
     id: Id,
     kind: Kind,
     /// Indicates "next" value when inside a sequence/mapping.

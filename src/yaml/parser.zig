@@ -115,6 +115,7 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     return .{
         .source = input,
         .ast = .{
+            .allocator = self.allocator,
             .root = root,
             .nodes = nodes,
         },
@@ -427,7 +428,7 @@ fn testParser(input: []const u8, expected: AST) !void {
 test "simple YAML document" {
     try testParser(
         \\- hello: world
-    , .{ .root = 0, .nodes = &[_]AST.Node{
+    , .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
         .{ .id = 0, .kind = .{ .sequence = 1 }, .next_sibling = null },
         .{
             .id = 1,
@@ -455,7 +456,7 @@ test "simple YAML document" {
 test "yaml flat mapping" {
     try testParser(
         "name: Ada\nage: 37\n",
-        .{ .root = 0, .nodes = &[_]AST.Node{
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
             .{ .id = 0, .kind = .{ .mapping = 3 }, .next_sibling = null },
             .{ .id = 1, .kind = .{ .string = "name" }, .next_sibling = null },
             .{ .id = 2, .kind = .{ .string = "Ada" }, .next_sibling = null },
@@ -470,7 +471,7 @@ test "yaml flat mapping" {
 test "yaml nested mapping" {
     try testParser(
         "root:\n  child: value\nnext: true\n",
-        .{ .root = 0, .nodes = &[_]AST.Node{
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
             .{ .id = 0, .kind = .{ .mapping = 6 }, .next_sibling = null },
             .{ .id = 1, .kind = .{ .string = "root" }, .next_sibling = null },
             .{ .id = 2, .kind = .{ .mapping = 5 }, .next_sibling = null },

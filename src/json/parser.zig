@@ -1,18 +1,27 @@
-//! The parser turns JSON tokens into a concrete syntax tree.
-//! Depends on the tokenizer and the abstract Document struct
+//! The parser turns a JSON-formatted []const u8 into an AST.
+//! It uses the Tokenizer to tokenize the string, and then converts
+//! the token slice into an AST incrementally.
+//!
+//! This parser temporarily allocates and frees memory for the tokenizer
+//! and for the in-progress containers, including three ArrayLists
+//! for `node`s, `Span`s, and `OpenContainer`s.
+//!
+//! Decoded string escape allocations are transferred into the returned AST's
+//! `owned_strings` slice and must be freed with `ast.deinit();`
+
+const Parser = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
-const AST = @import("../ast.zig");
-const Document = @import("../document.zig");
 const testing = std.testing;
 const log = std.log.scoped(.parser);
+const Unicode = @import("../util/util.zig").Unicode;
+const AST = @import("../ast.zig");
+const Document = @import("../document.zig");
 const Tokenizer = @import("tokenizer.zig").Tokenizer;
+const Token = @import("../token.zig").Token(Tokenizer.Kind);
 const Type = @import("json.zig").Type;
-const Token = @import("../token.zig").Token(@import("tokenizer.zig").Kind);
 const Span = @import("../util/span.zig");
-
-const Parser = @This();
 
 const ContainerKind = enum { array, object };
 /// Either an array or object in the process of being parsed.
@@ -29,13 +38,15 @@ state: State = .ExpectValue,
 nodes: std.ArrayList(AST.Node) = .empty,
 node_spans: std.ArrayList(Span) = .empty,
 container_stack: std.ArrayList(OpenContainer) = .empty,
+owned_strings: std.ArrayList([]const u8) = .empty,
 
 root: ?AST.Node.Id = null,
 
 // Initial fields
 allocator: std.mem.Allocator,
 
-const ParseError = error{ UnclosedObject, UnclosedArray, UnclosedString, InvalidBool, InvalidNumber, UnexpectedToken };
+const ParseError = error{ UnclosedObject, UnclosedArray, UnclosedString, InvalidBool, InvalidNumber, UnexpectedToken, InvalidUnicodeEscape };
+const ParserError = ParseError || std.mem.Allocator.Error;
 
 const State = enum {
     ExpectValue,
@@ -59,12 +70,78 @@ pub fn getBool(slice: []const u8) ParseError!bool {
     return error.InvalidBool;
 }
 
-/// Simply removes double quotes from a JSON string.
-pub fn getString(slice: []const u8) ParseError![]const u8 {
-    if (slice.len >= 2 and slice[0] == '"' and slice[slice.len - 1] == '"') {
-        return slice[1 .. slice.len - 1];
+/// Removes double quotes. If the string contains escape codes,
+/// decodes and stores the allocated string in the AST's `owned_strings`.
+pub fn getString(self: *Parser, slice: []const u8) ParserError![]const u8 {
+    if (slice.len < 2 or slice[0] != '"' or slice[slice.len - 1] != '"') {
+        return ParseError.UnclosedString;
     }
-    return error.UnclosedString;
+    const inner = slice[1 .. slice.len - 1];
+
+    // Fast path: no escapes, can safely point into source.
+    if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+
+    // String contains escapes, so we need to allocate a new decoded string.
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(self.allocator);
+
+    var i: usize = 0;
+    while (i < inner.len) {
+        const c = inner[i];
+        if (c != '\\') {
+            try decoded.append(self.allocator, c);
+            i += 1;
+            continue;
+        }
+
+        i += 1;
+        if (i >= inner.len) return ParseError.UnclosedString;
+
+        switch (inner[i]) {
+            '"' => try decoded.append(self.allocator, '"'), // double quote
+            '\\' => try decoded.append(self.allocator, '\\'), // backslash
+            '/' => try decoded.append(self.allocator, '/'), // slash
+            'b' => try decoded.append(self.allocator, 0x08), // backspace
+            'f' => try decoded.append(self.allocator, 0x0c), // formfeed
+            'n' => try decoded.append(self.allocator, '\n'), // newline
+            'r' => try decoded.append(self.allocator, '\r'), // return
+            't' => try decoded.append(self.allocator, '\t'), // tab
+            'u' => { // unicode
+                // JSON \u escapes encode one UTF-16 code unit in 4 hex chars.
+                if (i + 4 >= inner.len) return ParseError.UnclosedString;
+                const bytes = inner[i + 1 .. i + 5];
+                const first_unit = std.fmt.parseInt(u16, bytes, 16) catch return ParseError.InvalidUnicodeEscape;
+                var codepoint: u21 = first_unit;
+                i += 4;
+
+                // If codepoint is a high surrogate, expect a low surrogate.
+                if (Unicode.isHighSurrogate(codepoint)) {
+                    // There must be another escape for a low surrogate.
+                    if (i + 6 >= inner.len) return ParseError.InvalidUnicodeEscape;
+                    if (inner[i + 1] != '\\' or inner[i + 2] != 'u')
+                        return ParseError.InvalidUnicodeEscape;
+                    const nextBytes = inner[i + 3 .. i + 7];
+                    const low_unit = std.fmt.parseInt(u16, nextBytes, 16) catch return ParseError.InvalidUnicodeEscape;
+                    if (!Unicode.isLowSurrogate(low_unit)) return ParseError.InvalidUnicodeEscape;
+                    codepoint = 0x10000 + ((@as(u21, first_unit) - 0xD800) << 10) + (@as(u21, low_unit) - 0xDC00);
+                    i += 6;
+                } else if (Unicode.isLowSurrogate(codepoint)) {
+                    return ParseError.InvalidUnicodeEscape;
+                }
+
+                var buf: [4]u8 = undefined;
+                const written = std.unicode.utf8Encode(codepoint, &buf) catch return ParseError.InvalidUnicodeEscape;
+                try decoded.appendSlice(self.allocator, buf[0..written]);
+            },
+            else => return ParseError.UnexpectedToken,
+        }
+        i += 1;
+    }
+    const owned = try decoded.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(owned);
+
+    try self.owned_strings.append(self.allocator, owned);
+    return owned;
 }
 
 /// Returns lossless struct representation of a number
@@ -278,14 +355,25 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
 
     // while loop completed.
     // Ready to return a Document!
+    const root = self.root orelse return ParseError.UnexpectedToken;
+
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(nodes);
     self.nodes = .empty;
+
     const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_spans);
     self.node_spans = .empty;
+
+    const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
+    self.owned_strings = .empty;
+
     return .{
         .source = input,
         .ast = .{
-            .root = self.root orelse return ParseError.UnexpectedToken,
+            .allocator = self.allocator,
+            .owned_strings = owned_strings,
+            .root = root,
             .nodes = nodes,
         },
         .node_spans = node_spans,
@@ -296,6 +384,10 @@ pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
     self.node_spans.deinit(self.allocator);
+    for (self.owned_strings.items) |string| {
+        self.allocator.free(string);
+    }
+    self.owned_strings.deinit(self.allocator);
 }
 
 // ===============
@@ -315,15 +407,15 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) !AST.Node.Id {
 }
 
 fn addTokenNode(self: *Parser, input: []const u8, token: Token) !AST.Node.Id {
-    return self.addNode(try tokenKind(input, token), token.span);
+    return self.addNode(try self.tokenKind(input, token), token.span);
 }
 
-fn tokenKind(input: []const u8, token: Token) ParseError!AST.Node.Kind {
+fn tokenKind(self: *Parser, input: []const u8, token: Token) ParserError!AST.Node.Kind {
     const raw = token.source(input);
     return switch (token.kind) {
         .null_ => .null_,
         .true_, .false_ => .{ .boolean = try getBool(raw) },
-        .string => .{ .string = try getString(raw) },
+        .string => .{ .string = try self.getString(raw) },
         .number => .{ .number = try getNumber(raw) },
         else => ParseError.UnexpectedToken,
     };
@@ -399,14 +491,15 @@ fn closeContainer(self: *Parser, span_end: usize) !AST.Node.Id {
 // =======
 
 fn testParser(input: []const u8, expected: AST) !void {
-    const doc = try Parser.parseAbstract(testing.allocator, input, .JSON);
-    defer testing.allocator.free(doc.nodes);
-    try testing.expect(expected.eql(doc));
+    var ast = try Parser.parseAbstract(testing.allocator, input, .JSON);
+    defer ast.deinit();
+    try testing.expect(expected.eql(ast));
 }
 
 fn testParserError(input: []const u8, expected_error: anyerror) !void {
     if (Parser.parseAbstract(testing.allocator, input, .JSON)) |ast| {
-        defer testing.allocator.free(ast.nodes);
+        var parsed = ast;
+        defer parsed.deinit();
         try testing.expect(false);
     } else |err| {
         try testing.expectEqual(expected_error, err);
@@ -416,7 +509,7 @@ fn testParserError(input: []const u8, expected_error: anyerror) !void {
 test "simple JSON document" {
     try testParser(
         \\[{"hello":"world"}]
-    , .{ .root = 0, .nodes = &[_]AST.Node{
+    , .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
         .{ .id = 0, .kind = .{ .sequence = 1 }, .next_sibling = null },
         .{
             .id = 1,
@@ -439,6 +532,50 @@ test "simple JSON document" {
             .next_sibling = null,
         },
     } });
+}
+
+test "decodes JSON string escapes" {
+    var ast = try Parser.parseAbstract(testing.allocator, "\"quote: \\\" slash: \\\\ newline: \\n tab: \\t backspace: \\b formfeed: \\f slash: \\/\"", .JSON);
+    defer ast.deinit();
+
+    const value = switch (ast.nodes[ast.root].kind) {
+        .string => |string| string,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try testing.expectEqualSlices(u8, "quote: \" slash: \\ newline: \n tab: \t backspace: \x08 formfeed: \x0c slash: /", value);
+}
+
+test "decodes JSON unicode escapes" {
+    var ast = try Parser.parseAbstract(testing.allocator, "\"A: \\u0041 latin: \\u00E9 clef: \\uD834\\uDD1E\"", .JSON);
+    defer ast.deinit();
+
+    const value = switch (ast.nodes[ast.root].kind) {
+        .string => |string| string,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try testing.expectEqualSlices(u8, "A: A latin: é clef: 𝄞", value);
+}
+
+test "decodes escaped object keys" {
+    var ast = try Parser.parseAbstract(testing.allocator, "{\"he\\u006clo\":1}", .JSON);
+    defer ast.deinit();
+
+    const value = try ast.getValByPath(&.{.{ .key = "hello" }});
+    const number = switch (value.kind) {
+        .number => |number| number,
+        else => return error.TestUnexpectedResult,
+    };
+
+    try testing.expectEqualSlices(u8, "1", number.raw);
+}
+
+test "rejects invalid unicode surrogate escapes" {
+    try testParserError("\"\\uD800\"", error.InvalidUnicodeEscape);
+    try testParserError("\"\\uDC00\"", error.InvalidUnicodeEscape);
+    try testParserError("\"\\uD800x\"", error.InvalidUnicodeEscape);
+    try testParserError("\"\\uD800\\u0041\"", error.InvalidUnicodeEscape);
 }
 
 test "object trailing comma is rejected" {

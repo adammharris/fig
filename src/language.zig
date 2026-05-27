@@ -9,12 +9,12 @@ pub fn detect(allocator: Allocator, input: []const u8) ?JSON.Type {
     var parser = JSON.Parser{ .allocator = allocator };
 
     if (JSON.parse(&parser, input, .JSON)) |doc| {
-        allocator.free(doc.nodes);
+        doc.deinit(allocator);
         return .JSON;
     } else |_| {}
 
     if (JSON.parse(&parser, input, .JSONC)) |doc| {
-        allocator.free(doc.nodes);
+        doc.deinit(allocator);
         return .JSONC;
     } else |_| {}
 

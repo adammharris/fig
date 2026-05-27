@@ -1,4 +1,4 @@
-//! Like a
+//! A helper struct for selecting parts of a slice.
 pub const Span = @This();
 
 start: usize,

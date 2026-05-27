@@ -145,8 +145,8 @@ fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
 test "prints YAML document" {
     const Parser = @import("../json/parser.zig");
     const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}";
-    const doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
-    defer std.testing.allocator.free(doc.nodes);
+    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
+    defer doc.deinit();
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();

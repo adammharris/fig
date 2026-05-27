@@ -1,10 +1,15 @@
+//! JSON Tokenizer. Turns a []const u8 in JSON format to a slice of Tokens.
+//!
+//! Allocates (then frees) memory for an expanding ArrayList of tokens.
+
+pub const Tokenizer = @This();
+
 const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log.scoped(.tokenizer);
 const testing = std.testing;
 const JsonFormat = @import("json.zig").Type;
 const Span = @import("../util/span.zig");
-
 pub const Token = @import("../token.zig").Token(Kind);
 
 pub const Kind = enum {
@@ -47,245 +52,243 @@ pub const Kind = enum {
 
 const TokenizeError = error{ UnexpectedToken, MissingToken, OutOfMemory, UnexpectedSlash, MissingCloseBrace, MissingOpenQuote, MissingColon, MissingCloseBracket, LeadingZero, UnclosedString, UnexpectedEndOfInput, UnclosedComment };
 
-pub const Tokenizer = struct {
-    // State
-    tokens: std.ArrayList(Token) = .empty,
-    index: usize = 0,
+// State
+tokens: std.ArrayList(Token) = .empty,
+index: usize = 0,
 
-    // Initial fields
-    allocator: std.mem.Allocator,
-    str: []const u8 = "",
-    kind: JsonFormat = JsonFormat.JSONC,
+// Initial fields
+allocator: std.mem.Allocator,
+str: []const u8 = "",
+kind: JsonFormat = JsonFormat.JSONC,
 
-    pub fn tokenize(self: *Tokenizer) ![]const Token {
-        errdefer self.tokens.deinit(self.allocator);
-        try self.tokens.ensureTotalCapacity(self.allocator, self.str.len + 1);
+pub fn tokenize(self: *Tokenizer) ![]const Token {
+    errdefer self.tokens.deinit(self.allocator);
+    try self.tokens.ensureTotalCapacity(self.allocator, self.str.len + 1);
 
-        while (self.char()) |c| {
-            try self.addToken(switch (c) {
-                '{' => .init(.open_brace, .init(self.index, self.index + 1)),
-                '}' => .init(.close_brace, .init(self.index, self.index + 1)),
-                '[' => .init(.open_bracket, .init(self.index, self.index + 1)),
-                ']' => .init(.close_bracket, .init(self.index, self.index + 1)),
-                ':' => .init(.colon, .init(self.index, self.index + 1)),
-                ',' => .init(.comma, .init(self.index, self.index + 1)),
-                't' => try self.findLiteral(.true_),
-                'f' => try self.findLiteral(.false_),
-                'n' => try self.findLiteral(.null_),
-                '"' => try self.string(),
-                '/' => try self.comment(),
-                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-' => try self.number(),
-                ' ', '\t', '\n', '\r' => try self.getWhitespace(),
-                else => return TokenizeError.UnexpectedToken,
-            });
-        }
-
-        try self.addToken(.fixed(.end_of_file, self.index));
-        return try self.tokens.toOwnedSlice(self.allocator);
+    while (self.char()) |c| {
+        try self.addToken(switch (c) {
+            '{' => .init(.open_brace, .init(self.index, self.index + 1)),
+            '}' => .init(.close_brace, .init(self.index, self.index + 1)),
+            '[' => .init(.open_bracket, .init(self.index, self.index + 1)),
+            ']' => .init(.close_bracket, .init(self.index, self.index + 1)),
+            ':' => .init(.colon, .init(self.index, self.index + 1)),
+            ',' => .init(.comma, .init(self.index, self.index + 1)),
+            't' => try self.findLiteral(.true_),
+            'f' => try self.findLiteral(.false_),
+            'n' => try self.findLiteral(.null_),
+            '"' => try self.string(),
+            '/' => try self.comment(),
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-' => try self.number(),
+            ' ', '\t', '\n', '\r' => try self.getWhitespace(),
+            else => return TokenizeError.UnexpectedToken,
+        });
     }
 
-    fn findLiteral(self: *const Tokenizer, kind: Token.Kind) TokenizeError!Token {
-        switch (kind) {
-            .null_ => {
-                if (self.matches("null")) return .fixed(.null_, self.index);
+    try self.addToken(.fixed(.end_of_file, self.index));
+    return try self.tokens.toOwnedSlice(self.allocator);
+}
+
+fn findLiteral(self: *const Tokenizer, kind: Token.Kind) TokenizeError!Token {
+    switch (kind) {
+        .null_ => {
+            if (self.matches("null")) return .fixed(.null_, self.index);
+        },
+        .true_ => {
+            if (self.matches("true")) return .fixed(.true_, self.index);
+        },
+        .false_ => {
+            if (self.matches("false")) return .fixed(.false_, self.index);
+        },
+        else => return error.UnexpectedToken,
+    }
+    return TokenizeError.UnexpectedToken;
+}
+
+/// Collects all whitespace and returns it as a token.
+/// Can return null. `addToken` checks for null.
+fn getWhitespace(self: *Tokenizer) TokenizeError!Token {
+    const start = self.index;
+    while (self.char()) |c| {
+        if (!std.ascii.isWhitespace(c)) break;
+        self.index += 1;
+    }
+    const end = self.index;
+    if (start == end) unreachable;
+    return .init(.whitespace, .init(start, end));
+}
+
+// =====================
+// CONVENIENCE FUNCTIONS
+// =====================
+
+/// Convenience function for accessing current character
+fn char(self: *const Tokenizer) ?u8 {
+    if (self.index >= self.str.len) return null;
+    return self.str[self.index];
+}
+
+/// Convenience function for adding a token to the tokens array
+fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
+    try self.tokens.append(self.allocator, token);
+    self.index = token.span.end;
+}
+
+/// Checks if the index is on a given sequence of characters.
+fn matches(self: *const Tokenizer, str: []const u8) bool {
+    if (str.len > self.str.len - self.index) return false;
+    var local_index = self.index;
+    for (str) |c| {
+        if (self.str[local_index] != c) return false;
+        local_index += 1;
+    }
+    return true;
+}
+
+fn isDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+fn isHexDigit(c: u8) bool {
+    return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+// ========================
+// TERMINAL TOKEN FUNCTIONS
+// ========================
+
+/// Collects all the bytes of a string and returns a JsonToken.string
+/// Never returns null, but can be an empty string.
+/// Respects escaped values.
+fn string(self: *Tokenizer) TokenizeError!Token {
+    const start = self.index;
+    self.index += 1; // skip first `"`
+
+    while (self.char()) |c| {
+        switch (c) {
+            '"' => { // Closing quote
+                self.index += 1; // skip final `"`
+                const end = self.index;
+                return .init(.string, .init(start, end));
             },
-            .true_ => {
-                if (self.matches("true")) return .fixed(.true_, self.index);
-            },
-            .false_ => {
-                if (self.matches("false")) return .fixed(.false_, self.index);
-            },
-            else => return error.UnexpectedToken,
-        }
-        return TokenizeError.UnexpectedToken;
-    }
-
-    /// Collects all whitespace and returns it as a token.
-    /// Can return null. `addToken` checks for null.
-    fn getWhitespace(self: *Tokenizer) TokenizeError!Token {
-        const start = self.index;
-        while (self.char()) |c| {
-            if (!std.ascii.isWhitespace(c)) break;
-            self.index += 1;
-        }
-        const end = self.index;
-        if (start == end) unreachable;
-        return .init(.whitespace, .init(start, end));
-    }
-
-    // =====================
-    // CONVENIENCE FUNCTIONS
-    // =====================
-
-    /// Convenience function for accessing current character
-    fn char(self: *const Tokenizer) ?u8 {
-        if (self.index >= self.str.len) return null;
-        return self.str[self.index];
-    }
-
-    /// Convenience function for adding a token to the tokens array
-    fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
-        try self.tokens.append(self.allocator, token);
-        self.index = token.span.end;
-    }
-
-    /// Checks if the index is on a given sequence of characters.
-    fn matches(self: *const Tokenizer, str: []const u8) bool {
-        if (str.len > self.str.len - self.index) return false;
-        var local_index = self.index;
-        for (str) |c| {
-            if (self.str[local_index] != c) return false;
-            local_index += 1;
-        }
-        return true;
-    }
-
-    fn isDigit(c: u8) bool {
-        return c >= '0' and c <= '9';
-    }
-
-    fn isHexDigit(c: u8) bool {
-        return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-    }
-
-    // ========================
-    // TERMINAL TOKEN FUNCTIONS
-    // ========================
-
-    /// Collects all the bytes of a string and returns a JsonToken.string
-    /// Never returns null, but can be an empty string.
-    /// Respects escaped values.
-    fn string(self: *Tokenizer) TokenizeError!Token {
-        const start = self.index;
-        self.index += 1; // skip first `"`
-
-        while (self.char()) |c| {
-            switch (c) {
-                '"' => { // Closing quote
-                    self.index += 1; // skip final `"`
-                    const end = self.index;
-                    return .init(.string, .init(start, end));
-                },
-                '\\' => { // Escape a character
-                    self.index += 1; // skip backslash
-                    const escaped = self.char() orelse return TokenizeError.UnclosedString;
-                    switch (escaped) {
-                        // Valid escapes: quote, backslash, whitespace
-                        '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => {
+            '\\' => { // Escape a character
+                self.index += 1; // skip backslash
+                const escaped = self.char() orelse return TokenizeError.UnclosedString;
+                switch (escaped) {
+                    // Valid escapes: quote, backslash, whitespace
+                    '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => {
+                        self.index += 1;
+                    },
+                    // Unicode escape. \u<four hex characters>
+                    'u' => {
+                        self.index += 1;
+                        for (0..4) |_| {
+                            const hex = self.char() orelse return TokenizeError.UnclosedString;
+                            if (!isHexDigit(hex)) return TokenizeError.UnexpectedToken;
                             self.index += 1;
-                        },
-                        // Unicode escape. \u<four hex characters>
-                        'u' => {
-                            self.index += 1;
-                            for (0..4) |_| {
-                                const hex = self.char() orelse return TokenizeError.UnclosedString;
-                                if (!isHexDigit(hex)) return TokenizeError.UnexpectedToken;
-                                self.index += 1;
-                            }
-                        },
-                        else => return TokenizeError.UnexpectedToken,
-                    }
-                },
-                0x00...0x1f => return TokenizeError.UnexpectedToken,
-                else => self.index += 1,
-            }
-        }
-        return error.UnclosedString;
-    }
-
-    /// Collects various kinds of numbers.
-    /// Negative, decimal, exponent
-    /// Checks for leading zero as well.
-    fn number(self: *Tokenizer) TokenizeError!Token {
-        const start = self.index;
-
-        // Check for negativity
-        if (self.char() == '-') {
-            self.index += 1;
-        }
-
-        switch (self.char() orelse return TokenizeError.UnexpectedEndOfInput) {
-            // Either zero, or illegal leading zero
-            '0' => {
-                self.index += 1;
-                if (self.char()) |c| if (isDigit(c)) return TokenizeError.LeadingZero;
-            },
-            '1'...'9' => {
-                self.index += 1;
-                while (self.char()) |c| {
-                    if (!isDigit(c)) break;
-                    self.index += 1;
+                        }
+                    },
+                    else => return TokenizeError.UnexpectedToken,
                 }
             },
-            else => return TokenizeError.UnexpectedToken
+            0x00...0x1f => return TokenizeError.UnexpectedToken,
+            else => self.index += 1,
         }
+    }
+    return error.UnclosedString;
+}
 
-        // Check for decimal
-        if (self.char() == '.') {
+/// Collects various kinds of numbers.
+/// Negative, decimal, exponent
+/// Checks for leading zero as well.
+fn number(self: *Tokenizer) TokenizeError!Token {
+    const start = self.index;
+
+    // Check for negativity
+    if (self.char() == '-') {
+        self.index += 1;
+    }
+
+    switch (self.char() orelse return TokenizeError.UnexpectedEndOfInput) {
+        // Either zero, or illegal leading zero
+        '0' => {
             self.index += 1;
-            const first_fraction = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
-            if (!isDigit(first_fraction)) return TokenizeError.UnexpectedToken;
+            if (self.char()) |c| if (isDigit(c)) return TokenizeError.LeadingZero;
+        },
+        '1'...'9' => {
+            self.index += 1;
             while (self.char()) |c| {
                 if (!isDigit(c)) break;
                 self.index += 1;
             }
+        },
+        else => return TokenizeError.UnexpectedToken
+    }
+
+    // Check for decimal
+    if (self.char() == '.') {
+        self.index += 1;
+        const first_fraction = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
+        if (!isDigit(first_fraction)) return TokenizeError.UnexpectedToken;
+        while (self.char()) |c| {
+            if (!isDigit(c)) break;
+            self.index += 1;
         }
+    }
 
-        // Check for exponent
-        if (self.char()) |c| {
-            if (c == 'e' or c == 'E') {
+    // Check for exponent
+    if (self.char()) |c| {
+        if (c == 'e' or c == 'E') {
+            self.index += 1;
+            if (self.char()) |sign| {
+                if (sign == '+' or sign == '-') self.index += 1;
+            }
+            const first_exponent = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
+            if (!isDigit(first_exponent)) return TokenizeError.UnexpectedToken;
+
+            while (self.char()) |digit| {
+                if (!isDigit(digit)) break;
                 self.index += 1;
-                if (self.char()) |sign| {
-                    if (sign == '+' or sign == '-') self.index += 1;
-                }
-                const first_exponent = self.char() orelse return TokenizeError.UnexpectedEndOfInput;
-                if (!isDigit(first_exponent)) return TokenizeError.UnexpectedToken;
-
-                while (self.char()) |digit| {
-                    if (!isDigit(digit)) break;
-                    self.index += 1;
-                }
             }
         }
-
-        return .init(.number, .init(start, self.index));
     }
 
-    /// Collects all bytes until arriving at a newline
-    /// Never returns null, but can be empty
-    fn comment(self: *Tokenizer) TokenizeError!Token {
-        // Comments are not supported in the canonical JSON format
-        if (self.kind == JsonFormat.JSON) return error.UnexpectedSlash;
-        // Make sure there isn't just a random single slash
-        if (self.index + 1 >= self.str.len) return TokenizeError.UnexpectedSlash;
+    return .init(.number, .init(start, self.index));
+}
 
-        const start = self.index;
-        const second = self.str[self.index + 1];
+/// Collects all bytes until arriving at a newline
+/// Never returns null, but can be empty
+fn comment(self: *Tokenizer) TokenizeError!Token {
+    // Comments are not supported in the canonical JSON format
+    if (self.kind == JsonFormat.JSON) return error.UnexpectedSlash;
+    // Make sure there isn't just a random single slash
+    if (self.index + 1 >= self.str.len) return TokenizeError.UnexpectedSlash;
 
-        return switch (second) {
-            '/' => { // Single line comment
-                self.index += 2;
-                while (self.char()) |c| {
-                    if (c == '\n') break;
-                    self.index += 1;
+    const start = self.index;
+    const second = self.str[self.index + 1];
+
+    return switch (second) {
+        '/' => { // Single line comment
+            self.index += 2;
+            while (self.char()) |c| {
+                if (c == '\n') break;
+                self.index += 1;
+            }
+            return .init(.comment, .init(start, self.index));
+        },
+        '*' => { // Multi-line comment
+            self.index += 2;
+            while (self.index + 1 < self.str.len) {
+                if (self.str[self.index] == '*' and self.str[self.index + 1] == '/') {
+                    self.index += 2;
+                    return .init(.comment, .init(start, self.index));
                 }
-                return .init(.comment, .init(start, self.index));
-            },
-            '*' => { // Multi-line comment
-                self.index += 2;
-                while (self.index + 1 < self.str.len) {
-                    if (self.str[self.index] == '*' and self.str[self.index + 1] == '/') {
-                        self.index += 2;
-                        return .init(.comment, .init(start, self.index));
-                    }
-                    self.index += 1;
-                }
-                return TokenizeError.UnclosedComment;
-            },
-            else => return TokenizeError.UnexpectedSlash,
-        };
-    }
-};
+                self.index += 1;
+            }
+            return TokenizeError.UnclosedComment;
+        },
+        else => return TokenizeError.UnexpectedSlash,
+    };
+}
 
 // =======
 // Testing
