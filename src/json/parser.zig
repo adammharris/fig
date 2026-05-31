@@ -114,19 +114,30 @@ pub fn getString(self: *Parser, slice: []const u8) ParserError![]const u8 {
                 var codepoint: u21 = first_unit;
                 i += 4;
 
-                // If codepoint is a high surrogate, expect a low surrogate.
+                // If the escape contains an unpaired surrogate, preserve the
+                // raw source representation rather than failing. JSONTestSuite
+                // treats these as implementation-defined `i_` cases, and the
+                // AST cannot losslessly normalize them into UTF-8.
                 if (Unicode.isHighSurrogate(codepoint)) {
-                    // There must be another escape for a low surrogate.
-                    if (i + 6 >= inner.len) return ParseError.InvalidUnicodeEscape;
-                    if (inner[i + 1] != '\\' or inner[i + 2] != 'u')
-                        return ParseError.InvalidUnicodeEscape;
+                    if (i + 6 >= inner.len) {
+                        decoded.deinit(self.allocator);
+                        return inner;
+                    }
+                    if (inner[i + 1] != '\\' or inner[i + 2] != 'u') {
+                        decoded.deinit(self.allocator);
+                        return inner;
+                    }
                     const nextBytes = inner[i + 3 .. i + 7];
                     const low_unit = std.fmt.parseInt(u16, nextBytes, 16) catch return ParseError.InvalidUnicodeEscape;
-                    if (!Unicode.isLowSurrogate(low_unit)) return ParseError.InvalidUnicodeEscape;
+                    if (!Unicode.isLowSurrogate(low_unit)) {
+                        decoded.deinit(self.allocator);
+                        return inner;
+                    }
                     codepoint = 0x10000 + ((@as(u21, first_unit) - 0xD800) << 10) + (@as(u21, low_unit) - 0xDC00);
                     i += 6;
                 } else if (Unicode.isLowSurrogate(codepoint)) {
-                    return ParseError.InvalidUnicodeEscape;
+                    decoded.deinit(self.allocator);
+                    return inner;
                 }
 
                 var buf: [4]u8 = undefined;
@@ -571,11 +582,40 @@ test "decodes escaped object keys" {
     try testing.expectEqualSlices(u8, "1", number.raw);
 }
 
-test "rejects invalid unicode surrogate escapes" {
-    try testParserError("\"\\uD800\"", error.InvalidUnicodeEscape);
-    try testParserError("\"\\uDC00\"", error.InvalidUnicodeEscape);
-    try testParserError("\"\\uD800x\"", error.InvalidUnicodeEscape);
-    try testParserError("\"\\uD800\\u0041\"", error.InvalidUnicodeEscape);
+test "preserves unpaired unicode surrogate escapes as raw strings" {
+    try testParser(
+        "\"\\uD800\"",
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
+            .{ .id = 0, .kind = .{ .string = "\\uD800" }, .next_sibling = null },
+        } },
+    );
+    try testParser(
+        "\"\\uDC00\"",
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
+            .{ .id = 0, .kind = .{ .string = "\\uDC00" }, .next_sibling = null },
+        } },
+    );
+    try testParser(
+        "\"\\uD800x\"",
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
+            .{ .id = 0, .kind = .{ .string = "\\uD800x" }, .next_sibling = null },
+        } },
+    );
+    try testParser(
+        "\"\\uD800\\u0041\"",
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
+            .{ .id = 0, .kind = .{ .string = "\\uD800\\u0041" }, .next_sibling = null },
+        } },
+    );
+}
+
+test "UTF-8 BOM before document is ignored" {
+    try testParser(
+        "\xEF\xBB\xBF{}",
+        .{ .allocator = testing.allocator, .root = 0, .nodes = &[_]AST.Node{
+            .{ .id = 0, .kind = .{ .mapping = null }, .next_sibling = null },
+        } },
+    );
 }
 
 test "object trailing comma is rejected" {

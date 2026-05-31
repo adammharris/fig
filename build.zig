@@ -5,6 +5,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const strip = b.option(bool, "strip", "Strip debug information") orelse (optimize == .ReleaseSmall);
     const resolved_target = target.result;
+    const run_conformance = b.option(bool, "json-conformance", "Run JSON conformance tests") orelse false;
+
+    const options = b.addOptions();
+    options.addOption(bool, "json_conformance", run_conformance);
+
 
     const mod = b.addModule("fig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -62,6 +67,8 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
         .filters = test_filters,
     });
+
+    mod_tests.root_module.addOptions("build_options", options);
 
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{
         .dest_sub_path = "fig-tests",

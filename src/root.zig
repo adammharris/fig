@@ -1,4 +1,5 @@
 //! By convention, root.zig is the root source file when making a package.
+const build_options = @import("build_options");
 pub const Language = @import("language.zig");
 // TODO: Language.detect(file: []const u8);
 
@@ -14,4 +15,7 @@ test {
     _ = @import("yaml/parser.zig");
     _ = @import("yaml/printer.zig");
     _ = @import("editor.zig");
+    if (build_options.json_conformance) {
+        _ = @import("json/conformance.zig");
+    }
 }

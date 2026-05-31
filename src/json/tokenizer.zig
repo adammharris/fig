@@ -65,6 +65,10 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
     errdefer self.tokens.deinit(self.allocator);
     try self.tokens.ensureTotalCapacity(self.allocator, self.str.len + 1);
 
+    if (std.mem.startsWith(u8, self.str, "\xEF\xBB\xBF")) {
+        self.index = 3;
+    }
+
     while (self.char()) |c| {
         try self.addToken(switch (c) {
             '{' => .init(.open_brace, .init(self.index, self.index + 1)),

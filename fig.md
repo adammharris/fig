@@ -54,3 +54,7 @@ This code was carefully reviewed and edited according to my taste before being a
 **License**
 
 Not licensed for now. Please contact me at amh421@icloud.com if you would like to use this code in your work!
+
+**Credits**
+
+I took the JSON test suite at `testdata/json` from [Nicolas Seriot's JSONTestSuite repository](https://github.com/nst/JSONTestSuite). I'm grateful that it is licensed under the MIT license, so I am allowed to use it for `fig`. A copy of the license is included in this repository at `testdata/json/LICENSE`.
