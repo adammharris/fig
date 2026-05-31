@@ -5,6 +5,7 @@ const std = @import("std");
 const AST = @import("../ast.zig");
 const Document = @import("../document.zig");
 const Span = @import("../util/span.zig");
+const Unicode = @import("../util/util.zig").Unicode;
 const testing = std.testing;
 const Tokenizer = @import("tokenizer.zig");
 const Token = Tokenizer.Token;
@@ -28,6 +29,7 @@ const OpenContainer = struct {
 nodes: std.ArrayList(AST.Node) = .empty,
 node_spans: std.ArrayList(Span) = .empty,
 container_stack: std.ArrayList(OpenContainer) = .empty,
+owned_strings: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
 index: usize = 0,
 force_new_container: bool = false,
@@ -36,7 +38,7 @@ root: ?AST.Node.Id = null,
 allocator: std.mem.Allocator,
 source: []const u8 = "",
 
-const ParseError = error{ UnexpectedToken, EmptyDocument };
+const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape };
 const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
@@ -109,13 +111,18 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
 
     const root = self.root orelse return ParseError.EmptyDocument;
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(nodes);
     self.nodes = .empty;
     const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_spans);
     self.node_spans = .empty;
+    const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
+    self.owned_strings = .empty;
     return .{
         .source = input,
         .ast = .{
             .allocator = self.allocator,
+            .owned_strings = owned_strings,
             .root = root,
             .nodes = nodes,
         },
@@ -127,6 +134,10 @@ pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
     self.node_spans.deinit(self.allocator);
+    for (self.owned_strings.items) |string| {
+        self.allocator.free(string);
+    }
+    self.owned_strings.deinit(self.allocator);
 }
 
 fn parseSequenceEntry(self: *Parser) ParserError!void {
@@ -197,7 +208,7 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
 fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
     if (self.peek().kind != .scalar) return ParseError.UnexpectedToken;
     const token = self.advance();
-    return self.addNode(try scalarKind(token.source(self.source)), token.span);
+    return self.addNode(try self.scalarKind(token.source(self.source)), token.span);
 }
 
 fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
@@ -313,7 +324,9 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) voi
     self.node_spans.items[parent.id].end = self.node_spans.items[child_id].end;
 }
 
-fn scalarKind(source: []const u8) ParserError!AST.Node.Kind {
+fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
+    if (source.len >= 2 and source[0] == '\'') return .{ .string = try self.getSingleQuotedString(source) };
+    if (source.len >= 2 and source[0] == '"') return .{ .string = try self.getDoubleQuotedString(source) };
     if (std.mem.eql(u8, source, "{}")) return .{ .mapping = null };
     if (std.mem.eql(u8, source, "[]")) return .{ .sequence = null };
     if (std.mem.eql(u8, source, "null") or std.mem.eql(u8, source, "~")) return .null_;
@@ -324,6 +337,120 @@ fn scalarKind(source: []const u8) ParserError!AST.Node.Kind {
         .kind = if (std.mem.indexOfScalar(u8, source, '.') == null) .integer else .float,
     } };
     return .{ .string = source };
+}
+
+fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const u8 {
+    if (source.len < 2 or source[0] != '\'' or source[source.len - 1] != '\'') {
+        return ParseError.UnclosedString;
+    }
+    const inner = source[1 .. source.len - 1];
+
+    if (std.mem.indexOfScalar(u8, inner, '\'') == null) return inner;
+
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(self.allocator);
+
+    var index: usize = 0;
+    while (index < inner.len) {
+        if (inner[index] != '\'') {
+            try decoded.append(self.allocator, inner[index]);
+            index += 1;
+            continue;
+        }
+
+        if (index + 1 >= inner.len or inner[index + 1] != '\'') {
+            return ParseError.UnexpectedToken;
+        }
+        try decoded.append(self.allocator, '\'');
+        index += 2;
+    }
+
+    return self.ownString(try decoded.toOwnedSlice(self.allocator));
+}
+
+fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const u8 {
+    if (source.len < 2 or source[0] != '"' or source[source.len - 1] != '"') {
+        return ParseError.UnclosedString;
+    }
+    const inner = source[1 .. source.len - 1];
+
+    if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(self.allocator);
+
+    var index: usize = 0;
+    while (index < inner.len) {
+        const char = inner[index];
+        if (char != '\\') {
+            try decoded.append(self.allocator, char);
+            index += 1;
+            continue;
+        }
+
+        index += 1;
+        if (index >= inner.len) return ParseError.UnclosedString;
+
+        switch (inner[index]) {
+            '0' => try decoded.append(self.allocator, 0x00),
+            'a' => try decoded.append(self.allocator, 0x07),
+            'b' => try decoded.append(self.allocator, 0x08),
+            't', '\t' => try decoded.append(self.allocator, '\t'),
+            'n' => try decoded.append(self.allocator, '\n'),
+            'v' => try decoded.append(self.allocator, 0x0b),
+            'f' => try decoded.append(self.allocator, 0x0c),
+            'r' => try decoded.append(self.allocator, '\r'),
+            'e' => try decoded.append(self.allocator, 0x1b),
+            ' ' => try decoded.append(self.allocator, ' '),
+            '"' => try decoded.append(self.allocator, '"'),
+            '/' => try decoded.append(self.allocator, '/'),
+            '\\' => try decoded.append(self.allocator, '\\'),
+            'N' => try appendCodepoint(&decoded, self.allocator, 0x85),
+            '_' => try appendCodepoint(&decoded, self.allocator, 0xA0),
+            'L' => try appendCodepoint(&decoded, self.allocator, 0x2028),
+            'P' => try appendCodepoint(&decoded, self.allocator, 0x2029),
+            'x' => {
+                const codepoint = try parseHexEscape(inner, index + 1, 2);
+                try appendCodepoint(&decoded, self.allocator, codepoint);
+                index += 2;
+            },
+            'u' => {
+                const codepoint = try parseHexEscape(inner, index + 1, 4);
+                try appendCodepoint(&decoded, self.allocator, codepoint);
+                index += 4;
+            },
+            'U' => {
+                const codepoint = try parseHexEscape(inner, index + 1, 8);
+                try appendCodepoint(&decoded, self.allocator, codepoint);
+                index += 8;
+            },
+            else => return ParseError.UnexpectedToken,
+        }
+        index += 1;
+    }
+
+    return self.ownString(try decoded.toOwnedSlice(self.allocator));
+}
+
+fn ownString(self: *Parser, string: []const u8) ParserError![]const u8 {
+    errdefer self.allocator.free(string);
+    try self.owned_strings.append(self.allocator, string);
+    return string;
+}
+
+fn parseHexEscape(source: []const u8, start: usize, digits: usize) ParserError!u21 {
+    if (start + digits > source.len) return ParseError.UnclosedString;
+    return std.fmt.parseInt(u21, source[start .. start + digits], 16) catch return ParseError.InvalidUnicodeEscape;
+}
+
+fn appendCodepoint(decoded: *std.ArrayList(u8), allocator: std.mem.Allocator, codepoint: u21) ParserError!void {
+    if (Unicode.isHighSurrogate(codepoint) or Unicode.isLowSurrogate(codepoint)) {
+        return ParseError.InvalidUnicodeEscape;
+    }
+
+    var buf: [4]u8 = undefined;
+    const written = std.unicode.utf8Encode(codepoint, &buf) catch return ParseError.InvalidUnicodeEscape;
+    try decoded.appendSlice(allocator, buf[0..written]);
 }
 
 // YAML tokenizer doesn't distinguish number tokens from other
@@ -423,6 +550,15 @@ fn testParser(input: []const u8, expected: AST) !void {
     const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
     defer doc.deinit(testing.allocator);
     try testing.expect(expected.eql(doc.ast));
+}
+
+fn testParserError(input: []const u8, expected_error: anyerror) !void {
+    if (Parser.parse(testing.allocator, input, .v1_2_2)) |doc| {
+        defer doc.deinit(testing.allocator);
+        try testing.expect(false);
+    } else |err| {
+        try testing.expectEqual(expected_error, err);
+    }
 }
 
 test "simple YAML document" {
@@ -534,4 +670,46 @@ test "yaml empty flow collection scalars" {
 
     const tags = try doc.ast.getValByPath(&.{.{ .key = "tags" }});
     try testing.expectEqual(@as(?AST.Node.Id, null), tags.kind.sequence);
+}
+
+test "yaml decodes single quoted scalars" {
+    const input =
+        \\single: 'here''s to "quotes"'
+        \\path: 'C:\Temp'
+        \\"quoted:key": 'value # not comment'
+        \\
+    ;
+
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+
+    const single = try doc.ast.getValByPath(&.{.{ .key = "single" }});
+    try testing.expectEqualSlices(u8, "here's to \"quotes\"", single.kind.string);
+
+    const path = try doc.ast.getValByPath(&.{.{ .key = "path" }});
+    try testing.expectEqualSlices(u8, "C:\\Temp", path.kind.string);
+
+    const quoted_key = try doc.ast.getValByPath(&.{.{ .key = "quoted:key" }});
+    try testing.expectEqualSlices(u8, "value # not comment", quoted_key.kind.string);
+}
+
+test "yaml decodes double quoted scalars" {
+    const input = "double: \"quote: \\\" slash: \\\\ newline: \\n tab: \\t zero: \\0 hex: \\x41 unicode: \\u00E9 big: \\U0001D11E\"\nnumber: \"37\"\nplain: 37\n";
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+
+    const double = try doc.ast.getValByPath(&.{.{ .key = "double" }});
+    try testing.expectEqualSlices(u8, "quote: \" slash: \\ newline: \n tab: \t zero: \x00 hex: A unicode: \xC3\xA9 big: \xF0\x9D\x84\x9E", double.kind.string);
+
+    const quoted_number = try doc.ast.getValByPath(&.{.{ .key = "number" }});
+    try testing.expectEqualSlices(u8, "37", quoted_number.kind.string);
+
+    const plain_number = try doc.ast.getValByPath(&.{.{ .key = "plain" }});
+    try testing.expect(std.meta.activeTag(plain_number.kind) == .number);
+}
+
+test "yaml rejects invalid double quoted escapes" {
+    try testParserError("bad: \"\\c\"\n", error.UnexpectedToken);
+    try testParserError("bad: \"\\xq0\"\n", error.InvalidUnicodeEscape);
+    try testParserError("bad: \"\\uD800\"\n", error.InvalidUnicodeEscape);
 }

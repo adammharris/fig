@@ -29,7 +29,7 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ InvalidIndent, TabIndent, OutOfMemory };
+const TokenizeError = error{ InvalidIndent, TabIndent, OutOfMemory, UnclosedString };
 
 const Line = struct {
     start: usize,
@@ -141,6 +141,12 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 cursor += 1;
                 at_content_start = false;
             },
+            '\'', '"' => {
+                const end = try quotedScalarEnd(self.source, cursor, line.end);
+                try self.addScalar(cursor, end);
+                cursor = end;
+                at_content_start = false;
+            },
             '-' => {
                 if (at_content_start) {
                     try self.addToken(.fixed(.dash, cursor));
@@ -185,6 +191,42 @@ fn scalarEnd(source: []const u8, start: usize, line_end: usize) usize {
     return end;
 }
 
+fn quotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
+    return switch (source[start]) {
+        '\'' => singleQuotedScalarEnd(source, start, line_end),
+        '"' => doubleQuotedScalarEnd(source, start, line_end),
+        else => unreachable,
+    };
+}
+
+fn singleQuotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
+    var end = start + 1;
+    while (end < line_end) : (end += 1) {
+        if (source[end] != '\'') continue;
+        if (end + 1 < line_end and source[end + 1] == '\'') {
+            end += 1;
+            continue;
+        }
+        return end + 1;
+    }
+    return TokenizeError.UnclosedString;
+}
+
+fn doubleQuotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
+    var end = start + 1;
+    while (end < line_end) : (end += 1) {
+        switch (source[end]) {
+            '"' => return end + 1,
+            '\\' => {
+                end += 1;
+                if (end >= line_end) return TokenizeError.UnclosedString;
+            },
+            else => {},
+        }
+    }
+    return TokenizeError.UnclosedString;
+}
+
 fn trimRightSpaces(source: []const u8, start: usize, end: usize) usize {
     var trimmed = end;
     while (trimmed > start and source[trimmed - 1] == ' ') {
@@ -210,6 +252,16 @@ fn testTokenizer(input: []const u8, expected: []const Token) !void {
     const tokens = try tokenizer.tokenize();
     defer testing.allocator.free(tokens);
     try testing.expectEqualSlices(Token, expected, tokens);
+}
+
+fn testTokenizerError(input: []const u8, expected_error: anyerror) !void {
+    var tokenizer: Tokenizer = .{ .allocator = testing.allocator, .source = input };
+    if (tokenizer.tokenize()) |tokens| {
+        defer testing.allocator.free(tokens);
+        try testing.expect(false);
+    } else |err| {
+        try testing.expectEqual(expected_error, err);
+    }
 }
 
 fn tok(kind: Token.Kind, start: usize, end: usize) Token {
@@ -278,4 +330,35 @@ test "yaml nested indentation" {
             tok(.end_of_file, 33, 33),
         },
     );
+}
+
+test "yaml quoted scalars are single tokens" {
+    try testTokenizer(
+        "quoted: 'a: # b'\n",
+        &.{
+            tok(.scalar, 0, 6),
+            tok(.colon, 6, 7),
+            tok(.whitespace, 7, 8),
+            tok(.scalar, 8, 16),
+            tok(.newline, 16, 17),
+            tok(.end_of_file, 17, 17),
+        },
+    );
+
+    try testTokenizer(
+        "\"quoted:key\": \"value # not comment\"\n",
+        &.{
+            tok(.scalar, 0, 12),
+            tok(.colon, 12, 13),
+            tok(.whitespace, 13, 14),
+            tok(.scalar, 14, 35),
+            tok(.newline, 35, 36),
+            tok(.end_of_file, 36, 36),
+        },
+    );
+}
+
+test "yaml quoted scalars must close on the line" {
+    try testTokenizerError("'unterminated", error.UnclosedString);
+    try testTokenizerError("\"unterminated", error.UnclosedString);
 }
