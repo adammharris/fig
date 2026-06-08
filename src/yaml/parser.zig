@@ -122,6 +122,16 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     return ParseError.UnexpectedToken;
                 }
             },
+            .block_header => {
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                try self.closeSequenceItemContinuation();
+                if (self.container_stack.items.len == 0 and self.root == null) {
+                    const value_id = try self.parseBlockScalar();
+                    try self.finishValue(value_id);
+                } else {
+                    return ParseError.UnexpectedToken;
+                }
+            },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
         }
@@ -187,6 +197,10 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
                 try self.finishValue(value_id);
             }
         },
+        .block_header => {
+            const value_id = try self.parseBlockScalar();
+            try self.finishValue(value_id);
+        },
         .dash => try self.parseSequenceEntry(),
         else => return ParseError.UnexpectedToken,
     }
@@ -226,6 +240,10 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
             const id = try self.closeContainer(self.node_spans.items[child_id].end);
             try self.finishValue(id);
         },
+        .block_header => {
+            const value_id = try self.parseBlockScalar();
+            try self.finishValue(value_id);
+        },
         .newline, .dedent, .end_of_file => {},
         else => return ParseError.UnexpectedToken,
     }
@@ -235,6 +253,170 @@ fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
     if (self.peek().kind != .scalar) return ParseError.UnexpectedToken;
     const token = self.advance();
     return self.addNode(try self.scalarKind(token.source(self.source)), token.span);
+}
+
+const BlockStyle = enum { literal, folded };
+const BlockChomp = enum { clip, strip, keep };
+
+/// Parses a block scalar: a `block_header` token, the header line's newline,
+/// then an optional `block_scalar` body token. Produces a single string node
+/// spanning the whole construct, with folding/chomping applied.
+fn parseBlockScalar(self: *Parser) ParserError!AST.Node.Id {
+    const header = self.advance();
+    const header_source = header.source(self.source);
+
+    // The tokenizer puts a trailing comment and the header-line newline between
+    // the header and the body; skip past them to reach the body token.
+    while (true) {
+        switch (self.peek().kind) {
+            .whitespace, .comment => _ = self.advance(),
+            else => break,
+        }
+    }
+    if (self.peek().kind == .newline) _ = self.advance();
+
+    var span_end = header.span.end;
+    var value: []const u8 = "";
+    if (self.peek().kind == .block_scalar) {
+        const body = self.advance();
+        span_end = body.span.end;
+        value = try self.decodeBlockScalar(header_source, header.span.start, body.source(self.source));
+    }
+
+    return self.addNode(.{ .string = value }, .init(header.span.start, span_end));
+}
+
+fn decodeBlockScalar(self: *Parser, header: []const u8, header_start: usize, body: []const u8) ParserError![]const u8 {
+    const style: BlockStyle = if (header[0] == '|') .literal else .folded;
+    var chomp: BlockChomp = .clip;
+    var explicit: ?usize = null;
+    for (header[1..]) |c| switch (c) {
+        '-' => chomp = .strip,
+        '+' => chomp = .keep,
+        '1'...'9' => explicit = c - '0',
+        else => {},
+    };
+
+    const content_indent: usize = if (explicit) |d|
+        self.lineIndentOf(header_start) + d
+    else
+        autodetectIndent(body);
+
+    // Split into physical lines, dropping the empty segment a trailing newline
+    // would otherwise create so it does not read as an extra blank line.
+    const ends_nl = body.len > 0 and body[body.len - 1] == '\n';
+    const work = if (ends_nl) body[0 .. body.len - 1] else body;
+
+    var total_lines: usize = 0;
+    var last_content: ?usize = null;
+    {
+        var it = LineIter{ .source = work };
+        var idx: usize = 0;
+        while (it.next()) |line| : (idx += 1) {
+            if (!isAllWhitespace(line)) last_content = idx;
+            total_lines += 1;
+        }
+    }
+
+    var decoded: std.ArrayList(u8) = .empty;
+    errdefer decoded.deinit(self.allocator);
+
+    if (last_content) |last| {
+        var it = LineIter{ .source = work };
+        var idx: usize = 0;
+        var emitted = false;
+        var prev_blank = false;
+        var prev_more = false;
+        while (it.next()) |line| : (idx += 1) {
+            if (idx > last) break; // trailing blanks are decided by chomping
+            const blank = isAllWhitespace(line);
+            const text = if (blank) "" else dedentLine(line, content_indent);
+            const more = text.len > 0 and text[0] == ' ';
+
+            if (style == .literal) {
+                if (emitted) try decoded.append(self.allocator, '\n');
+                try decoded.appendSlice(self.allocator, text);
+            } else if (!emitted) {
+                try decoded.appendSlice(self.allocator, text);
+            } else if (blank) {
+                try decoded.append(self.allocator, '\n');
+            } else {
+                if (prev_blank) {
+                    // The blank line already emitted the break.
+                } else if (prev_more or more) {
+                    try decoded.append(self.allocator, '\n');
+                } else {
+                    try decoded.append(self.allocator, ' ');
+                }
+                try decoded.appendSlice(self.allocator, text);
+            }
+
+            emitted = true;
+            prev_blank = blank;
+            prev_more = more and !blank;
+        }
+
+        const trailing_blanks = total_lines - 1 - last;
+        const present_breaks = trailing_blanks + @as(usize, if (ends_nl) 1 else 0);
+        const keep_breaks: usize = switch (chomp) {
+            .strip => 0,
+            .clip => @min(present_breaks, 1),
+            .keep => present_breaks,
+        };
+        for (0..keep_breaks) |_| try decoded.append(self.allocator, '\n');
+    } else if (chomp == .keep) {
+        const present_breaks = (total_lines -| 1) + @as(usize, if (ends_nl) 1 else 0);
+        for (0..present_breaks) |_| try decoded.append(self.allocator, '\n');
+    }
+
+    return self.ownString(try decoded.toOwnedSlice(self.allocator));
+}
+
+/// Counts the leading spaces on the source line containing `pos`.
+fn lineIndentOf(self: *const Parser, pos: usize) usize {
+    var start = pos;
+    while (start > 0 and self.source[start - 1] != '\n') start -= 1;
+    var i = start;
+    while (i < pos and self.source[i] == ' ') i += 1;
+    return i - start;
+}
+
+const LineIter = struct {
+    source: []const u8,
+    i: usize = 0,
+    done: bool = false,
+    fn next(self: *LineIter) ?[]const u8 {
+        if (self.done) return null;
+        const start = self.i;
+        while (self.i < self.source.len and self.source[self.i] != '\n') self.i += 1;
+        const line = self.source[start..self.i];
+        if (self.i < self.source.len) self.i += 1 else self.done = true;
+        return line;
+    }
+};
+
+fn isAllWhitespace(line: []const u8) bool {
+    for (line) |c| {
+        if (c != ' ' and c != '\t') return false;
+    }
+    return true;
+}
+
+fn dedentLine(line: []const u8, n: usize) []const u8 {
+    var k: usize = 0;
+    while (k < n and k < line.len and line[k] == ' ') k += 1;
+    return line[k..];
+}
+
+fn autodetectIndent(body: []const u8) usize {
+    var it = LineIter{ .source = body };
+    while (it.next()) |line| {
+        if (isAllWhitespace(line)) continue;
+        var k: usize = 0;
+        while (k < line.len and line[k] == ' ') k += 1;
+        return k;
+    }
+    return 0;
 }
 
 fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
@@ -873,6 +1055,91 @@ test "yaml colon inside a value stays in the scalar" {
     try testing.expectEqualSlices(u8, "http://example.com", url.kind.string);
     const time = try doc.ast.getValByPath(&.{.{ .key = "time" }});
     try testing.expectEqualSlices(u8, "12:30:00", time.kind.string);
+}
+
+test "yaml literal block scalar preserves line breaks" {
+    const input =
+        \\desc: |
+        \\  line one
+        \\  line two
+        \\next: x
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const desc = try doc.ast.getValByPath(&.{.{ .key = "desc" }});
+    try testing.expectEqualSlices(u8, "line one\nline two\n", desc.kind.string);
+    const next = try doc.ast.getValByPath(&.{.{ .key = "next" }});
+    try testing.expectEqualSlices(u8, "x", next.kind.string);
+}
+
+test "yaml folded block scalar folds line breaks" {
+    const input =
+        \\desc: >
+        \\  one two
+        \\  three
+        \\
+        \\  after blank
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const desc = try doc.ast.getValByPath(&.{.{ .key = "desc" }});
+    try testing.expectEqualSlices(u8, "one two three\nafter blank\n", desc.kind.string);
+}
+
+test "yaml block scalar chomping indicators" {
+    // Clip (default) keeps one trailing newline; strip keeps none; keep keeps all.
+    const clip = try Parser.parse(testing.allocator, "v: |\n  a\n\n\n", .v1_2_2);
+    defer clip.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a\n", (try clip.ast.getValByPath(&.{.{ .key = "v" }})).kind.string);
+
+    const strip = try Parser.parse(testing.allocator, "v: |-\n  a\n\n\n", .v1_2_2);
+    defer strip.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a", (try strip.ast.getValByPath(&.{.{ .key = "v" }})).kind.string);
+
+    const keep = try Parser.parse(testing.allocator, "v: |+\n  a\n\n\n", .v1_2_2);
+    defer keep.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a\n\n\n", (try keep.ast.getValByPath(&.{.{ .key = "v" }})).kind.string);
+}
+
+test "yaml block scalar explicit indent indicator preserves leading spaces" {
+    // With `|2`, only two columns are indentation, so the extra spaces are content.
+    const doc = try Parser.parse(testing.allocator, "v: |2\n    indented\n  flush\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "  indented\nflush\n", (try doc.ast.getValByPath(&.{.{ .key = "v" }})).kind.string);
+}
+
+test "yaml block scalar as sequence entry and nested value" {
+    const input =
+        \\steps:
+        \\  - |
+        \\    do a
+        \\    do b
+        \\  - run
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const steps = try doc.ast.getValByPath(&.{.{ .key = "steps" }});
+    try testing.expect(std.meta.activeTag(steps.kind) == .sequence);
+    const first = doc.ast.nodes[steps.kind.sequence.?];
+    try testing.expectEqualSlices(u8, "do a\ndo b\n", first.kind.string);
+    const second = doc.ast.nodes[first.next_sibling.?];
+    try testing.expectEqualSlices(u8, "run", second.kind.string);
+}
+
+test "yaml empty block scalar is an empty string" {
+    const doc = try Parser.parse(testing.allocator, "a: |\nb: 1\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "", (try doc.ast.getValByPath(&.{.{ .key = "a" }})).kind.string);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind) == .number);
+}
+
+test "yaml root block scalar document" {
+    const doc = try Parser.parse(testing.allocator, "|\n  hello\n  world\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "hello\nworld\n", doc.ast.nodes[doc.ast.root].kind.string);
 }
 
 test "yaml rejects flow-shaped root scalars" {
