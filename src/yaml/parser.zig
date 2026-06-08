@@ -34,11 +34,13 @@ tokens: []const Token = &.{},
 index: usize = 0,
 force_new_container: bool = false,
 root: ?AST.Node.Id = null,
+doc_started: bool = false,
+doc_ended: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
 
-const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape };
+const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments };
 const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
@@ -87,14 +89,38 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 try self.finishValue(id);
             },
             .newline => _ = self.advance(),
+            .doc_start => {
+                // A second document start (or one after content) is multi-doc,
+                // which is out of scope.
+                if (self.doc_started or self.nodes.items.len > 0) return ParseError.MultipleDocuments;
+                self.doc_started = true;
+                _ = self.advance();
+            },
+            .doc_end => {
+                self.doc_ended = true;
+                _ = self.advance();
+            },
             .dash => {
+                if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
                 try self.parseSequenceEntry();
             },
             .scalar => {
+                if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
-                if (!self.isMappingStart()) return ParseError.UnexpectedToken;
-                try self.parseMappingEntry();
+                if (self.isMappingStart()) {
+                    try self.parseMappingEntry();
+                } else if (self.container_stack.items.len == 0 and self.root == null) {
+                    // A bare scalar is a valid single-node document, but a plain
+                    // scalar cannot begin with a flow indicator: such a token is
+                    // malformed or unsupported flow, not a string. (Flow
+                    // collections are handled in a later phase.)
+                    if (invalidPlainStart(self.peek().source(self.source))) return ParseError.UnexpectedToken;
+                    const value_id = try self.parseScalar();
+                    try self.finishValue(value_id);
+                } else {
+                    return ParseError.UnexpectedToken;
+                }
             },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
@@ -329,14 +355,22 @@ fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
     if (source.len >= 2 and source[0] == '"') return .{ .string = try self.getDoubleQuotedString(source) };
     if (std.mem.eql(u8, source, "{}")) return .{ .mapping = null };
     if (std.mem.eql(u8, source, "[]")) return .{ .sequence = null };
-    if (std.mem.eql(u8, source, "null") or std.mem.eql(u8, source, "~")) return .null_;
-    if (std.mem.eql(u8, source, "true")) return .{ .boolean = true };
-    if (std.mem.eql(u8, source, "false")) return .{ .boolean = false };
-    if (isNumber(source)) return .{ .number = .{
-        .raw = source,
-        .kind = if (std.mem.indexOfScalar(u8, source, '.') == null) .integer else .float,
-    } };
+    if (eqlAny(source, &.{ "null", "Null", "NULL", "~" })) return .null_;
+    if (eqlAny(source, &.{ "true", "True", "TRUE" })) return .{ .boolean = true };
+    if (eqlAny(source, &.{ "false", "False", "FALSE" })) return .{ .boolean = false };
+    switch (classifyNumber(source)) {
+        .integer => return .{ .number = .{ .raw = source, .kind = .integer } },
+        .float => return .{ .number = .{ .raw = source, .kind = .float } },
+        .not_number => {},
+    }
     return .{ .string = source };
+}
+
+fn eqlAny(source: []const u8, options: []const []const u8) bool {
+    for (options) |option| {
+        if (std.mem.eql(u8, source, option)) return true;
+    }
+    return false;
 }
 
 fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const u8 {
@@ -453,34 +487,71 @@ fn appendCodepoint(decoded: *std.ArrayList(u8), allocator: std.mem.Allocator, co
     try decoded.appendSlice(allocator, buf[0..written]);
 }
 
-// YAML tokenizer doesn't distinguish number tokens from other
-// kinds like some other formats. So we need this lookahead
-// function to see if a scalar is a number.
-fn isNumber(source: []const u8) bool {
-    if (source.len == 0) return false;
+const NumberClass = enum { not_number, integer, float };
 
-    var index: usize = 0;
-    if (source[index] == '-') {
-        index += 1;
-        if (index == source.len) return false;
-    }
+// The YAML tokenizer doesn't distinguish numbers from other plain scalars, so
+// we classify them here against the YAML 1.2.2 core schema: decimal ints with
+// an optional sign, hex (0x) and octal (0o) ints, floats with fractions and/or
+// exponents, and the special floats .inf / .nan.
+fn classifyNumber(source: []const u8) NumberClass {
+    if (source.len == 0) return .not_number;
+    if (isInfNan(source)) return .float;
 
-    var digits: usize = 0;
-    while (index < source.len and std.ascii.isDigit(source[index])) : (index += 1) {
-        digits += 1;
-    }
-    if (digits == 0) return false;
-
-    if (index < source.len and source[index] == '.') {
-        index += 1;
-        var fractional_digits: usize = 0;
-        while (index < source.len and std.ascii.isDigit(source[index])) : (index += 1) {
-            fractional_digits += 1;
+    // Hex and octal integers take no sign in the core schema.
+    if (source.len > 2 and source[0] == '0' and (source[1] == 'x' or source[1] == 'o')) {
+        const hex = source[1] == 'x';
+        var i: usize = 2;
+        while (i < source.len) : (i += 1) {
+            const ok = if (hex) std.ascii.isHex(source[i]) else (source[i] >= '0' and source[i] <= '7');
+            if (!ok) return .not_number;
         }
-        if (fractional_digits == 0) return false;
+        return .integer;
     }
 
-    return index == source.len;
+    var i: usize = 0;
+    if (source[i] == '+' or source[i] == '-') i += 1;
+
+    var mantissa_digits: usize = 0;
+    while (i < source.len and std.ascii.isDigit(source[i])) : (i += 1) mantissa_digits += 1;
+
+    var is_float = false;
+    if (i < source.len and source[i] == '.') {
+        is_float = true;
+        i += 1;
+        while (i < source.len and std.ascii.isDigit(source[i])) : (i += 1) mantissa_digits += 1;
+    }
+    if (mantissa_digits == 0) return .not_number;
+
+    if (i < source.len and (source[i] == 'e' or source[i] == 'E')) {
+        is_float = true;
+        i += 1;
+        if (i < source.len and (source[i] == '+' or source[i] == '-')) i += 1;
+        var exp_digits: usize = 0;
+        while (i < source.len and std.ascii.isDigit(source[i])) : (i += 1) exp_digits += 1;
+        if (exp_digits == 0) return .not_number;
+    }
+
+    if (i != source.len) return .not_number;
+    return if (is_float) .float else .integer;
+}
+
+fn isInfNan(source: []const u8) bool {
+    var body = source;
+    if (source[0] == '+' or source[0] == '-') body = source[1..];
+    if (eqlAny(body, &.{ ".inf", ".Inf", ".INF" })) return true;
+    return eqlAny(source, &.{ ".nan", ".NaN", ".NAN" });
+}
+
+/// True when a plain scalar token cannot legally begin a YAML plain scalar.
+/// The empty flow collections `[]` and `{}` are the only flow forms accepted
+/// for now; everything else flow-shaped is rejected until flow parsing lands.
+fn invalidPlainStart(source: []const u8) bool {
+    if (source.len == 0) return false;
+    return switch (source[0]) {
+        '[', ']', '{', '}', ',' => !std.mem.eql(u8, source, "[]") and !std.mem.eql(u8, source, "{}"),
+        '?' => source.len >= 2 and (source[1] == ' ' or source[1] == '\t'),
+        else => false,
+    };
 }
 
 fn isMappingStart(self: *const Parser) bool {
@@ -712,4 +783,100 @@ test "yaml rejects invalid double quoted escapes" {
     try testParserError("bad: \"\\c\"\n", error.UnexpectedToken);
     try testParserError("bad: \"\\xq0\"\n", error.InvalidUnicodeEscape);
     try testParserError("bad: \"\\uD800\"\n", error.InvalidUnicodeEscape);
+}
+
+test "yaml core schema type resolution" {
+    const input =
+        \\n1: null
+        \\n2: NULL
+        \\n3: ~
+        \\b1: True
+        \\b2: FALSE
+        \\i1: 42
+        \\i2: -7
+        \\i3: +5
+        \\i4: 0x1A
+        \\i5: 0o17
+        \\f1: 3.14
+        \\f2: 1e3
+        \\f3: -.inf
+        \\f4: .nan
+        \\s1: yes
+        \\s2: 1_000
+        \\s3: 0x
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+
+    const ast = &doc.ast;
+    for ([_][]const u8{ "n1", "n2", "n3" }) |key| {
+        try testing.expect(std.meta.activeTag((try ast.getValByPath(&.{.{ .key = key }})).kind) == .null_);
+    }
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "b1" }})).kind.boolean == true);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "b2" }})).kind.boolean == false);
+
+    const Case = struct { key: []const u8, kind: enum { integer, float }, raw: []const u8 };
+    const numbers = [_]Case{
+        .{ .key = "i1", .kind = .integer, .raw = "42" },
+        .{ .key = "i2", .kind = .integer, .raw = "-7" },
+        .{ .key = "i3", .kind = .integer, .raw = "+5" },
+        .{ .key = "i4", .kind = .integer, .raw = "0x1A" },
+        .{ .key = "i5", .kind = .integer, .raw = "0o17" },
+        .{ .key = "f1", .kind = .float, .raw = "3.14" },
+        .{ .key = "f2", .kind = .float, .raw = "1e3" },
+        .{ .key = "f3", .kind = .float, .raw = "-.inf" },
+        .{ .key = "f4", .kind = .float, .raw = ".nan" },
+    };
+    for (numbers) |c| {
+        const number = (try ast.getValByPath(&.{.{ .key = c.key }})).kind.number;
+        try testing.expectEqualSlices(u8, c.raw, number.raw);
+        try testing.expectEqualStrings(@tagName(c.kind), @tagName(number.kind));
+    }
+
+    // Things that look number-ish but are not core-schema numbers stay strings.
+    for ([_][]const u8{ "s1", "s2", "s3" }) |key| {
+        try testing.expect(std.meta.activeTag((try ast.getValByPath(&.{.{ .key = key }})).kind) == .string);
+    }
+}
+
+test "yaml root scalar documents" {
+    const plain = try Parser.parse(testing.allocator, "hello world\n", .v1_2_2);
+    defer plain.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "hello world", plain.ast.nodes[plain.ast.root].kind.string);
+
+    const number = try Parser.parse(testing.allocator, "42\n", .v1_2_2);
+    defer number.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag(number.ast.nodes[number.ast.root].kind) == .number);
+
+    const quoted = try Parser.parse(testing.allocator, "\"quoted\"\n", .v1_2_2);
+    defer quoted.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "quoted", quoted.ast.nodes[quoted.ast.root].kind.string);
+}
+
+test "yaml document markers wrap a single document" {
+    const doc = try Parser.parse(testing.allocator, "---\nname: Ada\n...\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const name = try doc.ast.getValByPath(&.{.{ .key = "name" }});
+    try testing.expectEqualSlices(u8, "Ada", name.kind.string);
+}
+
+test "yaml rejects multiple documents" {
+    try testParserError("---\na: 1\n---\nb: 2\n", error.MultipleDocuments);
+    try testParserError("a: 1\n...\nb: 2\n", error.MultipleDocuments);
+}
+
+test "yaml colon inside a value stays in the scalar" {
+    const doc = try Parser.parse(testing.allocator, "url: http://example.com\ntime: 12:30:00\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const url = try doc.ast.getValByPath(&.{.{ .key = "url" }});
+    try testing.expectEqualSlices(u8, "http://example.com", url.kind.string);
+    const time = try doc.ast.getValByPath(&.{.{ .key = "time" }});
+    try testing.expectEqualSlices(u8, "12:30:00", time.kind.string);
+}
+
+test "yaml rejects flow-shaped root scalars" {
+    try testParserError("[ a, b, c ] ]\n", error.UnexpectedToken);
+    try testParserError("[-]\n", error.UnexpectedToken);
+    try testParserError("? x\n", error.UnexpectedToken);
 }

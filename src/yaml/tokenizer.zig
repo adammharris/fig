@@ -18,6 +18,8 @@ pub const Kind = enum {
     scalar,
     comment,
     whitespace,
+    doc_start, // `---` document start marker
+    doc_end, // `...` document end marker
     end_of_file,
 
     pub fn len(self: Kind) ?usize {
@@ -73,6 +75,30 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
                 try self.addToken(.fixed(.dedent, line.content_start));
             }
             if (indent != current_indent) return TokenizeError.InvalidIndent;
+        }
+
+        // Document markers (`---`, `...`) are only recognized at column 0.
+        // Any dedents above have already closed open containers.
+        if (indent == 0) {
+            if (self.docMarker(line)) |kind| {
+                const cs = line.content_start;
+                try self.addToken(.init(kind, .init(cs, cs + 3)));
+                // Tokenize any content sharing the marker's line (e.g. `--- foo`).
+                var rest = cs + 3;
+                while (rest < line.end and isBlank(self.source[rest])) rest += 1;
+                if (rest < line.end) {
+                    try self.tokenizeLineContent(.{
+                        .start = rest,
+                        .content_start = rest,
+                        .end = line.end,
+                        .newline_end = line.newline_end,
+                    });
+                }
+                if (line.newline_end > line.end) {
+                    try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+                }
+                continue;
+            }
         }
 
         try self.tokenizeLineContent(line);
@@ -137,8 +163,17 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 return;
             },
             ':' => {
-                try self.addToken(.fixed(.colon, cursor));
-                cursor += 1;
+                // A colon is a mapping value indicator only when followed by
+                // whitespace or the end of line. Otherwise (e.g. `http://x`)
+                // it is part of a plain scalar.
+                if (followedByBlank(self.source, cursor, line.end)) {
+                    try self.addToken(.fixed(.colon, cursor));
+                    cursor += 1;
+                } else {
+                    const end = scalarEnd(self.source, cursor, line.end);
+                    try self.addScalar(cursor, end);
+                    cursor = end;
+                }
                 at_content_start = false;
             },
             '\'', '"' => {
@@ -148,16 +183,18 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 at_content_start = false;
             },
             '-' => {
-                if (at_content_start) {
+                // A dash is a sequence entry indicator only at the start of a
+                // node and when followed by whitespace or end of line.
+                // Otherwise (e.g. `-3`) it begins a plain scalar.
+                if (at_content_start and followedByBlank(self.source, cursor, line.end)) {
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
-                    at_content_start = false;
                 } else {
                     const end = scalarEnd(self.source, cursor, line.end);
                     try self.addScalar(cursor, end);
                     cursor = end;
-                    at_content_start = false;
                 }
+                at_content_start = false;
             },
             else => {
                 const end = scalarEnd(self.source, cursor, line.end);
@@ -184,11 +221,36 @@ fn scalarEnd(source: []const u8, start: usize, line_end: usize) usize {
     var end = start;
     while (end < line_end) : (end += 1) {
         switch (source[end]) {
-            ':', '#' => break,
+            // A colon ends the scalar only when it is a value indicator,
+            // i.e. followed by whitespace or end of line.
+            ':' => if (followedByBlank(source, end, line_end)) break,
+            // A `#` begins a comment only when preceded by whitespace.
+            '#' => if (end > start and isBlank(source[end - 1])) break,
             else => {},
         }
     }
     return end;
+}
+
+fn isBlank(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+/// Detects a document marker (`---` or `...`) occupying its own column-0 line.
+/// The three marker bytes must be followed by whitespace or end of line.
+fn docMarker(self: *const Tokenizer, line: Line) ?Kind {
+    const cs = line.content_start;
+    if (line.end - cs < 3) return null;
+    const c = self.source[cs];
+    if (c != '-' and c != '.') return null;
+    if (self.source[cs + 1] != c or self.source[cs + 2] != c) return null;
+    if (cs + 3 != line.end and !isBlank(self.source[cs + 3])) return null;
+    return if (c == '-') .doc_start else .doc_end;
+}
+
+/// True when the byte after `i` is whitespace or `i` is the last byte on the line.
+fn followedByBlank(source: []const u8, i: usize, line_end: usize) bool {
+    return i + 1 >= line_end or isBlank(source[i + 1]);
 }
 
 fn quotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
@@ -361,4 +423,85 @@ test "yaml quoted scalars are single tokens" {
 test "yaml quoted scalars must close on the line" {
     try testTokenizerError("'unterminated", error.UnclosedString);
     try testTokenizerError("\"unterminated", error.UnclosedString);
+}
+
+test "yaml colon is an indicator only before whitespace" {
+    // A colon followed by a non-space (a URL) stays inside the plain scalar.
+    try testTokenizer(
+        "url: http://example.com\n",
+        &.{
+            tok(.scalar, 0, 3),
+            tok(.colon, 3, 4),
+            tok(.whitespace, 4, 5),
+            tok(.scalar, 5, 23),
+            tok(.newline, 23, 24),
+            tok(.end_of_file, 24, 24),
+        },
+    );
+
+    // `a:b` with no trailing space is a single plain scalar.
+    try testTokenizer(
+        "a:b\n",
+        &.{
+            tok(.scalar, 0, 3),
+            tok(.newline, 3, 4),
+            tok(.end_of_file, 4, 4),
+        },
+    );
+}
+
+test "yaml dash is an indicator only before whitespace" {
+    // `-3` is a (negative) plain scalar, not an empty sequence entry.
+    try testTokenizer(
+        "value: -3\n",
+        &.{
+            tok(.scalar, 0, 5),
+            tok(.colon, 5, 6),
+            tok(.whitespace, 6, 7),
+            tok(.scalar, 7, 9),
+            tok(.newline, 9, 10),
+            tok(.end_of_file, 10, 10),
+        },
+    );
+}
+
+test "yaml document markers" {
+    try testTokenizer(
+        "---\nname: Ada\n...\n",
+        &.{
+            tok(.doc_start, 0, 3),
+            tok(.newline, 3, 4),
+            tok(.scalar, 4, 8),
+            tok(.colon, 8, 9),
+            tok(.whitespace, 9, 10),
+            tok(.scalar, 10, 13),
+            tok(.newline, 13, 14),
+            tok(.doc_end, 14, 17),
+            tok(.newline, 17, 18),
+            tok(.end_of_file, 18, 18),
+        },
+    );
+}
+
+test "yaml hash starts a comment only after whitespace" {
+    // `a#b` has no comment: the hash is part of the plain scalar.
+    try testTokenizer(
+        "a#b\n",
+        &.{
+            tok(.scalar, 0, 3),
+            tok(.newline, 3, 4),
+            tok(.end_of_file, 4, 4),
+        },
+    );
+
+    // `a #b` does: the hash is preceded by whitespace.
+    try testTokenizer(
+        "a #b\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.comment, 2, 4),
+            tok(.newline, 4, 5),
+            tok(.end_of_file, 5, 5),
+        },
+    );
 }
