@@ -225,10 +225,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     try self.addToken(.init(.comment, .init(cursor, line.end)));
                     return;
                 }
-                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
-                try self.addScalar(cursor, end);
-                cursor = end;
-                at_content_start = false;
+                try self.handlePlain(cursor, &line, &cursor, &at_content_start);
             },
             ':' => {
                 // A colon is a mapping value indicator only when followed by
@@ -237,12 +234,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0)) {
                     try self.addToken(.fixed(.colon, cursor));
                     cursor += 1;
+                    at_content_start = false;
                 } else {
-                    const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
-                    try self.addScalar(cursor, end);
-                    cursor = end;
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
-                at_content_start = false;
             },
             '[' => {
                 if (self.flow_depth == 0) self.openFlow(line);
@@ -274,12 +269,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 if (self.flow_depth > 0) {
                     try self.addToken(.fixed(.comma, cursor));
                     cursor += 1;
+                    at_content_start = false;
                 } else {
-                    const end = scalarEnd(self.source, cursor, line.end, false);
-                    try self.addScalar(cursor, end);
-                    cursor = end;
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
-                at_content_start = false;
             },
             '\'', '"' => {
                 // Continuation lines of a multi-line quoted scalar must out-indent
@@ -324,10 +317,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     };
                     return;
                 };
-                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
-                try self.addScalar(cursor, end);
-                cursor = end;
-                at_content_start = false;
+                try self.handlePlain(cursor, &line, &cursor, &at_content_start);
             },
             '-' => {
                 // A dash is a sequence entry indicator only at the start of a
@@ -337,19 +327,12 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 if (self.flow_depth == 0 and at_content_start and followedByBlank(self.source, cursor, line.end)) {
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
+                    at_content_start = false;
                 } else {
-                    const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
-                    try self.addScalar(cursor, end);
-                    cursor = end;
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
-                at_content_start = false;
             },
-            else => {
-                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
-                try self.addScalar(cursor, end);
-                cursor = end;
-                at_content_start = false;
-            },
+            else => try self.handlePlain(cursor, &line, &cursor, &at_content_start),
         }
     }
 
@@ -368,6 +351,90 @@ fn remainderLine(self: *const Tokenizer, pos: usize) Line {
     while (end < self.source.len and self.source[end] != '\n') end += 1;
     const newline_end = if (end < self.source.len) end + 1 else end;
     return .{ .start = pos, .content_start = pos, .end = end, .newline_end = newline_end };
+}
+
+const PlainContinuation = struct { content_end: usize, last_line: Line };
+
+/// Emits a plain scalar starting at `start`. If it reaches end of line in block
+/// context, it may continue onto more-indented following lines (a multi-line
+/// plain scalar), which are gathered into one token; the parser folds the breaks.
+fn handlePlain(self: *Tokenizer, start: usize, line: *Line, cursor: *usize, at_content_start: *bool) TokenizeError!void {
+    const flow = self.flow_depth > 0;
+    const end = scalarEnd(self.source, start, line.end, flow);
+    // Only a genuine plain scalar continues; a "scalar" that begins with a block
+    // or flow indicator (e.g. a malformed `> text` header) is not plain text, so
+    // gathering it would mask the error.
+    if (!flow and end == line.end and plainContinuationStart(self.source[start])) {
+        if (try self.gatherPlainContinuation(line.*)) |g| {
+            try self.addToken(.init(.scalar, .init(start, g.content_end)));
+            line.* = g.last_line;
+            cursor.* = g.last_line.end;
+            at_content_start.* = false;
+            return;
+        }
+    }
+    try self.addScalar(start, end);
+    cursor.* = end;
+    at_content_start.* = false;
+}
+
+/// Scans the lines following a plain scalar to see whether it continues onto
+/// more-indented plain-text lines. Returns the span end (trimmed end of the last
+/// continuation line) and that line, or null if there is no continuation. Sets
+/// `self.i` to resume after the last continuation line.
+fn gatherPlainContinuation(self: *Tokenizer, line: Line) TokenizeError!?PlainContinuation {
+    const floor = line.content_start - line.start;
+    var probe = line.newline_end;
+    var result: ?PlainContinuation = null;
+
+    while (probe < self.source.len) {
+        const line_start = probe;
+        var end = line_start;
+        while (end < self.source.len and self.source[end] != '\n') end += 1;
+        const newline_end = if (end < self.source.len) end + 1 else end;
+
+        var spaces = line_start;
+        while (spaces < end and self.source[spaces] == ' ') spaces += 1;
+        var ws = line_start;
+        while (ws < end and isBlank(self.source[ws])) ws += 1;
+
+        // Blank lines are interior fold breaks; include them only if a real
+        // continuation line follows (handled by not advancing `result`).
+        if (ws == end) {
+            probe = newline_end;
+            continue;
+        }
+
+        const indent = spaces - line_start;
+        if (indent <= floor) break; // dedent: the continuation has ended
+        if (ws > spaces) break; // a tab in the indentation is not plain text
+        const fc = self.source[spaces];
+        if (!plainContinuationStart(fc)) break;
+        // A leading sequence/explicit-key/value indicator starts a structure.
+        if ((fc == '-' or fc == '?' or fc == ':') and
+            (spaces + 1 >= end or isBlank(self.source[spaces + 1]))) break;
+        // A colon or comment anywhere makes this a mapping entry or comment, not
+        // a pure plain continuation.
+        if (scalarEnd(self.source, spaces, end, false) != end) break;
+
+        result = .{
+            .content_end = trimRightSpaces(self.source, spaces, end),
+            .last_line = .{ .start = line_start, .content_start = spaces, .end = end, .newline_end = newline_end },
+        };
+        probe = newline_end;
+    }
+
+    if (result) |r| self.i = r.last_line.newline_end;
+    return result;
+}
+
+/// True when `c` can begin a plain-scalar continuation line (i.e. it is not an
+/// indicator that would start a different kind of node).
+fn plainContinuationStart(c: u8) bool {
+    return switch (c) {
+        '#', '[', ']', '{', '}', ',', '\'', '"', '&', '*', '!', '|', '>', '@', '`', '%' => false,
+        else => true,
+    };
 }
 
 fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
@@ -762,6 +829,27 @@ test "yaml multi-line quoted scalar is one token" {
             tok(.scalar, 3, 10),
             tok(.newline, 10, 11),
             tok(.end_of_file, 11, 11),
+        },
+    );
+}
+
+test "yaml multi-line plain scalar is gathered into one token" {
+    // `a` plus the more-indented `b` become a single scalar token spanning both
+    // lines; `next` at the key indent is separate.
+    try testTokenizer(
+        "k: a\n  b\nnext: x\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.scalar, 3, 8),
+            tok(.newline, 8, 9),
+            tok(.scalar, 9, 13),
+            tok(.colon, 13, 14),
+            tok(.whitespace, 14, 15),
+            tok(.scalar, 15, 16),
+            tok(.newline, 16, 17),
+            tok(.end_of_file, 17, 17),
         },
     );
 }

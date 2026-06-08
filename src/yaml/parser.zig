@@ -597,6 +597,9 @@ fn closeContainer(self: *Parser, span_end: usize) ParserError!AST.Node.Id {
 
 fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
     if (self.container_stack.items.len == 0) {
+        // A second top-level node means trailing junk after the root (or a
+        // second document); reject rather than silently overwriting the root.
+        if (self.root != null) return ParseError.UnexpectedToken;
         self.root = value_id;
         return;
     }
@@ -678,6 +681,9 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) voi
 fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
     if (source.len >= 2 and source[0] == '\'') return .{ .string = try self.getSingleQuotedString(source) };
     if (source.len >= 2 and source[0] == '"') return .{ .string = try self.getDoubleQuotedString(source) };
+    // A multi-line plain scalar folds its line breaks; it is always a string
+    // (no number/bool/null spans lines).
+    if (std.mem.indexOfScalar(u8, source, '\n') != null) return .{ .string = try self.foldPlainScalar(source) };
     if (eqlAny(source, &.{ "null", "Null", "NULL", "~" })) return .null_;
     if (eqlAny(source, &.{ "true", "True", "TRUE" })) return .{ .boolean = true };
     if (eqlAny(source, &.{ "false", "False", "FALSE" })) return .{ .boolean = false };
@@ -694,6 +700,24 @@ fn eqlAny(source: []const u8, options: []const []const u8) bool {
         if (std.mem.eql(u8, source, option)) return true;
     }
     return false;
+}
+
+/// Folds a multi-line plain scalar: line breaks fold like flow scalars (a lone
+/// break becomes a space, a blank line a newline) with continuation-line
+/// indentation stripped.
+fn foldPlainScalar(self: *Parser, source: []const u8) ParserError![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(self.allocator);
+    var i: usize = 0;
+    while (i < source.len) {
+        if (source[i] == '\n') {
+            i = try foldFlowBreak(&out, self.allocator, source, i);
+            continue;
+        }
+        try out.append(self.allocator, source[i]);
+        i += 1;
+    }
+    return self.ownString(try out.toOwnedSlice(self.allocator));
 }
 
 fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const u8 {
@@ -1292,6 +1316,52 @@ test "yaml rejects malformed flow" {
     try testParserError("x: [a]]\n", error.UnexpectedToken); // extra close
     try testParserError("flow: [a,\nb]\n", error.InvalidIndent); // under-indented continuation
     try testParserError("x: [-]\n", error.UnexpectedToken); // bare dash flow scalar
+}
+
+test "yaml multi-line plain scalar folds into a value" {
+    const input =
+        \\desc: this is
+        \\  a long
+        \\  value
+        \\next: x
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "this is a long value", (try doc.ast.getValByPath(&.{.{ .key = "desc" }})).kind.string);
+    try testing.expectEqualSlices(u8, "x", (try doc.ast.getValByPath(&.{.{ .key = "next" }})).kind.string);
+}
+
+test "yaml multi-line plain scalar blank line becomes newline" {
+    const input =
+        \\desc: one
+        \\  two
+        \\
+        \\  three
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "one two\nthree", (try doc.ast.getValByPath(&.{.{ .key = "desc" }})).kind.string);
+}
+
+test "yaml multi-line plain scalar as sequence entry" {
+    const input =
+        \\- one
+        \\  two
+        \\- three
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "one two", (try doc.ast.getValByPath(&.{.{ .index = 0 }})).kind.string);
+    try testing.expectEqualSlices(u8, "three", (try doc.ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+}
+
+test "yaml plain value is not folded across a mapping key" {
+    // The more-indented line has a colon, so it is a nested structure, not a
+    // continuation — this is invalid and must not silently fold.
+    try testParserError("a: b\n  c: d\n", error.UnexpectedToken);
 }
 
 test "yaml multi-line double-quoted scalar folds breaks" {
