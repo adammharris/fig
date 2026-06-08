@@ -132,6 +132,15 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     return ParseError.UnexpectedToken;
                 }
             },
+            .flow_seq_start, .flow_map_start => {
+                // A flow collection as a whole document, or as the value of a
+                // mapping key / sequence item written on the following line.
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                try self.closeSequenceItemContinuation();
+                self.force_new_container = false;
+                const value_id = try self.parseFlowNode();
+                try self.finishValue(value_id);
+            },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
         }
@@ -201,6 +210,10 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
             const value_id = try self.parseBlockScalar();
             try self.finishValue(value_id);
         },
+        .flow_seq_start, .flow_map_start => {
+            const value_id = try self.parseFlowNode();
+            try self.finishValue(value_id);
+        },
         .dash => try self.parseSequenceEntry(),
         else => return ParseError.UnexpectedToken,
     }
@@ -242,6 +255,10 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
         },
         .block_header => {
             const value_id = try self.parseBlockScalar();
+            try self.finishValue(value_id);
+        },
+        .flow_seq_start, .flow_map_start => {
+            const value_id = try self.parseFlowNode();
             try self.finishValue(value_id);
         },
         .newline, .dedent, .end_of_file => {},
@@ -419,6 +436,132 @@ fn autodetectIndent(body: []const u8) usize {
     return 0;
 }
 
+/// Parses a flow node: a flow sequence `[...]`, flow mapping `{...}`, or a
+/// flow scalar. Flow content ignores indentation and line breaks, so newlines
+/// are treated as trivia throughout.
+fn parseFlowNode(self: *Parser) ParserError!AST.Node.Id {
+    self.skipFlowTrivia();
+    return switch (self.peek().kind) {
+        .flow_seq_start => self.parseFlowSequence(),
+        .flow_map_start => self.parseFlowMapping(),
+        .scalar => {
+            if (invalidFlowScalar(self.peek().source(self.source))) return ParseError.UnexpectedToken;
+            return self.parseScalar();
+        },
+        else => ParseError.UnexpectedToken,
+    };
+}
+
+/// A plain scalar inside flow may not begin with a comment indicator, and the
+/// indicators `-`/`?`/`:` are valid first characters only when followed by
+/// plain-safe content — a bare one (here, abutting a flow indicator) is not.
+fn invalidFlowScalar(source: []const u8) bool {
+    if (source.len == 0) return true;
+    if (source[0] == '#') return true;
+    if (source.len == 1) return source[0] == '-' or source[0] == '?' or source[0] == ':';
+    return false;
+}
+
+fn parseFlowSequence(self: *Parser) ParserError!AST.Node.Id {
+    const open = self.advance(); // flow_seq_start
+    const seq_id = try self.addNode(.{ .sequence = null }, open.span);
+    var last: ?AST.Node.Id = null;
+
+    self.skipFlowTrivia();
+    while (self.peek().kind != .flow_seq_end) {
+        if (self.peek().kind == .end_of_file) return ParseError.UnexpectedToken;
+
+        const item = try self.parseFlowNode();
+        if (last) |prev| {
+            self.nodes.items[prev].next_sibling = item;
+        } else {
+            self.nodes.items[seq_id].kind = .{ .sequence = item };
+        }
+        last = item;
+
+        self.skipFlowTrivia();
+        switch (self.peek().kind) {
+            .comma => {
+                _ = self.advance();
+                self.skipFlowTrivia();
+            },
+            .flow_seq_end => {},
+            else => return ParseError.UnexpectedToken,
+        }
+    }
+
+    const close = self.advance(); // flow_seq_end
+    self.node_spans.items[seq_id].end = close.span.end;
+    return seq_id;
+}
+
+fn parseFlowMapping(self: *Parser) ParserError!AST.Node.Id {
+    const open = self.advance(); // flow_map_start
+    const map_id = try self.addNode(.{ .mapping = null }, open.span);
+    var last: ?AST.Node.Id = null;
+
+    self.skipFlowTrivia();
+    while (self.peek().kind != .flow_map_end) {
+        if (self.peek().kind == .end_of_file) return ParseError.UnexpectedToken;
+
+        const key_id = try self.parseFlowNode();
+        self.skipFlowTrivia();
+
+        var value_id: AST.Node.Id = undefined;
+        if (self.peek().kind == .colon) {
+            _ = self.advance();
+            self.skipFlowTrivia();
+            value_id = switch (self.peek().kind) {
+                // `{a: , b}` / `{a:}` — an explicit but empty value is null.
+                .comma, .flow_map_end => empty: {
+                    const at = self.node_spans.items[key_id].end;
+                    break :empty try self.addNode(.null_, .init(at, at));
+                },
+                else => try self.parseFlowNode(),
+            };
+        } else {
+            // `{a, b}` — a bare key has an implicit null value.
+            const at = self.node_spans.items[key_id].end;
+            value_id = try self.addNode(.null_, .init(at, at));
+        }
+
+        const key_span = self.node_spans.items[key_id];
+        const value_span = self.node_spans.items[value_id];
+        const pair_id = try self.addNode(.{ .keyvalue = .{
+            .key = key_id,
+            .value = value_id,
+        } }, .{ .start = key_span.start, .end = value_span.end });
+
+        if (last) |prev| {
+            self.nodes.items[prev].next_sibling = pair_id;
+        } else {
+            self.nodes.items[map_id].kind = .{ .mapping = pair_id };
+        }
+        last = pair_id;
+
+        self.skipFlowTrivia();
+        switch (self.peek().kind) {
+            .comma => {
+                _ = self.advance();
+                self.skipFlowTrivia();
+            },
+            .flow_map_end => {},
+            else => return ParseError.UnexpectedToken,
+        }
+    }
+
+    const close = self.advance(); // flow_map_end
+    self.node_spans.items[map_id].end = close.span.end;
+    return map_id;
+}
+
+fn skipFlowTrivia(self: *Parser) void {
+    while (true) switch (self.peek().kind) {
+        .whitespace, .newline, .comment, .indent, .dedent => _ = self.advance(),
+        else => return,
+    };
+}
+
 fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
     if (!self.force_new_container and self.container_stack.items.len > 0) {
         const current = self.currentContainer();
@@ -535,8 +678,6 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) voi
 fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
     if (source.len >= 2 and source[0] == '\'') return .{ .string = try self.getSingleQuotedString(source) };
     if (source.len >= 2 and source[0] == '"') return .{ .string = try self.getDoubleQuotedString(source) };
-    if (std.mem.eql(u8, source, "{}")) return .{ .mapping = null };
-    if (std.mem.eql(u8, source, "[]")) return .{ .sequence = null };
     if (eqlAny(source, &.{ "null", "Null", "NULL", "~" })) return .null_;
     if (eqlAny(source, &.{ "true", "True", "TRUE" })) return .{ .boolean = true };
     if (eqlAny(source, &.{ "false", "False", "FALSE" })) return .{ .boolean = false };
@@ -725,12 +866,13 @@ fn isInfNan(source: []const u8) bool {
 }
 
 /// True when a plain scalar token cannot legally begin a YAML plain scalar.
-/// The empty flow collections `[]` and `{}` are the only flow forms accepted
-/// for now; everything else flow-shaped is rejected until flow parsing lands.
+/// Flow collections are now tokenized as their own tokens, so the only forms
+/// that still reach here flow-shaped are a leading `,` and the explicit-key
+/// indicator `? `.
 fn invalidPlainStart(source: []const u8) bool {
     if (source.len == 0) return false;
     return switch (source[0]) {
-        '[', ']', '{', '}', ',' => !std.mem.eql(u8, source, "[]") and !std.mem.eql(u8, source, "{}"),
+        ',' => true,
         '?' => source.len >= 2 and (source[1] == ' ' or source[1] == '\t'),
         else => false,
     };
@@ -1057,6 +1199,48 @@ test "yaml colon inside a value stays in the scalar" {
     try testing.expectEqualSlices(u8, "12:30:00", time.kind.string);
 }
 
+test "yaml flow sequence of scalars" {
+    const doc = try Parser.parse(testing.allocator, "tags: [a, b, 3]\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const tags = try doc.ast.getValByPath(&.{.{ .key = "tags" }});
+    try testing.expect(std.meta.activeTag(tags.kind) == .sequence);
+    try testing.expectEqualSlices(u8, "a", (try doc.ast.getValByPath(&.{ .{ .key = "tags" }, .{ .index = 0 } })).kind.string);
+    try testing.expectEqualSlices(u8, "b", (try doc.ast.getValByPath(&.{ .{ .key = "tags" }, .{ .index = 1 } })).kind.string);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{ .{ .key = "tags" }, .{ .index = 2 } })).kind) == .number);
+}
+
+test "yaml flow mapping with quoted keys and nested flow" {
+    const doc = try Parser.parse(testing.allocator, "m: {a: 1, \"b c\": [x, y], d}\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{ .{ .key = "m" }, .{ .key = "a" } })).kind) == .number);
+    const nested = try doc.ast.getValByPath(&.{ .{ .key = "m" }, .{ .key = "b c" } });
+    try testing.expect(std.meta.activeTag(nested.kind) == .sequence);
+    try testing.expectEqualSlices(u8, "y", (try doc.ast.getValByPath(&.{ .{ .key = "m" }, .{ .key = "b c" }, .{ .index = 1 } })).kind.string);
+    // A bare key in a flow mapping has an implicit null value.
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{ .{ .key = "m" }, .{ .key = "d" } })).kind) == .null_);
+}
+
+test "yaml flow collection spanning multiple lines" {
+    const input =
+        \\matrix: [
+        \\  [1, 2],
+        \\  [3, 4],
+        \\]
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const cell = try doc.ast.getValByPath(&.{ .{ .key = "matrix" }, .{ .index = 1 }, .{ .index = 0 } });
+    try testing.expectEqualSlices(u8, "3", cell.kind.number.raw);
+}
+
+test "yaml rejects malformed flow" {
+    try testParserError("x: [a, b\n", error.UnexpectedToken); // unterminated
+    try testParserError("x: [a]]\n", error.UnexpectedToken); // extra close
+    try testParserError("flow: [a,\nb]\n", error.InvalidIndent); // under-indented continuation
+    try testParserError("x: [-]\n", error.UnexpectedToken); // bare dash flow scalar
+}
+
 test "yaml getValByPath chains through nested mappings and sequences" {
     const input =
         \\outer:
@@ -1164,6 +1348,6 @@ test "yaml root block scalar document" {
 
 test "yaml rejects flow-shaped root scalars" {
     try testParserError("[ a, b, c ] ]\n", error.UnexpectedToken);
-    try testParserError("[-]\n", error.UnexpectedToken);
+    try testParserError("]\n", error.UnexpectedToken);
     try testParserError("? x\n", error.UnexpectedToken);
 }

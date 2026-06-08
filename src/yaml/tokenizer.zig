@@ -15,6 +15,11 @@ pub const Kind = enum {
     newline,
     dash,
     colon,
+    comma, // `,` flow entry separator
+    flow_seq_start, // `[`
+    flow_seq_end, // `]`
+    flow_map_start, // `{`
+    flow_map_end, // `}`
     scalar,
     comment,
     whitespace,
@@ -27,7 +32,7 @@ pub const Kind = enum {
     pub fn len(self: Kind) ?usize {
         return switch (self) {
             .end_of_file, .dedent => 0,
-            .newline, .dash, .colon => 1,
+            .newline, .dash, .colon, .comma, .flow_seq_start, .flow_seq_end, .flow_map_start, .flow_map_end => 1,
             else => null,
         };
     }
@@ -48,6 +53,13 @@ const Line = struct {
 tokens: std.ArrayList(Token) = .empty,
 i: usize = 0,
 pending_block: ?PendingBlock = null,
+flow_depth: usize = 0,
+// Indentation of the line on which the outermost flow collection opened, and
+// whether that collection is the document root. Continuation lines inside flow
+// must be more indented than this (except the closing bracket, and the root,
+// which has no indentation floor).
+flow_open_indent: usize = 0,
+flow_root: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
@@ -73,6 +85,35 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
     // YAML is whitespace-sensitive, so we parse line-by-line.
     while (try self.getLine()) |line| {
         if (line.isBlank()) continue;
+
+        // Inside a flow collection (`[`/`{`), indentation is not significant in
+        // the block sense, but a few constraints still apply.
+        if (self.flow_depth > 0) {
+            // A document marker may not appear inside a flow collection; emit it
+            // so the parser rejects it where it stands.
+            if (line.content_start == line.start) {
+                if (self.docMarker(line)) |kind| {
+                    const cs = line.content_start;
+                    try self.addToken(.init(kind, .init(cs, cs + 3)));
+                    if (line.newline_end > line.end) {
+                        try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+                    }
+                    continue;
+                }
+            }
+            // Flow content must be more indented than the line the collection
+            // opened on; only the closing bracket may sit at that indentation.
+            const indent = line.content_start - line.start;
+            const first = self.source[line.content_start];
+            if (!self.flow_root and first != ']' and first != '}' and indent <= self.flow_open_indent) {
+                return TokenizeError.InvalidIndent;
+            }
+            try self.tokenizeLineContent(line);
+            if (line.newline_end > line.end) {
+                try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+            }
+            continue;
+        }
 
         const indent = line.content_start - line.start;
         if (indent > current_indent) {
@@ -172,18 +213,64 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 cursor = end;
             },
             '#' => {
-                try self.addToken(.init(.comment, .init(cursor, line.end)));
-                return;
+                // A `#` starts a comment only at the start of content or when
+                // preceded by whitespace; otherwise (e.g. `]#x`, `,#x`) it is
+                // ordinary scalar text.
+                if (cursor == line.content_start or isBlank(self.source[cursor - 1])) {
+                    try self.addToken(.init(.comment, .init(cursor, line.end)));
+                    return;
+                }
+                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
+                try self.addScalar(cursor, end);
+                cursor = end;
+                at_content_start = false;
             },
             ':' => {
                 // A colon is a mapping value indicator only when followed by
                 // whitespace or the end of line. Otherwise (e.g. `http://x`)
                 // it is part of a plain scalar.
-                if (followedByBlank(self.source, cursor, line.end)) {
+                if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0)) {
                     try self.addToken(.fixed(.colon, cursor));
                     cursor += 1;
                 } else {
-                    const end = scalarEnd(self.source, cursor, line.end);
+                    const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
+                    try self.addScalar(cursor, end);
+                    cursor = end;
+                }
+                at_content_start = false;
+            },
+            '[' => {
+                if (self.flow_depth == 0) self.openFlow(line);
+                try self.addToken(.fixed(.flow_seq_start, cursor));
+                self.flow_depth += 1;
+                cursor += 1;
+                at_content_start = false;
+            },
+            '{' => {
+                if (self.flow_depth == 0) self.openFlow(line);
+                try self.addToken(.fixed(.flow_map_start, cursor));
+                self.flow_depth += 1;
+                cursor += 1;
+                at_content_start = false;
+            },
+            ']' => {
+                try self.addToken(.fixed(.flow_seq_end, cursor));
+                if (self.flow_depth > 0) self.flow_depth -= 1;
+                cursor += 1;
+                at_content_start = false;
+            },
+            '}' => {
+                try self.addToken(.fixed(.flow_map_end, cursor));
+                if (self.flow_depth > 0) self.flow_depth -= 1;
+                cursor += 1;
+                at_content_start = false;
+            },
+            ',' => {
+                if (self.flow_depth > 0) {
+                    try self.addToken(.fixed(.comma, cursor));
+                    cursor += 1;
+                } else {
+                    const end = scalarEnd(self.source, cursor, line.end, false);
                     try self.addScalar(cursor, end);
                     cursor = end;
                 }
@@ -196,10 +283,12 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 at_content_start = false;
             },
             '|', '>' => {
-                // A `|`/`>` in value position begins a block scalar. (Anywhere
-                // else it is swallowed by scalarEnd before reaching this switch,
-                // so the current byte being `|`/`>` means we are at value start.)
-                if (blockHeaderEnd(self.source, cursor, line.end)) |hdr_end| {
+                // A `|`/`>` in value position begins a block scalar. Block
+                // scalars do not occur inside flow, so there it is plain text.
+                // (Anywhere else `|`/`>` is swallowed by scalarEnd before
+                // reaching this switch, so the current byte being `|`/`>` means
+                // we are at value start.)
+                if (self.flow_depth == 0) if (blockHeaderEnd(self.source, cursor, line.end)) |hdr_end| {
                     try self.addToken(.init(.block_header, .init(cursor, hdr_end)));
                     var rest = hdr_end;
                     while (rest < line.end and isBlank(self.source[rest])) rest += 1;
@@ -211,28 +300,29 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                         .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
                     };
                     return;
-                }
-                const end = scalarEnd(self.source, cursor, line.end);
+                };
+                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
                 try self.addScalar(cursor, end);
                 cursor = end;
                 at_content_start = false;
             },
             '-' => {
                 // A dash is a sequence entry indicator only at the start of a
-                // node and when followed by whitespace or end of line.
-                // Otherwise (e.g. `-3`) it begins a plain scalar.
-                if (at_content_start and followedByBlank(self.source, cursor, line.end)) {
+                // node and when followed by whitespace or end of line. It is
+                // never an entry indicator inside flow. Otherwise (e.g. `-3`) it
+                // begins a plain scalar.
+                if (self.flow_depth == 0 and at_content_start and followedByBlank(self.source, cursor, line.end)) {
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
                 } else {
-                    const end = scalarEnd(self.source, cursor, line.end);
+                    const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
                     try self.addScalar(cursor, end);
                     cursor = end;
                 }
                 at_content_start = false;
             },
             else => {
-                const end = scalarEnd(self.source, cursor, line.end);
+                const end = scalarEnd(self.source, cursor, line.end, self.flow_depth > 0);
                 try self.addScalar(cursor, end);
                 cursor = end;
                 at_content_start = false;
@@ -252,19 +342,32 @@ fn addScalar(self: *Tokenizer, start: usize, end: usize) TokenizeError!void {
     }
 }
 
-fn scalarEnd(source: []const u8, start: usize, line_end: usize) usize {
+fn scalarEnd(source: []const u8, start: usize, line_end: usize, flow: bool) usize {
     var end = start;
     while (end < line_end) : (end += 1) {
         switch (source[end]) {
             // A colon ends the scalar only when it is a value indicator,
             // i.e. followed by whitespace or end of line.
-            ':' => if (followedByBlank(source, end, line_end)) break,
+            ':' => if (colonIsIndicator(source, end, line_end, flow)) break,
             // A `#` begins a comment only when preceded by whitespace.
             '#' => if (end > start and isBlank(source[end - 1])) break,
+            // Flow indicators terminate a plain scalar inside a flow collection.
+            ',', '[', ']', '{', '}' => if (flow) break,
             else => {},
         }
     }
     return end;
+}
+
+/// A `:` is a mapping value indicator when followed by whitespace/EOL, or — in
+/// flow context — when followed by a flow indicator (`,`/`]`/`}`).
+fn colonIsIndicator(source: []const u8, i: usize, line_end: usize, flow: bool) bool {
+    if (followedByBlank(source, i, line_end)) return true;
+    if (!flow) return false;
+    return switch (source[i + 1]) {
+        ',', ']', '}' => true,
+        else => false,
+    };
 }
 
 fn isBlank(c: u8) bool {
@@ -325,6 +428,21 @@ fn explicitIndent(source: []const u8, start: usize, header_end: usize) ?usize {
         if (source[i] >= '1' and source[i] <= '9') return source[i] - '0';
     }
     return null;
+}
+
+fn openFlow(self: *Tokenizer, line: Line) void {
+    self.flow_open_indent = line.content_start - line.start;
+    // A flow collection that is the whole document — nothing but a `---` marker
+    // and trivia precedes it — is the root node, which has no indentation floor
+    // for its content.
+    self.flow_root = true;
+    for (self.tokens.items) |t| switch (t.kind) {
+        .doc_start, .newline, .whitespace, .comment => {},
+        else => {
+            self.flow_root = false;
+            break;
+        },
+    };
 }
 
 fn flushPendingBlock(self: *Tokenizer) TokenizeError!void {
@@ -620,6 +738,45 @@ test "yaml document markers" {
             tok(.doc_end, 14, 17),
             tok(.newline, 17, 18),
             tok(.end_of_file, 18, 18),
+        },
+    );
+}
+
+test "yaml flow collection indicators are distinct tokens" {
+    try testTokenizer(
+        "tags: [a, b]\n",
+        &.{
+            tok(.scalar, 0, 4),
+            tok(.colon, 4, 5),
+            tok(.whitespace, 5, 6),
+            tok(.flow_seq_start, 6, 7),
+            tok(.scalar, 7, 8),
+            tok(.comma, 8, 9),
+            tok(.whitespace, 9, 10),
+            tok(.scalar, 10, 11),
+            tok(.flow_seq_end, 11, 12),
+            tok(.newline, 12, 13),
+            tok(.end_of_file, 13, 13),
+        },
+    );
+}
+
+test "yaml flow spans lines and ignores indentation" {
+    // The continuation line is not an indent; inside flow it is plain trivia.
+    try testTokenizer(
+        "x: [\n  a,\n]\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.flow_seq_start, 3, 4),
+            tok(.newline, 4, 5),
+            tok(.scalar, 7, 8),
+            tok(.comma, 8, 9),
+            tok(.newline, 9, 10),
+            tok(.flow_seq_end, 10, 11),
+            tok(.newline, 11, 12),
+            tok(.end_of_file, 12, 12),
         },
     );
 }
