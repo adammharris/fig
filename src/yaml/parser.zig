@@ -36,6 +36,10 @@ owned_strings: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
 index: usize = 0,
 force_new_container: bool = false,
+// Count of indents opened solely to hold a scalar/flow value on the line after
+// its key (`key:\n  value`). Such an indent opens no container, so its matching
+// dedent must be skipped rather than closing the awaiting parent.
+value_only_indents: usize = 0,
 root: ?AST.Node.Id = null,
 doc_started: bool = false,
 doc_ended: bool = false,
@@ -76,6 +80,13 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
 
     while (true) {
         self.skipTriviaNoNewline();
+        // A next-line scalar value occupies a fresh indent by itself; the only
+        // thing that may follow it at that indent is its closing dedent. Content
+        // there (`key:\n  value\n  more: x`) is over-indented and invalid.
+        if (self.value_only_indents > 0) switch (self.peek().kind) {
+            .newline, .dedent, .end_of_file => {},
+            else => return ParseError.UnexpectedToken,
+        };
         switch (self.peek().kind) {
             .indent => {
                 if (self.container_stack.items.len > 0 and self.currentContainer().continues_sequence_item) {
@@ -86,10 +97,17 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 _ = self.advance();
             },
             .dedent => {
-                try self.closePendingEmptyValue();
-                const dedent = self.advance();
-                const id = try self.closeContainer(dedent.span.end);
-                try self.finishValue(id);
+                // A dedent matching an indent that only held a next-line scalar
+                // value closes no container — just consume it.
+                if (self.value_only_indents > 0) {
+                    self.value_only_indents -= 1;
+                    _ = self.advance();
+                } else {
+                    try self.closePendingEmptyValue();
+                    const dedent = self.advance();
+                    const id = try self.closeContainer(dedent.span.end);
+                    try self.finishValue(id);
+                }
             },
             .newline => _ = self.advance(),
             .doc_start => {
@@ -123,7 +141,8 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 const colon = self.advance();
                 self.currentContainer().explicit_awaiting_value = false;
                 self.currentContainer().pending_value_span = colon.span.end;
-                try self.parseMappingValue();
+                // An explicit value (`: - one`) may take a compact block sequence.
+                try self.parseMappingValue(true);
             },
             .scalar => {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
@@ -138,6 +157,11 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     if (invalidPlainStart(self.peek().source(self.source))) return ParseError.UnexpectedToken;
                     const value_id = try self.parseScalar();
                     try self.finishValue(value_id);
+                } else if (self.force_new_container and self.currentAwaitsValue()) {
+                    // A plain scalar on the line after its key (`key:\n  value`):
+                    // the fresh indent holds the value, not a new container.
+                    const value_id = try self.parseScalar();
+                    try self.attachDeferredValue(value_id);
                 } else {
                     return ParseError.UnexpectedToken;
                 }
@@ -157,9 +181,8 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 // mapping key / sequence item written on the following line.
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
-                self.force_new_container = false;
                 const value_id = try self.parseFlowNode();
-                try self.finishValue(value_id);
+                try self.attachDeferredValue(value_id);
             },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
@@ -234,6 +257,12 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
             const value_id = try self.parseFlowNode();
             try self.finishValue(value_id);
         },
+        .explicit_key => {
+            // A sequence entry whose value is an explicit-key mapping (`- ? k`).
+            const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
+            self.containerById(mapping_id).continues_sequence_item = true;
+            try self.parseExplicitKey();
+        },
         .dash => try self.parseSequenceEntry(),
         else => return ParseError.UnexpectedToken,
     }
@@ -254,14 +283,18 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
         parent.pending_value_span = colon.span.end;
     }
 
-    try self.parseMappingValue();
+    // An implicit key (`key:`) may not take a compact block sequence on its own
+    // line; the sequence must start on the next line.
+    try self.parseMappingValue(false);
 }
 
 /// Parses the value following a mapping key's `:` indicator. The pending key is
 /// already recorded on the current mapping container; an inline value is built
 /// and attached immediately, while a value written on following lines (a block
 /// collection, or nothing) is left for the indent/dedent machinery to attach.
-fn parseMappingValue(self: *Parser) ParserError!void {
+/// `allow_compact_sequence` enables a block sequence whose first entry sits on
+/// the `:` line; this is only legal after an explicit-value indicator.
+fn parseMappingValue(self: *Parser, allow_compact_sequence: bool) ParserError!void {
     self.skipTriviaNoNewline();
     switch (self.peek().kind) {
         .scalar => {
@@ -276,10 +309,17 @@ fn parseMappingValue(self: *Parser) ParserError!void {
             }
         },
         .dash => {
-            const child_id = try self.openContainer(.sequence, self.peek().span.start);
+            // A compact block sequence whose first entry sits on the `:` line
+            // (explicit `: - one`). Only valid after an explicit-value indicator
+            // — an implicit `key: - one` is malformed. Leave it open like the
+            // main-loop sequence path so entries on following lines attach to it;
+            // the `continues_sequence_item` flag stops the next indent from
+            // opening a fresh container, and the sequence closes on the matching
+            // dedent or the next shallower entry (via closeSequenceItemContinuation).
+            if (!allow_compact_sequence) return ParseError.UnexpectedToken;
+            const seq_id = try self.openContainer(.sequence, self.peek().span.start);
+            self.containerById(seq_id).continues_sequence_item = true;
             try self.parseSequenceEntry();
-            const id = try self.closeContainer(self.node_spans.items[child_id].end);
-            try self.finishValue(id);
         },
         .block_header => {
             const value_id = try self.parseBlockScalar();
@@ -531,7 +571,7 @@ fn parseFlowSequence(self: *Parser) ParserError!AST.Node.Id {
     while (self.peek().kind != .flow_seq_end) {
         if (self.peek().kind == .end_of_file) return ParseError.UnexpectedToken;
 
-        const item = try self.parseFlowNode();
+        const item = try self.parseFlowSequenceItem();
         if (last) |prev| {
             self.nodes.items[prev].next_sibling = item;
         } else {
@@ -553,6 +593,60 @@ fn parseFlowSequence(self: *Parser) ParserError!AST.Node.Id {
     const close = self.advance(); // flow_seq_end
     self.node_spans.items[seq_id].end = close.span.end;
     return seq_id;
+}
+
+/// Parses a single flow-sequence element. Usually a plain flow node, but an
+/// element may also be a single-pair mapping: either explicit (`[? k : v]`) or
+/// implicit (`[a: b]`). Such a pair is wrapped in its own one-entry mapping node.
+fn parseFlowSequenceItem(self: *Parser) ParserError!AST.Node.Id {
+    const explicit = self.peek().kind == .explicit_key;
+    if (explicit) {
+        _ = self.advance();
+        self.skipFlowTrivia();
+    }
+
+    const key_id: AST.Node.Id = switch (self.peek().kind) {
+        // An empty key: `[: v]` (value-only) or a bare `[?]`.
+        .colon => try self.addNode(.null_, self.peek().span),
+        .comma, .flow_seq_end => if (explicit)
+            try self.addNode(.null_, self.peek().span)
+        else
+            return ParseError.UnexpectedToken,
+        else => try self.parseFlowNode(),
+    };
+    // An implicit key's `:` must be on the same line as the key; an explicit
+    // (`?`) key's value indicator may follow a line break.
+    if (explicit) self.skipFlowTrivia() else self.skipFlowInlineTrivia();
+
+    // Without a `:` it is a plain element — unless `?` already forced a pair.
+    if (self.peek().kind != .colon) {
+        if (!explicit) return key_id;
+        const at = self.node_spans.items[key_id].end;
+        return self.wrapFlowPair(key_id, try self.addNode(.null_, .init(at, at)));
+    }
+
+    _ = self.advance(); // colon
+    self.skipFlowTrivia();
+    const value_id: AST.Node.Id = switch (self.peek().kind) {
+        .comma, .flow_seq_end => empty: {
+            const at = self.node_spans.items[key_id].end;
+            break :empty try self.addNode(.null_, .init(at, at));
+        },
+        else => try self.parseFlowNode(),
+    };
+    return self.wrapFlowPair(key_id, value_id);
+}
+
+/// Wraps a key/value pair as a standalone single-entry mapping node (used for a
+/// flow pair that appears as a flow-sequence element).
+fn wrapFlowPair(self: *Parser, key_id: AST.Node.Id, value_id: AST.Node.Id) ParserError!AST.Node.Id {
+    const key_span = self.node_spans.items[key_id];
+    const value_span = self.node_spans.items[value_id];
+    const pair_id = try self.addNode(.{ .keyvalue = .{
+        .key = key_id,
+        .value = value_id,
+    } }, .{ .start = key_span.start, .end = value_span.end });
+    return self.addNode(.{ .mapping = pair_id }, .{ .start = key_span.start, .end = value_span.end });
 }
 
 fn parseFlowMapping(self: *Parser) ParserError!AST.Node.Id {
@@ -633,6 +727,15 @@ fn skipFlowTrivia(self: *Parser) void {
     };
 }
 
+/// Skips only same-line trivia (no line breaks). Used to find an implicit flow
+/// pair's `:`, which must sit on the key's line.
+fn skipFlowInlineTrivia(self: *Parser) void {
+    while (true) switch (self.peek().kind) {
+        .whitespace, .comment => _ = self.advance(),
+        else => return,
+    };
+}
+
 fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
     if (!self.force_new_container and self.container_stack.items.len > 0) {
         const current = self.currentContainer();
@@ -664,6 +767,28 @@ fn closeContainer(self: *Parser, span_end: usize) ParserError!AST.Node.Id {
         self.node_spans.items[container.id].end = span_end;
     }
     return container.id;
+}
+
+/// True when the current container is mid-entry, waiting for a value: a mapping
+/// with a recorded key, or a sequence with a dash awaiting its item.
+fn currentAwaitsValue(self: *Parser) bool {
+    if (self.container_stack.items.len == 0) return false;
+    const c = self.currentContainer();
+    return switch (c.kind) {
+        .mapping => c.pending_key != null,
+        .sequence => c.pending_sequence_item,
+    };
+}
+
+/// Attaches a value that may have been written on the line after its key. If a
+/// fresh indent was opened solely to hold it (`force_new_container`), that
+/// indent's matching dedent must be skipped, so record it.
+fn attachDeferredValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
+    if (self.force_new_container) {
+        self.value_only_indents += 1;
+        self.force_new_container = false;
+    }
+    try self.finishValue(value_id);
 }
 
 fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
@@ -1630,11 +1755,93 @@ test "yaml explicit block-scalar key" {
     try testing.expectEqualSlices(u8, "value", (try doc.ast.getValByPath(&.{.{ .key = "block key\n" }})).kind.string);
 }
 
+test "yaml flow pairs in flow sequences" {
+    // An implicit flow pair: the element is a single-entry mapping.
+    const implicit = try Parser.parse(testing.allocator, "[ a: 1, b: 2 ]\n", .v1_2_2);
+    defer implicit.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try implicit.ast.getValByPath(&.{ .{ .index = 0 }, .{ .key = "a" } })).kind) == .number);
+    try testing.expect(std.meta.activeTag((try implicit.ast.getValByPath(&.{ .{ .index = 1 }, .{ .key = "b" } })).kind) == .number);
+
+    // An explicit flow pair and a plain element side by side.
+    const explicit = try Parser.parse(testing.allocator, "[ ? k : v, plain ]\n", .v1_2_2);
+    defer explicit.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "v", (try explicit.ast.getValByPath(&.{ .{ .index = 0 }, .{ .key = "k" } })).kind.string);
+    try testing.expectEqualSlices(u8, "plain", (try explicit.ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+}
+
+test "yaml rejects implicit flow pair with colon on next line" {
+    // An implicit key's `:` must be on the key's line.
+    try testParserError("[ key\n  : value ]\n", error.UnexpectedToken);
+}
+
 test "yaml flow mapping with explicit keys and empty values" {
     // `? foo :` is foo→null; `: bar` is null→bar.
     const doc = try Parser.parse(testing.allocator, "{ ? foo :, : bar, }\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
     try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "foo" }})).kind) == .null_);
+}
+
+test "yaml next-line scalar value" {
+    // A plain scalar value on the line after its key.
+    const doc = try Parser.parse(testing.allocator, "key:\n  value\nnext: x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "value", (try doc.ast.getValByPath(&.{.{ .key = "key" }})).kind.string);
+    try testing.expectEqualSlices(u8, "x", (try doc.ast.getValByPath(&.{.{ .key = "next" }})).kind.string);
+}
+
+test "yaml next-line scalar value nested" {
+    const input =
+        \\a:
+        \\  b:
+        \\    c
+        \\  d: e
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "c", (try doc.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" } })).kind.string);
+    try testing.expectEqualSlices(u8, "e", (try doc.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "d" } })).kind.string);
+}
+
+test "yaml next-line flow value" {
+    const doc = try Parser.parse(testing.allocator, "key:\n  [1, 2]\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "key" }})).kind) == .sequence);
+    try testing.expectEqualSlices(u8, "2", (try doc.ast.getValByPath(&.{ .{ .key = "key" }, .{ .index = 1 } })).kind.number.raw);
+}
+
+test "yaml rejects content at a next-line value's indent" {
+    // After `key:`'s scalar value, a mapping entry at the value's (deeper) indent
+    // is over-indented and invalid.
+    try testParserError("key:\n  word1 word2\n  no: key\n", error.UnexpectedToken);
+    // A scalar value at the SAME indent as its key is not a value either.
+    try testParserError("key:\nvalue\n", error.UnexpectedToken);
+}
+
+test "yaml explicit value compact block sequence" {
+    // After an explicit-value `:`, a compact block sequence (first entry on the
+    // `:` line) may continue on following lines.
+    const doc = try Parser.parse(testing.allocator, "? k\n: - one\n  - two\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const seq = try doc.ast.getValByPath(&.{.{ .key = "k" }});
+    try testing.expect(std.meta.activeTag(seq.kind) == .sequence);
+    try testing.expectEqualSlices(u8, "one", (try doc.ast.getValByPath(&.{ .{ .key = "k" }, .{ .index = 0 } })).kind.string);
+    try testing.expectEqualSlices(u8, "two", (try doc.ast.getValByPath(&.{ .{ .key = "k" }, .{ .index = 1 } })).kind.string);
+}
+
+test "yaml rejects compact block sequence as implicit mapping value" {
+    // `key: - a` (block sequence compact on an implicit key's line) is invalid;
+    // the sequence must begin on the next line.
+    try testParserError("key: - a\n     - b\n", error.UnexpectedToken);
+}
+
+test "yaml sequence entry with explicit-key mapping value" {
+    // `- ? : x` is a sequence entry whose value is an explicit-key mapping with
+    // an empty (null) key.
+    const entry = try Parser.parse(testing.allocator, "- ? : x\n", .v1_2_2);
+    defer entry.deinit(testing.allocator);
+    const pair = try entry.ast.getValByPath(&.{.{ .index = 0 }});
+    try testing.expect(std.meta.activeTag(pair.kind) == .mapping);
 }
 
 test "yaml rejects complex (non-scalar) explicit keys" {

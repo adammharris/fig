@@ -244,7 +244,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0)) {
                     try self.addToken(.fixed(.colon, cursor));
                     cursor += 1;
-                    at_content_start = false;
+                    // After a value indicator we are at the start of the value
+                    // node, so a following `-`/`?` is an indicator (`k: - a` is a
+                    // compact block sequence).
+                    at_content_start = true;
                 } else {
                     try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
@@ -337,7 +340,9 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 if (self.flow_depth == 0 and at_content_start and followedByBlank(self.source, cursor, line.end)) {
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
-                    at_content_start = false;
+                    // A dash starts a node, so a nested `-`/`?` right after it is
+                    // also an indicator (`- - c` is a nested sequence).
+                    at_content_start = true;
                 } else {
                     try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
