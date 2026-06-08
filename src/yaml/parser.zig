@@ -1057,6 +1057,28 @@ test "yaml colon inside a value stays in the scalar" {
     try testing.expectEqualSlices(u8, "12:30:00", time.kind.string);
 }
 
+test "yaml getValByPath chains through nested mappings and sequences" {
+    const input =
+        \\outer:
+        \\  items:
+        \\    - first
+        \\    - second
+        \\  meta:
+        \\    name: ada
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+
+    // key -> key -> index chaining (previously failed: intermediate keyvalue).
+    const second = try doc.ast.getValByPath(&.{ .{ .key = "outer" }, .{ .key = "items" }, .{ .index = 1 } });
+    try testing.expectEqualSlices(u8, "second", second.kind.string);
+
+    // key -> key -> key chaining.
+    const name = try doc.ast.getValByPath(&.{ .{ .key = "outer" }, .{ .key = "meta" }, .{ .key = "name" } });
+    try testing.expectEqualSlices(u8, "ada", name.kind.string);
+}
+
 test "yaml literal block scalar preserves line breaks" {
     const input =
         \\desc: |
@@ -1121,11 +1143,9 @@ test "yaml block scalar as sequence entry and nested value" {
     ;
     const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
     defer doc.deinit(testing.allocator);
-    const steps = try doc.ast.getValByPath(&.{.{ .key = "steps" }});
-    try testing.expect(std.meta.activeTag(steps.kind) == .sequence);
-    const first = doc.ast.nodes[steps.kind.sequence.?];
+    const first = try doc.ast.getValByPath(&.{ .{ .key = "steps" }, .{ .index = 0 } });
     try testing.expectEqualSlices(u8, "do a\ndo b\n", first.kind.string);
-    const second = doc.ast.nodes[first.next_sibling.?];
+    const second = try doc.ast.getValByPath(&.{ .{ .key = "steps" }, .{ .index = 1 } });
     try testing.expectEqualSlices(u8, "run", second.kind.string);
 }
 

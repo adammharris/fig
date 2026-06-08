@@ -141,6 +141,13 @@ fn getIdByPath(self: *const AST, path: []const PathSegment) !Node.Id {
 /// Can return keyvalue node that must be deconstructed.
 fn getChildNodeId(self: *const AST, parent_id: Node.Id, segment: PathSegment) !Node.Id {
     var current_node = parent_id;
+    // A `.key` lookup yields the keyvalue wrapper node; to descend through it
+    // we need its value, so unwrap an intermediate keyvalue before applying the
+    // next segment. (Sequence elements are stored as bare value nodes, so this
+    // only fires after a previous `.key` step.)
+    if (activeTag(self.nodes[current_node].kind) == .keyvalue) {
+        current_node = self.nodes[current_node].kind.keyvalue.value;
+    }
     switch (segment) {
         .key => {
             current_node = switch (self.nodes[current_node].kind) {
