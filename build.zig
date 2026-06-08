@@ -6,9 +6,11 @@ pub fn build(b: *std.Build) void {
     const strip = b.option(bool, "strip", "Strip debug information") orelse (optimize == .ReleaseSmall);
     const resolved_target = target.result;
     const run_conformance = b.option(bool, "json-conformance", "Run JSON conformance tests") orelse false;
+    const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
+    options.addOption(bool, "yaml_conformance", run_yaml_conformance);
 
 
     const mod = b.addModule("fig", .{

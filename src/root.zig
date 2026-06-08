@@ -18,4 +18,7 @@ test {
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");
     }
+    if (build_options.yaml_conformance) {
+        _ = @import("yaml/conformance.zig");
+    }
 }
