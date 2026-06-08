@@ -24,6 +24,9 @@ const OpenContainer = struct {
     pending_sequence_item_span: ?usize = null,
     pending_sequence_item: bool = false,
     continues_sequence_item: bool = false,
+    // True between an explicit key (`? key`) and its value indicator (`:`): the
+    // pending_key was introduced by `?` and a standalone `:` may supply its value.
+    explicit_awaiting_value: bool = false,
 };
 
 nodes: std.ArrayList(AST.Node) = .empty,
@@ -104,6 +107,23 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
                 try self.parseSequenceEntry();
+            },
+            .explicit_key => {
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                try self.closeSequenceItemContinuation();
+                try self.parseExplicitKey();
+            },
+            .colon => {
+                // A standalone `:` supplies the value for an explicit key
+                // (`? key` on a previous line). Outside that context it is junk.
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                if (self.container_stack.items.len == 0 or
+                    !self.currentContainer().explicit_awaiting_value)
+                    return ParseError.UnexpectedToken;
+                const colon = self.advance();
+                self.currentContainer().explicit_awaiting_value = false;
+                self.currentContainer().pending_value_span = colon.span.end;
+                try self.parseMappingValue();
             },
             .scalar => {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
@@ -234,6 +254,14 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
         parent.pending_value_span = colon.span.end;
     }
 
+    try self.parseMappingValue();
+}
+
+/// Parses the value following a mapping key's `:` indicator. The pending key is
+/// already recorded on the current mapping container; an inline value is built
+/// and attached immediately, while a value written on following lines (a block
+/// collection, or nothing) is left for the indent/dedent machinery to attach.
+fn parseMappingValue(self: *Parser) ParserError!void {
     self.skipTriviaNoNewline();
     switch (self.peek().kind) {
         .scalar => {
@@ -264,6 +292,38 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
         .newline, .dedent, .end_of_file => {},
         else => return ParseError.UnexpectedToken,
     }
+}
+
+/// Parses an explicit-key entry (`? key`). Records the key on the current
+/// mapping and marks it awaiting a `:` value indicator (which arrives on a later
+/// line, or never — an explicit key with no `:` has a null value). The key may
+/// be a plain/quoted scalar, a flow collection, a block scalar, or empty.
+/// Complex block keys (a key that is itself a block sequence/mapping) are not
+/// supported and are rejected rather than mis-parsed.
+fn parseExplicitKey(self: *Parser) ParserError!void {
+    const marker = self.advance(); // explicit_key `?`
+    const mapping_id = try self.ensureContainer(.mapping);
+    try self.closePendingEmptyValue();
+
+    self.skipTriviaNoNewline();
+    const key_id = switch (self.peek().kind) {
+        .scalar => key: {
+            // `? key:` makes the key itself a mapping — a complex key we don't
+            // support; reject rather than silently parse the wrong shape.
+            if (self.isMappingStart()) return ParseError.UnexpectedToken;
+            break :key try self.parseScalar();
+        },
+        .flow_seq_start, .flow_map_start => try self.parseFlowNode(),
+        .block_header => try self.parseBlockScalar(),
+        // `?` directly before its `:` (or end of entry) is an empty (null) key.
+        .colon, .newline, .dedent, .end_of_file => try self.addNode(.null_, .init(marker.span.end, marker.span.end)),
+        else => return ParseError.UnexpectedToken,
+    };
+
+    const parent = self.containerById(mapping_id);
+    parent.pending_key = key_id;
+    parent.pending_value_span = self.node_spans.items[key_id].end;
+    parent.explicit_awaiting_value = true;
 }
 
 fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
@@ -504,7 +564,18 @@ fn parseFlowMapping(self: *Parser) ParserError!AST.Node.Id {
     while (self.peek().kind != .flow_map_end) {
         if (self.peek().kind == .end_of_file) return ParseError.UnexpectedToken;
 
-        const key_id = try self.parseFlowNode();
+        // An optional `?` introduces the key explicitly; in flow either the key
+        // or the value (or both) may be empty (`{? a :, : b, ?}`).
+        if (self.peek().kind == .explicit_key) {
+            _ = self.advance();
+            self.skipFlowTrivia();
+        }
+
+        const key_id = switch (self.peek().kind) {
+            // An empty key, e.g. `{: v}` (value-only) or a bare `{?}`.
+            .colon, .comma, .flow_map_end => try self.addNode(.null_, self.peek().span),
+            else => try self.parseFlowNode(),
+        };
         self.skipFlowTrivia();
 
         var value_id: AST.Node.Id = undefined;
@@ -614,6 +685,7 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
         .mapping => {
             const key_id = parent.pending_key orelse return ParseError.UnexpectedToken;
             parent.pending_key = null;
+            parent.explicit_awaiting_value = false;
 
             const key_span = self.node_spans.items[key_id];
             const value_span = self.node_spans.items[value_id];
@@ -641,6 +713,7 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
             try self.finishValue(value_id);
         },
         .mapping => if (parent.pending_key != null) {
+            parent.explicit_awaiting_value = false;
             const value_id = try self.addNode(.null_, .init(parent.pending_value_span, parent.pending_value_span));
             try self.finishValue(value_id);
         },
@@ -1520,8 +1593,68 @@ test "yaml root block scalar document" {
     try testing.expectEqualSlices(u8, "hello\nworld\n", doc.ast.nodes[doc.ast.root].kind.string);
 }
 
+test "yaml explicit block keys" {
+    // `? key` / `: value` forms a normal mapping entry.
+    const doc = try Parser.parse(testing.allocator, "? key\n: value\nplain: x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "value", (try doc.ast.getValByPath(&.{.{ .key = "key" }})).kind.string);
+    try testing.expectEqualSlices(u8, "x", (try doc.ast.getValByPath(&.{.{ .key = "plain" }})).kind.string);
+}
+
+test "yaml explicit key with empty value is null" {
+    // `? a` / `? b` with no `:` give a and b null values; `c:` is also null.
+    const doc = try Parser.parse(testing.allocator, "? a\n? b\nc:\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    for ([_][]const u8{ "a", "b", "c" }) |key| {
+        try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = key }})).kind) == .null_);
+    }
+}
+
+test "yaml mapping mixes explicit and implicit entries" {
+    const input =
+        \\mapping:
+        \\  ? sky
+        \\  : blue
+        \\  sea: green
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "blue", (try doc.ast.getValByPath(&.{ .{ .key = "mapping" }, .{ .key = "sky" } })).kind.string);
+    try testing.expectEqualSlices(u8, "green", (try doc.ast.getValByPath(&.{ .{ .key = "mapping" }, .{ .key = "sea" } })).kind.string);
+}
+
+test "yaml explicit block-scalar key" {
+    const doc = try Parser.parse(testing.allocator, "? |\n  block key\n: value\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "value", (try doc.ast.getValByPath(&.{.{ .key = "block key\n" }})).kind.string);
+}
+
+test "yaml flow mapping with explicit keys and empty values" {
+    // `? foo :` is foo→null; `: bar` is null→bar.
+    const doc = try Parser.parse(testing.allocator, "{ ? foo :, : bar, }\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "foo" }})).kind) == .null_);
+}
+
+test "yaml rejects complex (non-scalar) explicit keys" {
+    // A block sequence as the key is a complex key we do not support.
+    try testParserError("? -\n: -\n", error.UnexpectedToken);
+    try testParserError("? - a\n  - b\n: c\n", error.UnexpectedToken);
+}
+
+test "yaml merge key is an ordinary string key" {
+    // `<<` is a plain scalar; the merge is a composition-time concern, so for an
+    // in-place editor it is just a key named "<<".
+    const doc = try Parser.parse(testing.allocator, "<<: {a: 1}\nb: 2\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "<<" }})).kind) == .mapping);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind) == .number);
+}
+
 test "yaml rejects flow-shaped root scalars" {
     try testParserError("[ a, b, c ] ]\n", error.UnexpectedToken);
     try testParserError("]\n", error.UnexpectedToken);
-    try testParserError("? x\n", error.UnexpectedToken);
+    // A leading `,` is still not a valid plain scalar.
+    try testParserError(",x\n", error.UnexpectedToken);
 }

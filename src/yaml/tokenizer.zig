@@ -15,6 +15,7 @@ pub const Kind = enum {
     newline,
     dash,
     colon,
+    explicit_key, // `?` explicit (complex) key indicator
     comma, // `,` flow entry separator
     flow_seq_start, // `[`
     flow_seq_end, // `]`
@@ -32,7 +33,7 @@ pub const Kind = enum {
     pub fn len(self: Kind) ?usize {
         return switch (self) {
             .end_of_file, .dedent => 0,
-            .newline, .dash, .colon, .comma, .flow_seq_start, .flow_seq_end, .flow_map_start, .flow_map_end => 1,
+            .newline, .dash, .colon, .explicit_key, .comma, .flow_seq_start, .flow_seq_end, .flow_map_start, .flow_map_end => 1,
             else => null,
         };
     }
@@ -337,6 +338,19 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
                     at_content_start = false;
+                } else {
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
+                }
+            },
+            '?' => {
+                // A `?` is an explicit-key indicator at the start of a node (or
+                // anywhere in flow) when followed by whitespace or end of line.
+                // `at_content_start` stays true: the key that follows may itself
+                // begin with an indicator (e.g. `? - a`). Otherwise (e.g. `?x`)
+                // it is ordinary plain text.
+                if ((self.flow_depth > 0 or at_content_start) and followedByBlank(self.source, cursor, line.end)) {
+                    try self.addToken(.fixed(.explicit_key, cursor));
+                    cursor += 1;
                 } else {
                     try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
@@ -983,6 +997,35 @@ test "yaml dash is an indicator only before whitespace" {
             tok(.scalar, 7, 9),
             tok(.newline, 9, 10),
             tok(.end_of_file, 10, 10),
+        },
+    );
+}
+
+test "yaml explicit key indicator" {
+    // `? ` at node start is an explicit-key indicator; the standalone `:` on the
+    // next line is the value indicator.
+    try testTokenizer(
+        "? key\n: value\n",
+        &.{
+            tok(.explicit_key, 0, 1),
+            tok(.whitespace, 1, 2),
+            tok(.scalar, 2, 5),
+            tok(.newline, 5, 6),
+            tok(.colon, 6, 7),
+            tok(.whitespace, 7, 8),
+            tok(.scalar, 8, 13),
+            tok(.newline, 13, 14),
+            tok(.end_of_file, 14, 14),
+        },
+    );
+
+    // `?x` (no separating space) is ordinary plain text, not an indicator.
+    try testTokenizer(
+        "?x\n",
+        &.{
+            tok(.scalar, 0, 2),
+            tok(.newline, 2, 3),
+            tok(.end_of_file, 3, 3),
         },
     );
 }
