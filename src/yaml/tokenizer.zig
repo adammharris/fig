@@ -338,6 +338,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 // never an entry indicator inside flow. Otherwise (e.g. `-3`) it
                 // begins a plain scalar.
                 if (self.flow_depth == 0 and at_content_start and followedByBlank(self.source, cursor, line.end)) {
+                    // A block sequence `-` separated from a preceding `?`/`:` by a
+                    // tab uses the tab as the new collection's indentation, which
+                    // is forbidden (`?\t-`, `:\t-`).
+                    if (cursor > line.content_start and self.source[cursor - 1] == '\t') return TokenizeError.TabIndent;
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
                     // A dash starts a node, so a nested `-`/`?` right after it is

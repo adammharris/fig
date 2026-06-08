@@ -27,6 +27,10 @@ const OpenContainer = struct {
     // True between an explicit key (`? key`) and its value indicator (`:`): the
     // pending_key was introduced by `?` and a standalone `:` may supply its value.
     explicit_awaiting_value: bool = false,
+    // True while a complex explicit key (a block sequence/mapping written after
+    // `?`) is being parsed: the next child container that closes into this
+    // mapping is the key, not a value.
+    building_explicit_key: bool = false,
 };
 
 nodes: std.ArrayList(AST.Node) = .empty,
@@ -135,6 +139,10 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 // A standalone `:` supplies the value for an explicit key
                 // (`? key` on a previous line). Outside that context it is junk.
                 if (self.doc_ended) return ParseError.MultipleDocuments;
+                // A complex key (`? - a`) whose sequence is still open on the
+                // same line as its `:` must be closed first; that makes it the
+                // pending key (via finishValue's building_explicit_key path).
+                try self.closeOpenComplexKey();
                 if (self.container_stack.items.len == 0 or
                     !self.currentContainer().explicit_awaiting_value)
                     return ParseError.UnexpectedToken;
@@ -337,9 +345,9 @@ fn parseMappingValue(self: *Parser, allow_compact_sequence: bool) ParserError!vo
 /// Parses an explicit-key entry (`? key`). Records the key on the current
 /// mapping and marks it awaiting a `:` value indicator (which arrives on a later
 /// line, or never — an explicit key with no `:` has a null value). The key may
-/// be a plain/quoted scalar, a flow collection, a block scalar, or empty.
-/// Complex block keys (a key that is itself a block sequence/mapping) are not
-/// supported and are rejected rather than mis-parsed.
+/// be a plain/quoted scalar, a flow collection, a block scalar, a block sequence
+/// (a complex key, parsed via `building_explicit_key`), or empty. A block
+/// *mapping* as the key is still unsupported and is rejected.
 fn parseExplicitKey(self: *Parser) ParserError!void {
     const marker = self.advance(); // explicit_key `?`
     const mapping_id = try self.ensureContainer(.mapping);
@@ -355,6 +363,18 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
         },
         .flow_seq_start, .flow_map_start => try self.parseFlowNode(),
         .block_header => try self.parseBlockScalar(),
+        .dash => {
+            // A complex key that is itself a block sequence (`? - a\n  - b`).
+            // Open it as a child container and mark the mapping as building its
+            // key; when the sequence closes — at the dedent before `:`, or when
+            // the `:` itself closes it — it becomes the pending key (see
+            // finishValue), not a value.
+            self.containerById(mapping_id).building_explicit_key = true;
+            const seq_id = try self.openContainer(.sequence, self.peek().span.start);
+            self.containerById(seq_id).continues_sequence_item = true;
+            try self.parseSequenceEntry();
+            return;
+        },
         // `?` directly before its `:` (or end of entry) is an empty (null) key.
         .colon, .newline, .dedent, .end_of_file => try self.addNode(.null_, .init(marker.span.end, marker.span.end)),
         else => return ParseError.UnexpectedToken,
@@ -808,6 +828,16 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
             parent.pending_sequence_item_span = null;
         },
         .mapping => {
+            // A complex explicit key just finished: it becomes the pending key,
+            // and a `:` value indicator may now follow.
+            if (parent.building_explicit_key) {
+                parent.building_explicit_key = false;
+                parent.pending_key = value_id;
+                parent.pending_value_span = self.node_spans.items[value_id].end;
+                parent.explicit_awaiting_value = true;
+                return;
+            }
+
             const key_id = parent.pending_key orelse return ParseError.UnexpectedToken;
             parent.pending_key = null;
             parent.explicit_awaiting_value = false;
@@ -848,6 +878,20 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
 fn closeSequenceItemContinuation(self: *Parser) ParserError!void {
     if (self.container_stack.items.len == 0) return;
     if (!self.currentContainer().continues_sequence_item) return;
+
+    self.currentContainer().continues_sequence_item = false;
+    try self.closePendingEmptyValue();
+    const id = try self.closeContainer(self.node_spans.items[self.currentContainer().id].end);
+    try self.finishValue(id);
+}
+
+/// If a complex explicit key's container (a block sequence opened after `?`) is
+/// still open — its `:` sits on the same line, so no dedent closed it — close it
+/// now. finishValue's `building_explicit_key` path then records it as the key.
+fn closeOpenComplexKey(self: *Parser) ParserError!void {
+    if (self.container_stack.items.len < 2) return;
+    const parent = &self.container_stack.items[self.container_stack.items.len - 2];
+    if (!parent.building_explicit_key) return;
 
     self.currentContainer().continues_sequence_item = false;
     try self.closePendingEmptyValue();
@@ -1844,10 +1888,32 @@ test "yaml sequence entry with explicit-key mapping value" {
     try testing.expect(std.meta.activeTag(pair.kind) == .mapping);
 }
 
-test "yaml rejects complex (non-scalar) explicit keys" {
-    // A block sequence as the key is a complex key we do not support.
-    try testParserError("? -\n: -\n", error.UnexpectedToken);
-    try testParserError("? - a\n  - b\n: c\n", error.UnexpectedToken);
+test "yaml complex block keys (block sequence as key)" {
+    // Key on the next line, `:` after a dedent: `? - a\n  - b\n: c`.
+    const multi = try Parser.parse(testing.allocator, "? - a\n  - b\n: c\n", .v1_2_2);
+    defer multi.deinit(testing.allocator);
+    {
+        const map = multi.ast.nodes[multi.ast.root];
+        try testing.expect(std.meta.activeTag(map.kind) == .mapping);
+        const pair = multi.ast.nodes[map.kind.mapping.?];
+        const key = multi.ast.nodes[pair.kind.keyvalue.key];
+        try testing.expect(std.meta.activeTag(key.kind) == .sequence);
+        try testing.expectEqualSlices(u8, "a", multi.ast.nodes[key.kind.sequence.?].kind.string);
+        try testing.expectEqualSlices(u8, "c", multi.ast.nodes[pair.kind.keyvalue.value].kind.string);
+    }
+
+    // Key and `:` on adjacent lines at the same indent (no dedent between):
+    // `complex: \n  ? - a\n  : b`.
+    const compact = try Parser.parse(testing.allocator, "complex:\n  ? - a\n  : b\n", .v1_2_2);
+    defer compact.deinit(testing.allocator);
+    const inner = try compact.ast.getValByPath(&.{.{ .key = "complex" }});
+    try testing.expect(std.meta.activeTag(inner.kind) == .mapping);
+}
+
+test "yaml rejects tab before a block sequence indicator" {
+    // A tab separating a `?`/`:` from a `-` would indent the block with a tab.
+    try testParserError("?\t-\n", error.TabIndent);
+    try testParserError("? -\n:\t-\n", error.TabIndent);
 }
 
 test "yaml merge key is an ordinary string key" {
