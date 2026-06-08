@@ -109,7 +109,7 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
                 return TokenizeError.InvalidIndent;
             }
             try self.tokenizeLineContent(line);
-            if (line.newline_end > line.end) {
+            if (self.i == line.newline_end and line.newline_end > line.end) {
                 try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
             }
             continue;
@@ -146,19 +146,23 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
                         .newline_end = line.newline_end,
                     });
                 }
-                if (line.newline_end > line.end) {
-                    try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+                if (self.i == line.newline_end) {
+                    if (line.newline_end > line.end) {
+                        try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+                    }
+                    try self.flushPendingBlock();
                 }
-                try self.flushPendingBlock();
                 continue;
             }
         }
 
         try self.tokenizeLineContent(line);
-        if (line.newline_end > line.end) {
-            try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+        if (self.i == line.newline_end) {
+            if (line.newline_end > line.end) {
+                try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+            }
+            try self.flushPendingBlock();
         }
-        try self.flushPendingBlock();
     }
 
     while (indent_stack.items.len != 0) {
@@ -201,7 +205,8 @@ fn getLine(self: *Tokenizer) TokenizeError!?Line {
     };
 }
 
-fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
+fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
+    var line = line_in;
     var cursor = line.content_start;
     var at_content_start = true;
 
@@ -277,7 +282,25 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
                 at_content_start = false;
             },
             '\'', '"' => {
-                const end = try quotedScalarEnd(self.source, cursor, line.end);
+                // Continuation lines of a multi-line quoted scalar must out-indent
+                // the line it sits on — except a root scalar, or one written on
+                // its own line (where the floor is the parent, which we don't
+                // track here, so we skip the check rather than over-reject).
+                const floor: ?usize = if (self.precededOnlyByTrivia() or cursor == line.content_start)
+                    null
+                else
+                    line.content_start - line.start;
+                const end = try self.multilineQuotedEnd(cursor, floor);
+                if (end > line.end) {
+                    // The quoted scalar ran onto following lines. Emit it whole,
+                    // then continue tokenizing the rest of its closing line.
+                    try self.addToken(.init(.scalar, .init(cursor, end)));
+                    line = self.remainderLine(end);
+                    self.i = line.newline_end;
+                    cursor = end;
+                    at_content_start = false;
+                    continue;
+                }
                 try self.addScalar(cursor, end);
                 cursor = end;
                 at_content_start = false;
@@ -329,6 +352,22 @@ fn tokenizeLineContent(self: *Tokenizer, line: Line) TokenizeError!void {
             },
         }
     }
+
+    // When a multi-line scalar advanced us onto a later line, that line's break
+    // belongs to us; emit it here. Callers detect this via `self.i` having moved
+    // past the original line and skip their own newline handling.
+    if (line.start != line_in.start and line.newline_end > line.end) {
+        try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+    }
+}
+
+/// Builds a Line for the remainder of the source starting at `pos` (used to
+/// resume tokenizing the closing line of a multi-line scalar).
+fn remainderLine(self: *const Tokenizer, pos: usize) Line {
+    var end = pos;
+    while (end < self.source.len and self.source[end] != '\n') end += 1;
+    const newline_end = if (end < self.source.len) end + 1 else end;
+    return .{ .start = pos, .content_start = pos, .end = end, .newline_end = newline_end };
 }
 
 fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
@@ -435,14 +474,7 @@ fn openFlow(self: *Tokenizer, line: Line) void {
     // A flow collection that is the whole document — nothing but a `---` marker
     // and trivia precedes it — is the root node, which has no indentation floor
     // for its content.
-    self.flow_root = true;
-    for (self.tokens.items) |t| switch (t.kind) {
-        .doc_start, .newline, .whitespace, .comment => {},
-        else => {
-            self.flow_root = false;
-            break;
-        },
-    };
+    self.flow_root = self.precededOnlyByTrivia();
 }
 
 fn flushPendingBlock(self: *Tokenizer) TokenizeError!void {
@@ -512,40 +544,72 @@ fn consumeBlockBody(self: *Tokenizer, info: PendingBlock) TokenizeError!void {
     }
 }
 
-fn quotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
-    return switch (source[start]) {
-        '\'' => singleQuotedScalarEnd(source, start, line_end),
-        '"' => doubleQuotedScalarEnd(source, start, line_end),
-        else => unreachable,
-    };
-}
-
-fn singleQuotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
-    var end = start + 1;
-    while (end < line_end) : (end += 1) {
-        if (source[end] != '\'') continue;
-        if (end + 1 < line_end and source[end + 1] == '\'') {
-            end += 1;
+// Quoted scalars may span multiple lines; this scans to the closing quote
+// across line breaks (the quote delimits them unambiguously) and validates each
+// continuation line: it may not be a document marker, carry a tab in its
+// indentation, or — when `floor` is set — be indented no more than `floor`.
+// The parser folds the captured line breaks when it decodes the string.
+fn multilineQuotedEnd(self: *const Tokenizer, start: usize, floor: ?usize) TokenizeError!usize {
+    const source = self.source;
+    const double = source[start] == '"';
+    var i = start + 1;
+    while (i < source.len) {
+        const c = source[i];
+        if (c == '\n') {
+            const line_start = i + 1;
+            if (self.docMarkerAt(line_start)) return TokenizeError.UnclosedString;
+            var spaces = line_start;
+            while (spaces < source.len and source[spaces] == ' ') spaces += 1;
+            var ws = line_start;
+            while (ws < source.len and isBlank(source[ws])) ws += 1;
+            const blank = ws >= source.len or source[ws] == '\n';
+            if (!blank) {
+                if (ws > spaces) return TokenizeError.TabIndent;
+                if (floor) |f| if (spaces - line_start <= f) return TokenizeError.InvalidIndent;
+            }
+            i += 1;
             continue;
         }
-        return end + 1;
+        if (double) {
+            if (c == '\\') {
+                // A backslash escapes the next char; if that is a newline (an
+                // escaped line break) let the newline branch validate the line.
+                if (i + 1 < source.len and source[i + 1] == '\n') i += 1 else i += 2;
+                continue;
+            }
+            if (c == '"') return i + 1;
+        } else {
+            if (c == '\'') {
+                if (i + 1 < source.len and source[i + 1] == '\'') {
+                    i += 2;
+                    continue;
+                }
+                return i + 1;
+            }
+        }
+        i += 1;
     }
     return TokenizeError.UnclosedString;
 }
 
-fn doubleQuotedScalarEnd(source: []const u8, start: usize, line_end: usize) TokenizeError!usize {
-    var end = start + 1;
-    while (end < line_end) : (end += 1) {
-        switch (source[end]) {
-            '"' => return end + 1,
-            '\\' => {
-                end += 1;
-                if (end >= line_end) return TokenizeError.UnclosedString;
-            },
-            else => {},
-        }
-    }
-    return TokenizeError.UnclosedString;
+/// True when a document marker (`---`/`...`) begins at column-0 position `pos`.
+fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
+    if (pos + 3 > self.source.len) return false;
+    const c = self.source[pos];
+    if (c != '-' and c != '.') return false;
+    if (self.source[pos + 1] != c or self.source[pos + 2] != c) return false;
+    const after = pos + 3;
+    return after >= self.source.len or self.source[after] == '\n' or isBlank(self.source[after]);
+}
+
+/// True when only a document-start marker and trivia have been emitted so far —
+/// i.e. the next node is the document root, which has no indentation floor.
+fn precededOnlyByTrivia(self: *const Tokenizer) bool {
+    for (self.tokens.items) |t| switch (t.kind) {
+        .doc_start, .newline, .whitespace, .comment => {},
+        else => return false,
+    };
+    return true;
 }
 
 fn trimRightSpaces(source: []const u8, start: usize, end: usize) usize {
@@ -679,9 +743,36 @@ test "yaml quoted scalars are single tokens" {
     );
 }
 
-test "yaml quoted scalars must close on the line" {
+test "yaml quoted scalars must be closed" {
     try testTokenizerError("'unterminated", error.UnclosedString);
     try testTokenizerError("\"unterminated", error.UnclosedString);
+    // A quote left open runs to EOF without a close: still unterminated.
+    try testTokenizerError("key: \"a\n  b", error.UnclosedString);
+}
+
+test "yaml multi-line quoted scalar is one token" {
+    // `"a\n  b"` spans two lines but is a single scalar token; the closing
+    // line's newline is emitted after it.
+    try testTokenizer(
+        "k: \"a\n  b\"\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.scalar, 3, 10),
+            tok(.newline, 10, 11),
+            tok(.end_of_file, 11, 11),
+        },
+    );
+}
+
+test "yaml multi-line quoted scalar continuation rules" {
+    // A document marker may not appear inside a quoted scalar.
+    try testTokenizerError("\"a\n---\nb\"\n", error.UnclosedString);
+    // An inline value's continuation must out-indent its line.
+    try testTokenizerError("k: \"a\nb\"\n", error.InvalidIndent);
+    // A tab in the continuation's indentation is invalid.
+    try testTokenizerError("k: \"a\n\tb\"\n", error.TabIndent);
 }
 
 test "yaml colon is an indicator only before whitespace" {

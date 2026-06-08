@@ -702,13 +702,18 @@ fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
     }
     const inner = source[1 .. source.len - 1];
 
-    if (std.mem.indexOfScalar(u8, inner, '\'') == null) return inner;
+    if (std.mem.indexOfScalar(u8, inner, '\'') == null and
+        std.mem.indexOfScalar(u8, inner, '\n') == null) return inner;
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(self.allocator);
 
     var index: usize = 0;
     while (index < inner.len) {
+        if (inner[index] == '\n') {
+            index = try foldFlowBreak(&decoded, self.allocator, inner, index);
+            continue;
+        }
         if (inner[index] != '\'') {
             try decoded.append(self.allocator, inner[index]);
             index += 1;
@@ -725,13 +730,46 @@ fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
     return self.ownString(try decoded.toOwnedSlice(self.allocator));
 }
 
+/// Folds a run of line breaks in a flow (quoted) scalar where `inner[i]` is a
+/// newline: trailing whitespace of the line just ended is dropped, the leading
+/// whitespace of each continuation line is skipped, a lone break becomes a
+/// space, and each additional (blank) line becomes a newline. Returns the index
+/// past the run.
+fn foldFlowBreak(out: *std.ArrayList(u8), allocator: std.mem.Allocator, inner: []const u8, at: usize) ParserError!usize {
+    while (out.items.len > 0) {
+        const last = out.items[out.items.len - 1];
+        if (last != ' ' and last != '\t') break;
+        out.items.len -= 1;
+    }
+
+    var i = at + 1;
+    var breaks: usize = 1;
+    while (true) {
+        while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) i += 1;
+        if (i < inner.len and inner[i] == '\n') {
+            breaks += 1;
+            i += 1;
+            continue;
+        }
+        break;
+    }
+
+    if (breaks == 1) {
+        try out.append(allocator, ' ');
+    } else {
+        for (0..breaks - 1) |_| try out.append(allocator, '\n');
+    }
+    return i;
+}
+
 fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const u8 {
     if (source.len < 2 or source[0] != '"' or source[source.len - 1] != '"') {
         return ParseError.UnclosedString;
     }
     const inner = source[1 .. source.len - 1];
 
-    if (std.mem.indexOfScalar(u8, inner, '\\') == null) return inner;
+    if (std.mem.indexOfScalar(u8, inner, '\\') == null and
+        std.mem.indexOfScalar(u8, inner, '\n') == null) return inner;
 
     var decoded: std.ArrayList(u8) = .empty;
     errdefer decoded.deinit(self.allocator);
@@ -739,6 +777,10 @@ fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
     var index: usize = 0;
     while (index < inner.len) {
         const char = inner[index];
+        if (char == '\n') {
+            index = try foldFlowBreak(&decoded, self.allocator, inner, index);
+            continue;
+        }
         if (char != '\\') {
             try decoded.append(self.allocator, char);
             index += 1;
@@ -747,6 +789,14 @@ fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
 
         index += 1;
         if (index >= inner.len) return ParseError.UnclosedString;
+
+        // An escaped line break joins the lines directly, dropping the leading
+        // whitespace of the continuation.
+        if (inner[index] == '\n') {
+            index += 1;
+            while (index < inner.len and (inner[index] == ' ' or inner[index] == '\t')) index += 1;
+            continue;
+        }
 
         switch (inner[index]) {
             '0' => try decoded.append(self.allocator, 0x00),
@@ -880,6 +930,9 @@ fn invalidPlainStart(source: []const u8) bool {
 
 fn isMappingStart(self: *const Parser) bool {
     if (self.peek().kind != .scalar) return false;
+    // An implicit block mapping key must be a single line; a multi-line scalar
+    // (e.g. a folded quoted string) cannot be a key.
+    if (std.mem.indexOfScalar(u8, self.peek().source(self.source), '\n') != null) return false;
 
     var lookahead = self.index + 1;
     while (lookahead < self.tokens.len) : (lookahead += 1) {
@@ -1239,6 +1292,50 @@ test "yaml rejects malformed flow" {
     try testParserError("x: [a]]\n", error.UnexpectedToken); // extra close
     try testParserError("flow: [a,\nb]\n", error.InvalidIndent); // under-indented continuation
     try testParserError("x: [-]\n", error.UnexpectedToken); // bare dash flow scalar
+}
+
+test "yaml multi-line double-quoted scalar folds breaks" {
+    // Single break folds to a space; a blank line becomes a newline; leading
+    // whitespace on continuation lines is stripped.
+    const input =
+        \\msg: "one
+        \\  two
+        \\
+        \\  three"
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const msg = try doc.ast.getValByPath(&.{.{ .key = "msg" }});
+    try testing.expectEqualSlices(u8, "one two\nthree", msg.kind.string);
+}
+
+test "yaml multi-line single-quoted scalar folds breaks" {
+    const input =
+        \\msg: 'it''s
+        \\  here'
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const msg = try doc.ast.getValByPath(&.{.{ .key = "msg" }});
+    try testing.expectEqualSlices(u8, "it's here", msg.kind.string);
+}
+
+test "yaml double-quoted escaped line break joins directly" {
+    const doc = try Parser.parse(testing.allocator, "v: \"a\\\n  b\"\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const v = try doc.ast.getValByPath(&.{.{ .key = "v" }});
+    try testing.expectEqualSlices(u8, "ab", v.kind.string);
+}
+
+test "yaml multi-line quoted scalar as value not key" {
+    // A multi-line quoted scalar can be a value...
+    const ok = try Parser.parse(testing.allocator, "k: \"a\n  b\"\n", .v1_2_2);
+    defer ok.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a b", (try ok.ast.getValByPath(&.{.{ .key = "k" }})).kind.string);
+    // ...but not a block mapping key.
+    try testParserError("\"a\n b\": 1\n", error.UnexpectedToken);
 }
 
 test "yaml getValByPath chains through nested mappings and sequences" {
