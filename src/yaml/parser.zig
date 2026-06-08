@@ -1318,6 +1318,13 @@ test "yaml rejects malformed flow" {
     try testParserError("x: [-]\n", error.UnexpectedToken); // bare dash flow scalar
 }
 
+test "yaml tabs as separation produce clean values" {
+    const doc = try Parser.parse(testing.allocator, "key:\tvalue\nflag:\ttrue\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "value", (try doc.ast.getValByPath(&.{.{ .key = "key" }})).kind.string);
+    try testing.expect((try doc.ast.getValByPath(&.{.{ .key = "flag" }})).kind.boolean == true);
+}
+
 test "yaml multi-line plain scalar folds into a value" {
     const input =
         \\desc: this is

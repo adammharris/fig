@@ -115,6 +115,11 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
             continue;
         }
 
+        // In block context a line that is only whitespace (including tabs after
+        // the leading spaces) is blank. (Inside flow it is handled above, where
+        // a stray tab is caught by the indentation rule.)
+        if (lineAllWhitespace(self.source, line)) continue;
+
         const indent = line.content_start - line.start;
         if (indent > current_indent) {
             try indent_stack.append(self.allocator, indent);
@@ -156,6 +161,11 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
             }
         }
 
+        // A tab in the indentation of a block mapping key or sequence entry is
+        // using the tab as structural indentation, which YAML forbids. (A tab
+        // before plain-scalar content is separation and is allowed.)
+        if (self.tabIndentedStructure(line)) return TokenizeError.TabIndent;
+
         try self.tokenizeLineContent(line);
         if (self.i == line.newline_end) {
             if (line.newline_end > line.end) {
@@ -188,13 +198,12 @@ fn getLine(self: *Tokenizer) TokenizeError!?Line {
         self.i += 1;
     }
 
+    // Indentation is leading spaces only. A tab after them is separation or
+    // scalar content (YAML forbids tabs *as* indentation, but allows them as
+    // whitespace between/within nodes), so it is handled downstream, not here.
     var content_start = start;
     while (content_start < end and self.source[content_start] == ' ') {
         content_start += 1;
-    }
-    if (content_start < end and self.source[content_start] == '\t') {
-        // Tabs are not allowed in YAML indentation.
-        return TokenizeError.TabIndent;
     }
 
     return .{
@@ -212,7 +221,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
 
     while (cursor < line.end) {
         switch (self.source[cursor]) {
-            ' ' => {
+            ' ', '\t' => {
                 const end = whitespaceEnd(self.source, cursor, line.end);
                 try self.addToken(.init(.whitespace, .init(cursor, end)));
                 cursor = end;
@@ -346,6 +355,23 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
 
 /// Builds a Line for the remainder of the source starting at `pos` (used to
 /// resume tokenizing the closing line of a multi-line scalar).
+/// True when `line` puts a tab in its indentation region (right after the
+/// leading spaces) and then begins a block mapping key or sequence entry — i.e.
+/// the tab is being used as structural indentation, which is invalid.
+fn tabIndentedStructure(self: *const Tokenizer, line: Line) bool {
+    const cs = line.content_start;
+    if (cs >= line.end or self.source[cs] != '\t') return false;
+
+    var ws = cs;
+    while (ws < line.end and isBlank(self.source[ws])) ws += 1;
+    if (ws >= line.end) return false;
+
+    const fc = self.source[ws];
+    if (fc == '-' and (ws + 1 >= line.end or isBlank(self.source[ws + 1]))) return true;
+    const se = scalarEnd(self.source, ws, line.end, false);
+    return se < line.end and self.source[se] == ':';
+}
+
 fn remainderLine(self: *const Tokenizer, pos: usize) Line {
     var end = pos;
     while (end < self.source.len and self.source[end] != '\n') end += 1;
@@ -365,7 +391,13 @@ fn handlePlain(self: *Tokenizer, start: usize, line: *Line, cursor: *usize, at_c
     // or flow indicator (e.g. a malformed `> text` header) is not plain text, so
     // gathering it would mask the error.
     if (!flow and end == line.end and plainContinuationStart(self.source[start])) {
-        if (try self.gatherPlainContinuation(line.*)) |g| {
+        // A root scalar (the whole document) has no indentation floor; an inline
+        // value's continuation must out-indent the line it sits on.
+        const floor: ?usize = if (self.precededOnlyByTrivia() and start == line.content_start)
+            null
+        else
+            line.content_start - line.start;
+        if (try self.gatherPlainContinuation(line.*, floor)) |g| {
             try self.addToken(.init(.scalar, .init(start, g.content_end)));
             line.* = g.last_line;
             cursor.* = g.last_line.end;
@@ -382,8 +414,7 @@ fn handlePlain(self: *Tokenizer, start: usize, line: *Line, cursor: *usize, at_c
 /// more-indented plain-text lines. Returns the span end (trimmed end of the last
 /// continuation line) and that line, or null if there is no continuation. Sets
 /// `self.i` to resume after the last continuation line.
-fn gatherPlainContinuation(self: *Tokenizer, line: Line) TokenizeError!?PlainContinuation {
-    const floor = line.content_start - line.start;
+fn gatherPlainContinuation(self: *Tokenizer, line: Line, floor: ?usize) TokenizeError!?PlainContinuation {
     var probe = line.newline_end;
     var result: ?PlainContinuation = null;
 
@@ -405,20 +436,20 @@ fn gatherPlainContinuation(self: *Tokenizer, line: Line) TokenizeError!?PlainCon
             continue;
         }
 
-        const indent = spaces - line_start;
-        if (indent <= floor) break; // dedent: the continuation has ended
-        if (ws > spaces) break; // a tab in the indentation is not plain text
-        const fc = self.source[spaces];
+        // Indentation is the leading spaces; a following tab is separation that
+        // the parser's fold strips. Under-indentation ends the continuation.
+        if (floor) |f| if (spaces - line_start <= f) break;
+        const fc = self.source[ws];
         if (!plainContinuationStart(fc)) break;
         // A leading sequence/explicit-key/value indicator starts a structure.
         if ((fc == '-' or fc == '?' or fc == ':') and
-            (spaces + 1 >= end or isBlank(self.source[spaces + 1]))) break;
+            (ws + 1 >= end or isBlank(self.source[ws + 1]))) break;
         // A colon or comment anywhere makes this a mapping entry or comment, not
         // a pure plain continuation.
-        if (scalarEnd(self.source, spaces, end, false) != end) break;
+        if (scalarEnd(self.source, ws, end, false) != end) break;
 
         result = .{
-            .content_end = trimRightSpaces(self.source, spaces, end),
+            .content_end = trimRightSpaces(self.source, ws, end),
             .last_line = .{ .start = line_start, .content_start = spaces, .end = end, .newline_end = newline_end },
         };
         probe = newline_end;
@@ -478,6 +509,14 @@ fn colonIsIndicator(source: []const u8, i: usize, line_end: usize, flow: bool) b
 
 fn isBlank(c: u8) bool {
     return c == ' ' or c == '\t';
+}
+
+fn lineAllWhitespace(source: []const u8, line: Line) bool {
+    var i = line.content_start;
+    while (i < line.end) : (i += 1) {
+        if (!isBlank(source[i])) return false;
+    }
+    return true;
 }
 
 /// Detects a document marker (`---` or `...`) occupying its own column-0 line.
@@ -631,7 +670,8 @@ fn multilineQuotedEnd(self: *const Tokenizer, start: usize, floor: ?usize) Token
             while (ws < source.len and isBlank(source[ws])) ws += 1;
             const blank = ws >= source.len or source[ws] == '\n';
             if (!blank) {
-                if (ws > spaces) return TokenizeError.TabIndent;
+                // Indentation is measured in spaces; a tab after them is
+                // separation. Under-indentation (too few spaces) is the error.
                 if (floor) |f| if (spaces - line_start <= f) return TokenizeError.InvalidIndent;
             }
             i += 1;
@@ -833,6 +873,50 @@ test "yaml multi-line quoted scalar is one token" {
     );
 }
 
+test "yaml tab is separation, not an error" {
+    // The tab between `key:` and the value is whitespace, not part of the value.
+    try testTokenizer(
+        "key:\tvalue\n",
+        &.{
+            tok(.scalar, 0, 3),
+            tok(.colon, 3, 4),
+            tok(.whitespace, 4, 5),
+            tok(.scalar, 5, 10),
+            tok(.newline, 10, 11),
+            tok(.end_of_file, 11, 11),
+        },
+    );
+}
+
+test "yaml tab as structural indentation is rejected" {
+    // A tab indenting a mapping key / sequence entry is invalid...
+    try testTokenizerError("a:\n\tb: 1\n", error.TabIndent);
+    try testTokenizerError("a:\n  \tb: 1\n", error.TabIndent);
+    // ...but a tab before a plain scalar value is separation (no error).
+    var t: Tokenizer = .{ .allocator = testing.allocator, .source = "a:\n \tb\n" };
+    const toks = try t.tokenize();
+    testing.allocator.free(toks);
+}
+
+test "yaml blank line with a tab is skipped" {
+    try testTokenizer(
+        "a: 1\n \t\nb: 2\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.scalar, 3, 4),
+            tok(.newline, 4, 5),
+            tok(.scalar, 8, 9),
+            tok(.colon, 9, 10),
+            tok(.whitespace, 10, 11),
+            tok(.scalar, 11, 12),
+            tok(.newline, 12, 13),
+            tok(.end_of_file, 13, 13),
+        },
+    );
+}
+
 test "yaml multi-line plain scalar is gathered into one token" {
     // `a` plus the more-indented `b` become a single scalar token spanning both
     // lines; `next` at the key indent is separate.
@@ -857,10 +941,10 @@ test "yaml multi-line plain scalar is gathered into one token" {
 test "yaml multi-line quoted scalar continuation rules" {
     // A document marker may not appear inside a quoted scalar.
     try testTokenizerError("\"a\n---\nb\"\n", error.UnclosedString);
-    // An inline value's continuation must out-indent its line.
+    // An inline value's continuation must out-indent its line. A tab provides
+    // no space-indentation, so a tab-led continuation is under-indented too.
     try testTokenizerError("k: \"a\nb\"\n", error.InvalidIndent);
-    // A tab in the continuation's indentation is invalid.
-    try testTokenizerError("k: \"a\n\tb\"\n", error.TabIndent);
+    try testTokenizerError("k: \"a\n\tb\"\n", error.InvalidIndent);
 }
 
 test "yaml colon is an indicator only before whitespace" {
