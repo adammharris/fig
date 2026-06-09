@@ -501,18 +501,23 @@ fn parseBlockScalar(self: *Parser) ParserError!AST.Node.Id {
     }
     if (self.peek().kind == .newline) _ = self.advance();
 
+    // An explicit indentation indicator counts from the owning node's column
+    // (the enclosing mapping/sequence), not the header line's leading indent —
+    // which differs for a nested block like `- k: |2`.
+    const parent_indent = self.currentContainerIndent();
+
     var span_end = header.span.end;
     var value: []const u8 = "";
     if (self.peek().kind == .block_scalar) {
         const body = self.advance();
         span_end = body.span.end;
-        value = try self.decodeBlockScalar(header_source, header.span.start, body.source(self.source));
+        value = try self.decodeBlockScalar(header_source, parent_indent, body.source(self.source));
     }
 
     return self.addNode(.{ .string = value }, .init(header.span.start, span_end));
 }
 
-fn decodeBlockScalar(self: *Parser, header: []const u8, header_start: usize, body: []const u8) ParserError![]const u8 {
+fn decodeBlockScalar(self: *Parser, header: []const u8, parent_indent: usize, body: []const u8) ParserError![]const u8 {
     const style: BlockStyle = if (header[0] == '|') .literal else .folded;
     var chomp: BlockChomp = .clip;
     var explicit: ?usize = null;
@@ -524,7 +529,7 @@ fn decodeBlockScalar(self: *Parser, header: []const u8, header_start: usize, bod
     };
 
     const content_indent: usize = if (explicit) |d|
-        self.lineIndentOf(header_start) + d
+        parent_indent + d
     else
         autodetectIndent(body);
 
@@ -598,13 +603,16 @@ fn decodeBlockScalar(self: *Parser, header: []const u8, header_start: usize, bod
     return self.ownString(try decoded.toOwnedSlice(self.allocator));
 }
 
-/// Counts the leading spaces on the source line containing `pos`.
-fn lineIndentOf(self: *const Parser, pos: usize) usize {
+/// The source column of the innermost open container — the indentation of the
+/// node that owns a block scalar value (a mapping's key column, a sequence's
+/// dash column). 0 at the document root (no enclosing container).
+fn currentContainerIndent(self: *const Parser) usize {
+    if (self.container_stack.items.len == 0) return 0;
+    const id = self.container_stack.items[self.container_stack.items.len - 1].id;
+    const pos = self.node_spans.items[id].start;
     var start = pos;
     while (start > 0 and self.source[start - 1] != '\n') start -= 1;
-    var i = start;
-    while (i < pos and self.source[i] == ' ') i += 1;
-    return i - start;
+    return pos - start;
 }
 
 const LineIter = struct {
@@ -2164,6 +2172,18 @@ test "yaml rejects malformed block-scalar indentation indicator" {
     // A valid single-digit indicator with chomping still parses.
     const ok = try Parser.parse(testing.allocator, "--- |1-\n", .v1_2_2);
     defer ok.deinit(testing.allocator);
+}
+
+test "yaml explicit block indent counts from the owner column" {
+    // `- k: |2`: the content indent is the key's column (2) + 2 = 4, not the
+    // line's leading indent (0). The body must dedent by 4 and stop before the
+    // sibling `m:`, rather than over-capturing it.
+    const doc = try Parser.parse(testing.allocator, "- k: |2\n     X\n    y: 1\n  m: 2\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const k = try doc.ast.getValByPath(&.{ .{ .index = 0 }, .{ .key = "k" } });
+    try testing.expectEqualSlices(u8, " X\ny: 1\n", k.kind.string);
+    const m = try doc.ast.getValByPath(&.{ .{ .index = 0 }, .{ .key = "m" } });
+    try testing.expect(std.meta.activeTag(m.kind) == .number);
 }
 
 test "yaml rejects an inline mapping value" {

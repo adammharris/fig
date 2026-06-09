@@ -61,6 +61,23 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
+    // Dev tool: regenerate the YAML conformance corpus from the yaml-test-suite,
+    // parsing the suite meta-files with fig itself (no third-party YAML library).
+    //   zig build gen-yaml-conformance -- <path-to-yaml-test-suite> [<fig-root>]
+    const gen_yaml = b.addExecutable(.{
+        .name = "gen_yaml_conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_yaml_conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fig", .module = mod }},
+        }),
+    });
+    const gen_yaml_run = b.addRunArtifact(gen_yaml);
+    if (b.args) |args| gen_yaml_run.addArgs(args);
+    const gen_yaml_step = b.step("gen-yaml-conformance", "Regenerate the YAML conformance corpus");
+    gen_yaml_step.dependOn(&gen_yaml_run.step);
+
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
         orelse &.{};

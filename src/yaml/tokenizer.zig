@@ -237,7 +237,21 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
     var cursor = line.content_start;
     var at_content_start = true;
 
+    // The indentation of the node that owns a block scalar value on this line —
+    // the column of the mapping key (for `key: |`) or the sequence dash (for
+    // `- |`). An explicit indentation indicator (`|2`) counts from here, so for
+    // a nested block (`- k: |2`) it must be the key's column, not the line's
+    // leading indent. Tracked as we scan: a `:` adopts the preceding key's
+    // column, a `-` its own.
+    var block_owner_indent = line.content_start - line.start;
+    var node_start = line.content_start;
+
     while (cursor < line.end) {
+        // Record where the current node begins, so a following `:` can recover
+        // its key's column.
+        if (at_content_start and self.source[cursor] != ' ' and self.source[cursor] != '\t')
+            node_start = cursor;
+
         switch (self.source[cursor]) {
             ' ', '\t' => {
                 const end = whitespaceEnd(self.source, cursor, line.end);
@@ -261,6 +275,12 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 // JSON-style key (a quoted scalar or a flow collection) with no
                 // separating space (`"key":value`).
                 if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0) or self.jsonKeyColon()) {
+                    // The value introduced by this `:` is owned by the key node,
+                    // so a block scalar value indents relative to the key column.
+                    // (Skip if the key began on an earlier line — a multi-line
+                    // key — where a column on this line is meaningless.)
+                    if (self.flow_depth == 0 and node_start >= line.start)
+                        block_owner_indent = node_start - line.start;
                     try self.addToken(.fixed(.colon, cursor));
                     cursor += 1;
                     // After a value indicator we are at the start of the value
@@ -349,7 +369,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                             try self.addToken(.init(.comment, .init(rest, line.end)));
                         }
                         self.pending_block = .{
-                            .header_indent = line.content_start - line.start,
+                            .header_indent = block_owner_indent,
                             .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
                             .root = root,
                         };
@@ -372,6 +392,9 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     // tab uses the tab as the new collection's indentation, which
                     // is forbidden (`?\t-`, `:\t-`).
                     if (cursor > line.content_start and self.source[cursor - 1] == '\t') return TokenizeError.TabIndent;
+                    // A block scalar that is this sequence entry's value (`- |2`)
+                    // indents relative to the dash's column.
+                    block_owner_indent = cursor - line.start;
                     try self.addToken(.fixed(.dash, cursor));
                     cursor += 1;
                     // A dash starts a node, so a nested `-`/`?` right after it is
