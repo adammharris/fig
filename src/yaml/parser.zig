@@ -136,21 +136,23 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 try self.parseExplicitKey();
             },
             .colon => {
-                // A standalone `:` supplies the value for an explicit key
-                // (`? key` on a previous line). Outside that context it is junk.
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 // A complex key (`? - a`) whose sequence is still open on the
                 // same line as its `:` must be closed first; that makes it the
                 // pending key (via finishValue's building_explicit_key path).
                 try self.closeOpenComplexKey();
-                if (self.container_stack.items.len == 0 or
-                    !self.currentContainer().explicit_awaiting_value)
-                    return ParseError.UnexpectedToken;
-                const colon = self.advance();
-                self.currentContainer().explicit_awaiting_value = false;
-                self.currentContainer().pending_value_span = colon.span.end;
-                // An explicit value (`: - one`) may take a compact block sequence.
-                try self.parseMappingValue(true);
+                if (self.container_stack.items.len > 0 and self.currentContainer().explicit_awaiting_value) {
+                    // A standalone `:` supplying the value for an explicit key.
+                    const colon = self.advance();
+                    self.currentContainer().explicit_awaiting_value = false;
+                    self.currentContainer().pending_value_span = colon.span.end;
+                    // An explicit value (`: - one`) may take a compact block sequence.
+                    try self.parseMappingValue(true);
+                } else {
+                    // A leading `:` starts a block mapping entry with an empty key.
+                    try self.closeSequenceItemContinuation();
+                    try self.parseEmptyKeyEntry();
+                }
             },
             .scalar => {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
@@ -185,19 +187,34 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 }
             },
             .flow_seq_start, .flow_map_start => {
-                // A flow collection as a whole document, or as the value of a
-                // mapping key / sequence item written on the following line.
+                // A flow collection as a whole document, the value of a mapping
+                // key / sequence item on the following line, or — when a `:`
+                // follows it — a block mapping key (`[a, b]: value`).
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
-                const value_id = try self.parseFlowNode();
-                try self.attachDeferredValue(value_id);
+                const node_id = try self.parseFlowNode();
+                self.skipTriviaNoNewline();
+                if (self.peek().kind == .colon) {
+                    // An implicit key must be a single line; a flow collection
+                    // spanning lines cannot be a block mapping key.
+                    const span = self.node_spans.items[node_id];
+                    if (std.mem.indexOfScalar(u8, self.source[span.start..span.end], '\n') != null)
+                        return ParseError.UnexpectedToken;
+                    const mapping_id = try self.ensureContainer(.mapping);
+                    try self.closePendingEmptyValue();
+                    const colon = self.advance();
+                    const parent = self.containerById(mapping_id);
+                    parent.pending_key = node_id;
+                    parent.pending_value_span = colon.span.end;
+                    try self.parseMappingValue(false);
+                } else {
+                    try self.attachDeferredValue(node_id);
+                }
             },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
         }
     }
-
-    if (self.nodes.items.len == 0) return ParseError.EmptyDocument;
 
     while (self.container_stack.items.len > 0) {
         try self.closePendingEmptyValue();
@@ -205,7 +222,9 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         try self.finishValue(id);
     }
 
-    const root = self.root orelse return ParseError.EmptyDocument;
+    // An empty document — no content node, only comments, blank lines, or
+    // document markers — is valid; its root is the null node.
+    const root = self.root orelse try self.addNode(.null_, self.peek().span);
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(nodes);
     self.nodes = .empty;
@@ -270,6 +289,12 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
             const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
             self.containerById(mapping_id).continues_sequence_item = true;
             try self.parseExplicitKey();
+        },
+        .colon => {
+            // A sequence entry whose value is an empty-key mapping (`- : v`).
+            const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
+            self.containerById(mapping_id).continues_sequence_item = true;
+            try self.parseEmptyKeyEntry();
         },
         .dash => try self.parseSequenceEntry(),
         else => return ParseError.UnexpectedToken,
@@ -384,6 +409,22 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
     parent.pending_key = key_id;
     parent.pending_value_span = self.node_spans.items[key_id].end;
     parent.explicit_awaiting_value = true;
+}
+
+/// Parses a block mapping entry whose key is empty (`: value`). The current
+/// token is the `:`; the key is the null node.
+fn parseEmptyKeyEntry(self: *Parser) ParserError!void {
+    const mapping_id = try self.ensureContainer(.mapping);
+    try self.closePendingEmptyValue();
+
+    const colon = self.advance(); // `:`
+    const key_id = try self.addNode(.null_, .init(colon.span.start, colon.span.start));
+    {
+        const parent = self.containerById(mapping_id);
+        parent.pending_key = key_id;
+        parent.pending_value_span = colon.span.end;
+    }
+    try self.parseMappingValue(false);
 }
 
 fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
@@ -1497,6 +1538,52 @@ test "yaml root scalar documents" {
     try testing.expectEqualSlices(u8, "quoted", quoted.ast.nodes[quoted.ast.root].kind.string);
 }
 
+test "yaml empty documents have a null root" {
+    // Truly empty, comment-only, blank-only, and marker-only inputs are all valid
+    // documents whose root is the null node.
+    for ([_][]const u8{ "", "# just a comment\n", "\n\n", "...\n", "---\n" }) |input| {
+        const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+        defer doc.deinit(testing.allocator);
+        try testing.expect(std.meta.activeTag(doc.ast.nodes[doc.ast.root].kind) == .null_);
+    }
+}
+
+test "yaml block-context empty keys" {
+    // `: value` is a mapping entry with a null key.
+    const doc = try Parser.parse(testing.allocator, ": a\n: b\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const map = doc.ast.nodes[doc.ast.root];
+    try testing.expect(std.meta.activeTag(map.kind) == .mapping);
+    const first = doc.ast.nodes[map.kind.mapping.?];
+    try testing.expect(std.meta.activeTag(doc.ast.nodes[first.kind.keyvalue.key].kind) == .null_);
+    try testing.expectEqualSlices(u8, "a", doc.ast.nodes[first.kind.keyvalue.value].kind.string);
+
+    // A bare `:` is the entry {null: null}.
+    const bare = try Parser.parse(testing.allocator, ":\n", .v1_2_2);
+    defer bare.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag(bare.ast.nodes[bare.ast.root].kind) == .mapping);
+
+    // `- :` is a sequence entry whose value is an empty-key mapping.
+    const seq = try Parser.parse(testing.allocator, "- :\n", .v1_2_2);
+    defer seq.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try seq.ast.getValByPath(&.{.{ .index = 0 }})).kind) == .mapping);
+}
+
+test "yaml indented comment does not affect structure" {
+    // A comment line (even indented) is not content and must not open/close an
+    // indentation scope.
+    const input =
+        \\a: 1
+        \\  # indented comment
+        \\b: 2
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "a" }})).kind) == .number);
+    try testing.expect(std.meta.activeTag((try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind) == .number);
+}
+
 test "yaml document markers wrap a single document" {
     const doc = try Parser.parse(testing.allocator, "---\nname: Ada\n...\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
@@ -1762,6 +1849,26 @@ test "yaml root block scalar document" {
     try testing.expectEqualSlices(u8, "hello\nworld\n", doc.ast.nodes[doc.ast.root].kind.string);
 }
 
+test "yaml root block scalar with column-0 content" {
+    // `--- >` (or bare `>`): the body may sit at column 0.
+    const doc = try Parser.parse(testing.allocator, "--- >\nline1\nline2\nline3\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "line1 line2 line3\n", doc.ast.nodes[doc.ast.root].kind.string);
+
+    // A `#` line is content inside a block scalar, not a comment.
+    const hash = try Parser.parse(testing.allocator, "--- |\nline1\n# kept\nline3\n", .v1_2_2);
+    defer hash.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "line1\n# kept\nline3\n", hash.ast.nodes[hash.ast.root].kind.string);
+}
+
+test "yaml next-line plain value folds same-indent continuations" {
+    // The value lines all sit at the same indent (deeper than the key).
+    const doc = try Parser.parse(testing.allocator, "plain:\n  one two\n  three\nnext: x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "one two three", (try doc.ast.getValByPath(&.{.{ .key = "plain" }})).kind.string);
+    try testing.expectEqualSlices(u8, "x", (try doc.ast.getValByPath(&.{.{ .key = "next" }})).kind.string);
+}
+
 test "yaml explicit block keys" {
     // `? key` / `: value` forms a normal mapping entry.
     const doc = try Parser.parse(testing.allocator, "? key\n: value\nplain: x\n", .v1_2_2);
@@ -1816,6 +1923,63 @@ test "yaml flow pairs in flow sequences" {
 test "yaml rejects implicit flow pair with colon on next line" {
     // An implicit key's `:` must be on the key's line.
     try testParserError("[ key\n  : value ]\n", error.UnexpectedToken);
+}
+
+test "yaml flow JSON-style adjacent colons" {
+    // After a quoted (JSON-style) key, `:` may abut the value with no space.
+    const doc = try Parser.parse(testing.allocator, "{ \"a\":1, \"b\": 2 }\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1", (try doc.ast.getValByPath(&.{.{ .key = "a" }})).kind.number.raw);
+    try testing.expectEqualSlices(u8, "2", (try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind.number.raw);
+
+    // The adjacent colon may also sit on a continuation line in flow.
+    const wrapped = try Parser.parse(testing.allocator, "{ \"foo\"\n  :bar }\n", .v1_2_2);
+    defer wrapped.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "bar", (try wrapped.ast.getValByPath(&.{.{ .key = "foo" }})).kind.string);
+
+    // A literal quote inside a plain scalar is NOT a JSON key.
+    const plain = try Parser.parse(testing.allocator, "[ ab:cd ]\n", .v1_2_2);
+    defer plain.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "ab:cd", (try plain.ast.getValByPath(&.{.{ .index = 0 }})).kind.string);
+}
+
+test "yaml flow collection as a block mapping key" {
+    const doc = try Parser.parse(testing.allocator, "[a, b]: value\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const map = doc.ast.nodes[doc.ast.root];
+    try testing.expect(std.meta.activeTag(map.kind) == .mapping);
+    const pair = doc.ast.nodes[map.kind.mapping.?];
+    try testing.expect(std.meta.activeTag(doc.ast.nodes[pair.kind.keyvalue.key].kind) == .sequence);
+    try testing.expectEqualSlices(u8, "value", doc.ast.nodes[pair.kind.keyvalue.value].kind.string);
+
+    // A flow collection key spanning lines is not a valid implicit key.
+    try testParserError("[1\n]: x\n", error.UnexpectedToken);
+}
+
+test "yaml multi-line plain flow scalar folds" {
+    // A plain scalar inside flow folds its line breaks like a quoted one.
+    const seq = try Parser.parse(testing.allocator, "[ a\n  b, c ]\n", .v1_2_2);
+    defer seq.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a b", (try seq.ast.getValByPath(&.{.{ .index = 0 }})).kind.string);
+    try testing.expectEqualSlices(u8, "c", (try seq.ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+
+    // A multi-line plain scalar as a flow mapping key.
+    const map = try Parser.parse(testing.allocator, "{ multi\n  line: value }\n", .v1_2_2);
+    defer map.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "value", (try map.ast.getValByPath(&.{.{ .key = "multi line" }})).kind.string);
+}
+
+test "yaml multi-line quoted flow scalar folds" {
+    const doc = try Parser.parse(testing.allocator, "[ \"a\n  b\", 'c\n  d' ]\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a b", (try doc.ast.getValByPath(&.{.{ .index = 0 }})).kind.string);
+    try testing.expectEqualSlices(u8, "c d", (try doc.ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+}
+
+test "yaml rejects comment inside a flow plain scalar" {
+    // A comment line breaks a multi-line flow scalar; the text after it is then a
+    // second element with no separating comma, which is invalid.
+    try testParserError("[ word1\n  # xxx\n  word2 ]\n", error.UnexpectedToken);
 }
 
 test "yaml flow mapping with explicit keys and empty values" {

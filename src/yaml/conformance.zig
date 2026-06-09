@@ -23,7 +23,7 @@ const max_fixture_size = 1024 * 1024;
 
 // Baseline scores. These are a ratchet: raise them as coverage improves; never
 // lower them without a deliberate reason. A run below baseline fails the test.
-const accept_baseline = 181;
+const accept_baseline = 212;
 const reject_baseline = 69;
 
 const Score = struct {

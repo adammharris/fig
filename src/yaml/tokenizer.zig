@@ -72,6 +72,9 @@ const PendingBlock = struct {
     /// relative to it.
     header_indent: usize,
     explicit_indent: ?usize,
+    /// True when the block scalar is the document root (`>`/`|` or `--- >`),
+    /// whose content may sit at column 0; it ends only at a doc marker or EOF.
+    root: bool = false,
 };
 
 pub fn tokenize(self: *Tokenizer) ![]const Token {
@@ -120,6 +123,17 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
         // the leading spaces) is blank. (Inside flow it is handled above, where
         // a stray tab is caught by the indentation rule.)
         if (lineAllWhitespace(self.source, line)) continue;
+
+        // A comment-only line does not participate in indentation structure;
+        // emit just the comment (the parser treats it as trivia) and move on,
+        // so an indented comment produces no spurious indent/dedent.
+        if (self.source[line.content_start] == '#') {
+            try self.addToken(.init(.comment, .init(line.content_start, line.end)));
+            if (line.newline_end > line.end) {
+                try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+            }
+            continue;
+        }
 
         const indent = line.content_start - line.start;
         if (indent > current_indent) {
@@ -240,8 +254,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
             ':' => {
                 // A colon is a mapping value indicator only when followed by
                 // whitespace or the end of line. Otherwise (e.g. `http://x`)
-                // it is part of a plain scalar.
-                if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0)) {
+                // it is part of a plain scalar. In flow, a `:` may also abut a
+                // JSON-style key (a quoted scalar or a flow collection) with no
+                // separating space (`"key":value`).
+                if (colonIsIndicator(self.source, cursor, line.end, self.flow_depth > 0) or self.jsonKeyColon()) {
                     try self.addToken(.fixed(.colon, cursor));
                     cursor += 1;
                     // After a value indicator we are at the start of the value
@@ -318,6 +334,10 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 // reaching this switch, so the current byte being `|`/`>` means
                 // we are at value start.)
                 if (self.flow_depth == 0) if (blockHeaderEnd(self.source, cursor, line.end)) |hdr_end| {
+                    // A header preceded only by a doc marker / trivia is the
+                    // document root (`>` or `--- >`); its body may sit at col 0.
+                    // Check before emitting the header token itself.
+                    const root = self.precededOnlyByTrivia();
                     try self.addToken(.init(.block_header, .init(cursor, hdr_end)));
                     var rest = hdr_end;
                     while (rest < line.end and isBlank(self.source[rest])) rest += 1;
@@ -327,6 +347,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     self.pending_block = .{
                         .header_indent = line.content_start - line.start,
                         .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
+                        .root = root,
                     };
                     return;
                 };
@@ -409,17 +430,35 @@ const PlainContinuation = struct { content_end: usize, last_line: Line };
 /// plain scalar), which are gathered into one token; the parser folds the breaks.
 fn handlePlain(self: *Tokenizer, start: usize, line: *Line, cursor: *usize, at_content_start: *bool) TokenizeError!void {
     const flow = self.flow_depth > 0;
+    if (flow) {
+        // A plain scalar inside flow may fold across line breaks; gather it whole.
+        const fend = self.flowPlainEnd(start);
+        if (fend > start) try self.addToken(.init(.scalar, .init(start, fend)));
+        if (fend > line.end) {
+            // The scalar ran onto following lines; resume on the line it ended on.
+            line.* = self.remainderLine(fend);
+            self.i = line.newline_end;
+        }
+        cursor.* = fend;
+        at_content_start.* = false;
+        return;
+    }
     const end = scalarEnd(self.source, start, line.end, flow);
     // Only a genuine plain scalar continues; a "scalar" that begins with a block
     // or flow indicator (e.g. a malformed `> text` header) is not plain text, so
     // gathering it would mask the error.
     if (!flow and end == line.end and plainContinuationStart(self.source[start])) {
+        const indent = line.content_start - line.start;
         // A root scalar (the whole document) has no indentation floor; an inline
-        // value's continuation must out-indent the line it sits on.
+        // value's continuation must out-indent the key line it sits on; a value
+        // written on its own line (`key:\n  v`) may have continuation lines at
+        // its own indent, so the floor is one less.
         const floor: ?usize = if (self.precededOnlyByTrivia() and start == line.content_start)
             null
+        else if (start == line.content_start)
+            (if (indent > 0) indent - 1 else 0)
         else
-            line.content_start - line.start;
+            indent;
         if (try self.gatherPlainContinuation(line.*, floor)) |g| {
             try self.addToken(.init(.scalar, .init(start, g.content_end)));
             line.* = g.last_line;
@@ -482,6 +521,49 @@ fn gatherPlainContinuation(self: *Tokenizer, line: Line, floor: ?usize) Tokenize
     return result;
 }
 
+/// Scans a plain scalar inside a flow collection, which (unlike a block plain
+/// scalar) may fold across line breaks freely. Returns the trimmed end of the
+/// scalar's content — which may lie on a later line. The scan stops at a flow
+/// indicator (`,`/`[`/`]`/`{`/`}` or a `:` value indicator), a comment, a
+/// document marker at column 0, or EOF. The parser folds the captured breaks.
+fn flowPlainEnd(self: *const Tokenizer, start: usize) usize {
+    const source = self.source;
+    var i = start;
+    var last_content = start; // exclusive end of the last non-blank byte seen
+    while (i < source.len) {
+        switch (source[i]) {
+            '\n' => {
+                if (self.docMarkerAt(i + 1)) break;
+                i += 1;
+                while (i < source.len and (source[i] == ' ' or source[i] == '\t')) i += 1;
+                // A comment line (`#` at the start of a continuation line) breaks
+                // a flow plain scalar; it cannot resume after the comment.
+                if (i < source.len and source[i] == '#') break;
+            },
+            ',', '[', ']', '{', '}' => break,
+            ':' => {
+                // A `:` is a value indicator (and so ends the scalar) when
+                // followed by whitespace/EOL or, in flow, a `,`/`]`/`}`.
+                const next: u8 = if (i + 1 < source.len) source[i + 1] else 0;
+                if (next == 0 or next == ' ' or next == '\t' or next == '\n' or
+                    next == ',' or next == ']' or next == '}') break;
+                i += 1;
+                last_content = i;
+            },
+            '#' => {
+                if (i > start and isBlank(source[i - 1])) break;
+                i += 1;
+                last_content = i;
+            },
+            else => |c| {
+                i += 1;
+                if (!isBlank(c)) last_content = i;
+            },
+        }
+    }
+    return last_content;
+}
+
 /// True when `c` can begin a plain-scalar continuation line (i.e. it is not an
 /// indicator that would start a different kind of node).
 fn plainContinuationStart(c: u8) bool {
@@ -517,6 +599,31 @@ fn scalarEnd(source: []const u8, start: usize, line_end: usize, flow: bool) usiz
         }
     }
     return end;
+}
+
+/// In flow context, a `:` directly following a JSON-style key — a quoted scalar
+/// or a closed flow collection — is a value indicator even without a separating
+/// space (`{"a":1}`). Checks the previous emitted token so a literal quote inside
+/// a plain scalar (`ab":c`) is not mistaken for a quoted key.
+fn jsonKeyColon(self: *const Tokenizer) bool {
+    if (self.flow_depth == 0) return false;
+    // Skip trivia back to the last real token; in flow the key and its `:` may
+    // be separated by line breaks and comments.
+    var idx = self.tokens.items.len;
+    while (idx > 0) : (idx -= 1) switch (self.tokens.items[idx - 1].kind) {
+        .whitespace, .newline, .comment => {},
+        else => break,
+    };
+    if (idx == 0) return false;
+    const prev = self.tokens.items[idx - 1];
+    return switch (prev.kind) {
+        .flow_seq_end, .flow_map_end => true,
+        .scalar => blk: {
+            const s = prev.source(self.source);
+            break :blk s.len > 0 and (s[0] == '"' or s[0] == '\'');
+        },
+        else => false,
+    };
 }
 
 /// A `:` is a mapping value indicator when followed by whitespace/EOL, or — in
@@ -650,10 +757,14 @@ fn consumeBlockBody(self: *Tokenizer, info: PendingBlock) TokenizeError!void {
                 if (indent > max_leading_blank) max_leading_blank = indent;
             }
         } else {
+            // A document marker at column 0 ends a root block scalar (whose
+            // content may otherwise sit at column 0 and never dedent).
+            if (info.root and indent == 0 and self.docMarkerAt(line_start)) break;
             if (content_indent) |ci| {
                 if (indent < ci) break;
             } else {
-                if (indent <= info.header_indent) break;
+                // A root block scalar's content may sit at column 0.
+                if (!info.root and indent <= info.header_indent) break;
                 if (max_leading_blank > indent) return TokenizeError.InvalidIndent;
                 if (min_blank_tab) |col| if (col < indent) return TokenizeError.TabIndent;
                 content_indent = indent;
