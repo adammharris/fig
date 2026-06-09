@@ -325,20 +325,33 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
 /// already recorded on the current mapping container; an inline value is built
 /// and attached immediately, while a value written on following lines (a block
 /// collection, or nothing) is left for the indent/dedent machinery to attach.
-/// `allow_compact_sequence` enables a block sequence whose first entry sits on
-/// the `:` line; this is only legal after an explicit-value indicator.
-fn parseMappingValue(self: *Parser, allow_compact_sequence: bool) ParserError!void {
+/// `allow_compact` enables a block collection whose first entry sits on the `:`
+/// line (a compact sequence `: - one` or compact mapping `: moon: white`); this
+/// is only legal after an explicit-value indicator.
+fn parseMappingValue(self: *Parser, allow_compact: bool) ParserError!void {
     self.skipTriviaNoNewline();
     switch (self.peek().kind) {
         .scalar => {
-            if (self.isMappingStart()) {
+            if (allow_compact and self.isMappingStart()) {
+                // A compact block mapping as an explicit value (`: moon: white`):
+                // the nested mapping begins on the `:` line. Legal only after an
+                // explicit-value indicator; an implicit `a: b: c` is invalid. As
+                // with a key mapping, a tab separating it from the `:` would act
+                // as the nested mapping's indentation, which is forbidden.
+                if (self.tabBetween(self.currentContainer().pending_value_span, self.peek().span.start))
+                    return ParseError.UnexpectedToken;
                 const child_id = try self.openContainer(.mapping, self.peek().span.start);
                 try self.parseMappingEntry();
                 const id = try self.closeContainer(self.node_spans.items[child_id].end);
                 try self.finishValue(id);
             } else {
+                // An inline value is a single scalar; it cannot itself be a block
+                // mapping (`a: b: c` / `a: 'b': c` are invalid — a nested block
+                // mapping needs its own line and deeper indent), so a `:`
+                // trailing the value is junk.
                 const value_id = try self.parseScalar();
                 try self.finishValue(value_id);
+                try self.requireValueEnd();
             }
         },
         .dash => {
@@ -349,7 +362,7 @@ fn parseMappingValue(self: *Parser, allow_compact_sequence: bool) ParserError!vo
             // the `continues_sequence_item` flag stops the next indent from
             // opening a fresh container, and the sequence closes on the matching
             // dedent or the next shallower entry (via closeSequenceItemContinuation).
-            if (!allow_compact_sequence) return ParseError.UnexpectedToken;
+            if (!allow_compact) return ParseError.UnexpectedToken;
             const seq_id = try self.openContainer(.sequence, self.peek().span.start);
             self.containerById(seq_id).continues_sequence_item = true;
             try self.parseSequenceEntry();
@@ -361,10 +374,31 @@ fn parseMappingValue(self: *Parser, allow_compact_sequence: bool) ParserError!vo
         .flow_seq_start, .flow_map_start => {
             const value_id = try self.parseFlowNode();
             try self.finishValue(value_id);
+            try self.requireValueEnd();
         },
         .newline, .dedent, .end_of_file => {},
         else => return ParseError.UnexpectedToken,
     }
+}
+
+/// After an inline value (a scalar or flow collection written on the same line
+/// as its `:` or `-`), only same-line trivia and the line break may follow.
+/// Trailing content — a second mapping entry (`k: v x: y`), a stray `:`
+/// (`a: b: c`), or junk after a flow collection (`{a: b}x`) — is invalid.
+fn requireValueEnd(self: *Parser) ParserError!void {
+    while (self.peek().kind == .whitespace) _ = self.advance();
+    switch (self.peek().kind) {
+        .newline, .comment, .dedent, .end_of_file => {},
+        else => return ParseError.UnexpectedToken,
+    }
+}
+
+/// True when the source span `[from, to)` contains a tab. Used to reject a tab
+/// that separates an explicit `?`/`:` indicator from a nested block mapping,
+/// where the tab would be standing in for the mapping's indentation.
+fn tabBetween(self: *const Parser, from: usize, to: usize) bool {
+    if (from > to or to > self.source.len) return false;
+    return std.mem.indexOfScalar(u8, self.source[from..to], '\t') != null;
 }
 
 /// Parses an explicit-key entry (`? key`). Records the key on the current
@@ -381,9 +415,23 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
     self.skipTriviaNoNewline();
     const key_id = switch (self.peek().kind) {
         .scalar => key: {
-            // `? key:` makes the key itself a mapping — a complex key we don't
-            // support; reject rather than silently parse the wrong shape.
-            if (self.isMappingStart()) return ParseError.UnexpectedToken;
+            if (self.isMappingStart()) {
+                // A complex key that is itself a block mapping (`? earth: blue`).
+                // The nested mapping's indentation comes from the key's column;
+                // if a tab (not spaces) separates it from `?`, the tab acts as
+                // that indentation, which YAML forbids (`?\tkey:`).
+                if (self.tabBetween(marker.span.end, self.peek().span.start))
+                    return ParseError.UnexpectedToken;
+                // Mirror the block-sequence key path: open it as a child
+                // container, mark the mapping as building its key, and let
+                // finishValue (via building_explicit_key) record it as the
+                // pending key when it closes at the dedent before `:`.
+                self.containerById(mapping_id).building_explicit_key = true;
+                const key_map_id = try self.openContainer(.mapping, self.peek().span.start);
+                self.containerById(key_map_id).continues_sequence_item = true;
+                try self.parseMappingEntry();
+                return;
+            }
             break :key try self.parseScalar();
         },
         .flow_seq_start, .flow_map_start => try self.parseFlowNode(),
@@ -801,6 +849,18 @@ fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
     if (!self.force_new_container and self.container_stack.items.len > 0) {
         const current = self.currentContainer();
         if (current.kind == kind) return current.id;
+        // A mapping key at a block sequence's indentation is valid only as the
+        // return to an enclosing mapping after an indentless sequence value
+        // (`one:\n- 2\nfour: 5`). When no mapping encloses the sequence it is a
+        // root/sibling sequence and the key mixes seq+map at one level
+        // (`- a\n- b\nk: v`) — invalid.
+        if (kind == .mapping and current.kind == .sequence) {
+            var has_enclosing_mapping = false;
+            for (self.container_stack.items[0 .. self.container_stack.items.len - 1]) |c| {
+                if (c.kind == .mapping) has_enclosing_mapping = true;
+            }
+            if (!has_enclosing_mapping) return ParseError.UnexpectedToken;
+        }
     }
 
     self.force_new_container = false;
@@ -2094,4 +2154,60 @@ test "yaml rejects flow-shaped root scalars" {
     try testParserError("]\n", error.UnexpectedToken);
     // A leading `,` is still not a valid plain scalar.
     try testParserError(",x\n", error.UnexpectedToken);
+}
+
+test "yaml rejects malformed block-scalar indentation indicator" {
+    // The indentation indicator must be a single digit 1-9: `0` and a second
+    // digit are invalid, and a `|`/`>` may not begin a plain scalar.
+    try testParserError("--- |0\n", error.InvalidBlockHeader);
+    try testParserError("--- |10\n", error.InvalidBlockHeader);
+    // A valid single-digit indicator with chomping still parses.
+    const ok = try Parser.parse(testing.allocator, "--- |1-\n", .v1_2_2);
+    defer ok.deinit(testing.allocator);
+}
+
+test "yaml rejects an inline mapping value" {
+    // A mapping value on the `:` line cannot itself be a block mapping.
+    try testParserError("a: b: c: d\n", error.UnexpectedToken);
+    try testParserError("---\na: 'b': c\n", error.UnexpectedToken);
+}
+
+test "yaml rejects trailing content after a complete value" {
+    // Junk after an inline scalar or flow value on the same line is invalid.
+    try testParserError("key: \"v\" no key: nor value\n", error.UnexpectedToken);
+    try testParserError("---\nx: { y: z }in: valid\n", error.UnexpectedToken);
+}
+
+test "yaml rejects a mapping key at a sequence's indent" {
+    // A block sequence and mapping cannot share an indentation level (the
+    // mapping key here belongs to no enclosing mapping), but a mapping key
+    // returning to an enclosing mapping after an indentless sequence value is
+    // accepted (its exact tree shape is a separate, known limitation).
+    try testParserError("- item1\n- item2\ninvalid: x\n", error.UnexpectedToken);
+    const ok = try Parser.parse(testing.allocator, "one:\n- 2\n- 3\nfour: 5\n", .v1_2_2);
+    defer ok.deinit(testing.allocator);
+    try testing.expect(std.meta.activeTag(ok.ast.nodes[ok.ast.root].kind) == .mapping);
+}
+
+test "yaml mapping as an explicit key" {
+    // `? earth: blue\n: moon: white` — the key and value are each a mapping.
+    const doc = try Parser.parse(testing.allocator, "? earth: blue\n: moon: white\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const map = doc.ast.nodes[doc.ast.root];
+    try testing.expect(std.meta.activeTag(map.kind) == .mapping);
+    const pair = doc.ast.nodes[map.kind.mapping.?];
+    try testing.expect(std.meta.activeTag(doc.ast.nodes[pair.kind.keyvalue.key].kind) == .mapping);
+    try testing.expect(std.meta.activeTag(doc.ast.nodes[pair.kind.keyvalue.value].kind) == .mapping);
+
+    // A tab standing in for the nested mapping's indentation is invalid.
+    try testParserError("?\tkey:\n", error.UnexpectedToken);
+    try testParserError("? key:\n:\tkey:\n", error.UnexpectedToken);
+}
+
+test "yaml plain scalar continuation may start with an indicator" {
+    // On a continuation line `!`, `&`, etc. are plain content, not node-start
+    // indicators; the scalar folds across the break with a space.
+    const doc = try Parser.parse(testing.allocator, "safe: a b\n      !c d\nnext: 1\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "a b !c d", (try doc.ast.getValByPath(&.{.{ .key = "safe" }})).kind.string);
 }

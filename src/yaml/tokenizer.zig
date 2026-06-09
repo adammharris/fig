@@ -39,7 +39,7 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ InvalidIndent, TabIndent, OutOfMemory, UnclosedString };
+const TokenizeError = error{ InvalidIndent, TabIndent, InvalidBlockHeader, OutOfMemory, UnclosedString };
 
 const Line = struct {
     start: usize,
@@ -90,6 +90,14 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
     while (try self.getLine()) |line| {
         if (line.isBlank()) continue;
 
+        // A line that is only whitespace (including tabs after the leading
+        // spaces) is blank in any context. Inside flow it folds away as trivia;
+        // in block context it does not participate in indentation structure.
+        // Skipping it before the flow indentation rule keeps a tab on an
+        // otherwise-empty line inside flow from looking like under-indented
+        // content.
+        if (lineAllWhitespace(self.source, line)) continue;
+
         // Inside a flow collection (`[`/`{`), indentation is not significant in
         // the block sense, but a few constraints still apply.
         if (self.flow_depth > 0) {
@@ -118,11 +126,6 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
             }
             continue;
         }
-
-        // In block context a line that is only whitespace (including tabs after
-        // the leading spaces) is blank. (Inside flow it is handled above, where
-        // a stray tab is caught by the indentation rule.)
-        if (lineAllWhitespace(self.source, line)) continue;
 
         // A comment-only line does not participate in indentation structure;
         // emit just the comment (the parser treats it as trivia) and move on,
@@ -333,24 +336,30 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                 // (Anywhere else `|`/`>` is swallowed by scalarEnd before
                 // reaching this switch, so the current byte being `|`/`>` means
                 // we are at value start.)
-                if (self.flow_depth == 0) if (blockHeaderEnd(self.source, cursor, line.end)) |hdr_end| {
-                    // A header preceded only by a doc marker / trivia is the
-                    // document root (`>` or `--- >`); its body may sit at col 0.
-                    // Check before emitting the header token itself.
-                    const root = self.precededOnlyByTrivia();
-                    try self.addToken(.init(.block_header, .init(cursor, hdr_end)));
-                    var rest = hdr_end;
-                    while (rest < line.end and isBlank(self.source[rest])) rest += 1;
-                    if (rest < line.end and self.source[rest] == '#') {
-                        try self.addToken(.init(.comment, .init(rest, line.end)));
+                if (self.flow_depth == 0) {
+                    if (blockHeaderEnd(self.source, cursor, line.end)) |hdr_end| {
+                        // A header preceded only by a doc marker / trivia is the
+                        // document root (`>` or `--- >`); its body may sit at col 0.
+                        // Check before emitting the header token itself.
+                        const root = self.precededOnlyByTrivia();
+                        try self.addToken(.init(.block_header, .init(cursor, hdr_end)));
+                        var rest = hdr_end;
+                        while (rest < line.end and isBlank(self.source[rest])) rest += 1;
+                        if (rest < line.end and self.source[rest] == '#') {
+                            try self.addToken(.init(.comment, .init(rest, line.end)));
+                        }
+                        self.pending_block = .{
+                            .header_indent = line.content_start - line.start,
+                            .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
+                            .root = root,
+                        };
+                        return;
                     }
-                    self.pending_block = .{
-                        .header_indent = line.content_start - line.start,
-                        .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
-                        .root = root,
-                    };
-                    return;
-                };
+                    // At value start (outside flow) a `|`/`>` can only be a block
+                    // header; one with a malformed indicator (`|0`, `|10`, doubled
+                    // chomping) is invalid — a plain scalar may not begin with it.
+                    return TokenizeError.InvalidBlockHeader;
+                }
                 try self.handlePlain(cursor, &line, &cursor, &at_content_start);
             },
             '-' => {
@@ -502,7 +511,7 @@ fn gatherPlainContinuation(self: *Tokenizer, line: Line, floor: ?usize) Tokenize
         // the parser's fold strips. Under-indentation ends the continuation.
         if (floor) |f| if (spaces - line_start <= f) break;
         const fc = self.source[ws];
-        if (!plainContinuationStart(fc)) break;
+        if (!plainContinuationLineStart(fc)) break;
         // A leading sequence/explicit-key/value indicator starts a structure.
         if ((fc == '-' or fc == '?' or fc == ':') and
             (ws + 1 >= end or isBlank(self.source[ws + 1]))) break;
@@ -571,6 +580,16 @@ fn plainContinuationStart(c: u8) bool {
         '#', '[', ']', '{', '}', ',', '\'', '"', '&', '*', '!', '|', '>', '@', '`', '%' => false,
         else => true,
     };
+}
+
+/// Whether a continuation line of an already-open block plain scalar may begin
+/// with `c`. Unlike the node-start rule above, the scalar is already running, so
+/// indicators that are special only at node start (`!`, `&`, `*`, quotes,
+/// brackets, `|`, `>`, `@`, `%`, ...) are ordinary plain content here. Only a
+/// line-leading `#` (a comment) breaks the scalar; the caller separately handles
+/// a `-`/`?`/`:`+space structure indicator and an embedded `:` value indicator.
+fn plainContinuationLineStart(c: u8) bool {
+    return c != '#';
 }
 
 fn addToken(self: *Tokenizer, token: Token) TokenizeError!void {
@@ -750,11 +769,22 @@ fn consumeBlockBody(self: *Tokenizer, info: PendingBlock) TokenizeError!void {
 
         if (blank) {
             if (content_indent == null) {
-                if (ws > spaces) {
-                    const tab_col = spaces - line_start;
-                    if (min_blank_tab == null or tab_col < min_blank_tab.?) min_blank_tab = tab_col;
+                // A tab is never block indentation, so an otherwise-blank line
+                // whose tab sits past the indentation zone (deeper than the
+                // header for a non-root block, or anywhere for a root block) is
+                // actually the first content line — the tab is content — and it
+                // fixes the auto-detected content indent. A tab inside the
+                // indentation zone (`foo: |\n\t...`) stays an error.
+                if (ws > spaces and (info.root or indent > info.header_indent)) {
+                    if (max_leading_blank > indent) return TokenizeError.InvalidIndent;
+                    content_indent = indent;
+                } else {
+                    if (ws > spaces) {
+                        const tab_col = spaces - line_start;
+                        if (min_blank_tab == null or tab_col < min_blank_tab.?) min_blank_tab = tab_col;
+                    }
+                    if (indent > max_leading_blank) max_leading_blank = indent;
                 }
-                if (indent > max_leading_blank) max_leading_blank = indent;
             }
         } else {
             // A document marker at column 0 ends a root block scalar (whose
@@ -1028,6 +1058,24 @@ test "yaml tab as structural indentation is rejected" {
     try testTokenizerError("a:\n  \tb: 1\n", error.TabIndent);
     // ...but a tab before a plain scalar value is separation (no error).
     var t: Tokenizer = .{ .allocator = testing.allocator, .source = "a:\n \tb\n" };
+    const toks = try t.tokenize();
+    testing.allocator.free(toks);
+}
+
+test "yaml tab as block-scalar content vs indentation" {
+    // A tab past the (space) indentation zone is block-scalar content, so the
+    // line is the first content line — valid.
+    var ok: Tokenizer = .{ .allocator = testing.allocator, .source = "foo: |\n \t\nbar: 1\n" };
+    const toks = try ok.tokenize();
+    testing.allocator.free(toks);
+    // A tab inside the indentation zone (column 0, no leading space) is invalid.
+    try testTokenizerError("foo: |\n\t\nbar: 1\n", error.TabIndent);
+}
+
+test "yaml tab-only blank line inside flow is skipped" {
+    // A line that is only a tab inside a flow collection is a blank fold break,
+    // not under-indented content.
+    var t: Tokenizer = .{ .allocator = testing.allocator, .source = "- [\n\t\n foo\n ]\n" };
     const toks = try t.tokenize();
     testing.allocator.free(toks);
 }
