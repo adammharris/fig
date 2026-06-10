@@ -24,6 +24,12 @@ const OpenContainer = struct {
     pending_sequence_item_span: ?usize = null,
     pending_sequence_item: bool = false,
     continues_sequence_item: bool = false,
+    // True for an indentless block sequence value: one opened (with no fresh
+    // indent of its own) directly inside a mapping, so it shares that mapping's
+    // column (`k:\n  revs:\n  - 1`). The single dedent that matches that shared
+    // column must close BOTH this sequence and its enclosing mapping, so the
+    // dedent handler keeps closing while this flag is set.
+    shares_parent_indent: bool = false,
     // True between an explicit key (`? key`) and its value indicator (`:`): the
     // pending_key was introduced by `?` and a standalone `:` may supply its value.
     explicit_awaiting_value: bool = false,
@@ -109,8 +115,17 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 } else {
                     try self.closePendingEmptyValue();
                     const dedent = self.advance();
-                    const id = try self.closeContainer(dedent.span.end);
-                    try self.finishValue(id);
+                    // Close the container at this indent. An indentless sequence
+                    // shares its enclosing mapping's column and opened no indent
+                    // of its own, so the one dedent matching that column must
+                    // also close the mapping (and any further such nesting).
+                    while (true) {
+                        const close_parent_too = self.container_stack.items.len > 0 and
+                            self.currentContainer().shares_parent_indent;
+                        const id = try self.closeContainer(dedent.span.end);
+                        try self.finishValue(id);
+                        if (!close_parent_too) break;
+                    }
                 }
             },
             .newline => _ = self.advance(),
@@ -881,8 +896,17 @@ fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
         }
     }
 
+    // An indentless block sequence opened as a mapping value (no fresh indent
+    // preceded it, and a mapping encloses it) shares that mapping's column.
+    // Record it so the matching dedent closes the mapping too (see the dedent
+    // handler). Indented sequences arrive with `force_new_container` set and a
+    // dedent of their own, so they are not flagged.
+    const shares_parent = kind == .sequence and !self.force_new_container and
+        self.container_stack.items.len > 0 and self.currentContainer().kind == .mapping;
     self.force_new_container = false;
-    return self.openContainer(kind, startOfCurrentToken(self));
+    const id = try self.openContainer(kind, startOfCurrentToken(self));
+    if (shares_parent) self.containerById(id).shares_parent_indent = true;
+    return id;
 }
 
 fn openContainer(self: *Parser, kind: ContainerKind, start: usize) ParserError!AST.Node.Id {
@@ -2230,6 +2254,25 @@ test "yaml indentless sequence returns to the enclosing mapping" {
     defer nested.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "1", (try nested.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .index = 0 } })).kind.number.raw);
     try testing.expectEqualSlices(u8, "hello", (try nested.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "c" } })).kind.string);
+}
+
+test "yaml indentless sequence in a nested mapping closes on dedent to an outer key" {
+    // The dedent variant: the sibling key sits at a *shallower* column than the
+    // indentless sequence, so a single dedent must close both the sequence and
+    // its enclosing mapping. `other` is a root sibling of `meta`, not nested
+    // under it. (Regression: previously `other` was absorbed into `meta`.)
+    const doc = try Parser.parse(testing.allocator, "meta:\n  revs:\n  - 1\n  - 2\nother: x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1", (try doc.ast.getValByPath(&.{ .{ .key = "meta" }, .{ .key = "revs" }, .{ .index = 0 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "2", (try doc.ast.getValByPath(&.{ .{ .key = "meta" }, .{ .key = "revs" }, .{ .index = 1 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "x", (try doc.ast.getValByPath(&.{.{ .key = "other" }})).kind.string);
+
+    // Two levels deep: one dedent closes the seq + its mapping, a second closes
+    // the next mapping; `next` lands at the root.
+    const deep = try Parser.parse(testing.allocator, "a:\n  b:\n    c:\n    - 1\n    - 2\nnext: y\n", .v1_2_2);
+    defer deep.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1", (try deep.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" }, .{ .index = 0 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "y", (try deep.ast.getValByPath(&.{.{ .key = "next" }})).kind.string);
 }
 
 test "yaml mapping as an explicit key" {
