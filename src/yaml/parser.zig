@@ -859,15 +859,25 @@ fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
         if (current.kind == kind) return current.id;
         // A mapping key at a block sequence's indentation is valid only as the
         // return to an enclosing mapping after an indentless sequence value
-        // (`one:\n- 2\nfour: 5`). When no mapping encloses the sequence it is a
-        // root/sibling sequence and the key mixes seq+map at one level
-        // (`- a\n- b\nk: v`) — invalid.
+        // (`one:\n- 2\nfour: 5`). An indentless sequence shares its parent key's
+        // column and opens no indent, so no dedent closes it; the reappearing key
+        // at that column is the signal to close it here, attach it to the
+        // enclosing mapping's pending key, and continue in that mapping. When no
+        // mapping encloses the sequence it is a root/sibling sequence and the key
+        // mixes seq+map at one level (`- a\n- b\nk: v`) — invalid.
         if (kind == .mapping and current.kind == .sequence) {
             var has_enclosing_mapping = false;
             for (self.container_stack.items[0 .. self.container_stack.items.len - 1]) |c| {
                 if (c.kind == .mapping) has_enclosing_mapping = true;
             }
             if (!has_enclosing_mapping) return ParseError.UnexpectedToken;
+
+            try self.closePendingEmptyValue();
+            const id = try self.closeContainer(self.node_spans.items[current.id].end);
+            try self.finishValue(id);
+            // The sequence's parent is now current; recurse to land in the
+            // enclosing mapping (closing further indentless sequences if nested).
+            return self.ensureContainer(kind);
         }
     }
 
@@ -2199,14 +2209,27 @@ test "yaml rejects trailing content after a complete value" {
 }
 
 test "yaml rejects a mapping key at a sequence's indent" {
-    // A block sequence and mapping cannot share an indentation level (the
-    // mapping key here belongs to no enclosing mapping), but a mapping key
-    // returning to an enclosing mapping after an indentless sequence value is
-    // accepted (its exact tree shape is a separate, known limitation).
+    // A block sequence and mapping cannot share an indentation level when the
+    // mapping key belongs to no enclosing mapping.
     try testParserError("- item1\n- item2\ninvalid: x\n", error.UnexpectedToken);
-    const ok = try Parser.parse(testing.allocator, "one:\n- 2\n- 3\nfour: 5\n", .v1_2_2);
-    defer ok.deinit(testing.allocator);
-    try testing.expect(std.meta.activeTag(ok.ast.nodes[ok.ast.root].kind) == .mapping);
+}
+
+test "yaml indentless sequence returns to the enclosing mapping" {
+    // A block sequence written at its parent key's column (no extra indent) is
+    // that key's value; a sibling key at the same column ends the sequence and
+    // belongs to the enclosing mapping — `four` is a sibling of `one`, not a
+    // member of its sequence.
+    const root = try Parser.parse(testing.allocator, "one:\n- 2\n- 3\nfour: 5\n", .v1_2_2);
+    defer root.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "2", (try root.ast.getValByPath(&.{ .{ .key = "one" }, .{ .index = 0 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "3", (try root.ast.getValByPath(&.{ .{ .key = "one" }, .{ .index = 1 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "5", (try root.ast.getValByPath(&.{.{ .key = "four" }})).kind.number.raw);
+
+    // The same, nested one level deeper: `c` is a sibling of `b` inside `a`.
+    const nested = try Parser.parse(testing.allocator, "a:\n  b:\n  - 1\n  - 2\n  c: hello\n", .v1_2_2);
+    defer nested.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "1", (try nested.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .index = 0 } })).kind.number.raw);
+    try testing.expectEqualSlices(u8, "hello", (try nested.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "c" } })).kind.string);
 }
 
 test "yaml mapping as an explicit key" {

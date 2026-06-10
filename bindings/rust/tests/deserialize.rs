@@ -67,19 +67,19 @@ a:
     );
 }
 
-/// Known fig YAML *parser* bug (not a bindings bug): a block sequence whose
-/// entries sit at the same column as the parent mapping key swallows the
-/// following sibling key. The deeper-indented form (see above) parses
-/// correctly. Tracked for a fix in fig's Zig parser.
+/// An indentless block sequence — entries at the same column as the parent
+/// mapping key — is the key's value, and a following sibling key ends it.
 #[test]
-#[ignore = "fig parser bug: same-indent block sequence under a mapping key"]
-fn same_indent_block_sequence() {
-    let src = "a:\n  b:\n  - 1\n  - 2\n  c: hello\n";
-    let value: serde_json::Value = fig::from_str(src).unwrap();
+fn indentless_block_sequence() {
+    let nested: serde_json::Value =
+        fig::from_str("a:\n  b:\n  - 1\n  - 2\n  c: hello\n").unwrap();
     assert_eq!(
-        value,
+        nested,
         serde_json::json!({ "a": { "b": [1, 2], "c": "hello" } })
     );
+
+    let root: serde_json::Value = fig::from_str("one:\n- 2\nfour: 5\n").unwrap();
+    assert_eq!(root, serde_json::json!({ "one": [2], "four": 5 }));
 }
 
 #[test]
