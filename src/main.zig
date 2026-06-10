@@ -32,6 +32,9 @@ const CliActionOptions = union(CliAction) {
         key: bool = false,
         requested_help: bool = false,
         format: Format,
+        /// When set, `file` is a host document (e.g. markdown) and edits apply
+        /// to the embedded config of this archetype, spliced back in place.
+        embed: ?fig.Embed.Type = null,
     },
     get: struct {
         file: []const u8,
@@ -39,6 +42,9 @@ const CliActionOptions = union(CliAction) {
         from: Format,
         to: Format,
         requested_help: bool = false,
+        /// When set, the input is extracted from a host document of this
+        /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
+        embed: ?fig.Embed.Type = null,
     },
 };
 
@@ -73,6 +79,7 @@ const Help = struct {
             \\  --key: edit the object key at path instead of the value
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
+            \\  .md/.markdown files: edits the YAML frontmatter in place
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -85,6 +92,7 @@ const Help = struct {
             \\  -o, --output:   output format (defaults to the input format)
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
+            \\  .md/.markdown files: reads the YAML frontmatter
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -151,7 +159,9 @@ pub fn main(init: std.process.Init) !void {
             const input = try getInput(io, opts.file, .read_write);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
 
-            switch (opts.format) {
+            if (opts.embed) |embed_type| {
+                try editEmbedded(init.arena.allocator(), io, input, embed_type, opts.path, opts.replacement, opts.key);
+            } else switch (opts.format) {
                 .json, .jsonc => {
                     const replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{opts.replacement});
                     try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, opts.key);
@@ -170,7 +180,9 @@ pub fn main(init: std.process.Init) !void {
             const input = try getInput(io, opts.file, .read_only);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
 
-            const doc = switch (opts.from) {
+            const doc = if (opts.embed) |embed_type|
+                try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
+            else switch (opts.from) {
                 .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
                 .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
             };
@@ -198,13 +210,43 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
-    // Get file reader
+fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
     var read_buffer: [4096]u8 = undefined;
     var file_reader = file.reader(io, &read_buffer);
-    // Stream file contents
-    const content = try file_reader.interface.allocRemaining(allocator, max_size);
+    return file_reader.interface.allocRemaining(allocator, max_size);
+}
+
+fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
+    const content = try readAll(allocator, io, file);
     return try Lang.Parser.parse(allocator, content, Lang.default_type);
+}
+
+/// Extract the embedded config of `embed_type` from a host file and parse it.
+/// The returned document's node spans are relative to the embedded region.
+fn parseEmbeddedFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File, embed_type: fig.Embed.Type) !fig.Document {
+    const content = try readAll(allocator, io, file);
+    const embedded = try fig.Embed.extract(allocator, content, embed_type);
+    return embedded.document;
+}
+
+/// Edit `content` (a complete document) and return the new bytes.
+fn editSlice(
+    comptime Lang: type,
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    path: []fig.AST.PathSegment,
+    replacement: []const u8,
+    edit_key: bool,
+) ![]u8 {
+    var editor: fig.Editor(Lang) = .{ .allocator = allocator };
+    try editor.init(content);
+    defer editor.deinit();
+    if (edit_key) {
+        try editor.replaceKeyAtPath(path, replacement);
+    } else {
+        try editor.replaceValAtPath(path, replacement);
+    }
+    return allocator.dupe(u8, editor.source.items);
 }
 
 fn editDocument(
@@ -216,23 +258,50 @@ fn editDocument(
     replacement: []const u8,
     edit_key: bool,
 ) !void {
-    // Get file reader
-    var read_buffer: [4096]u8 = undefined;
-    var file_reader = file.reader(io, &read_buffer);
-    // Stream file contents
-    const content = try file_reader.interface.allocRemaining(allocator, max_size);
+    const content = try readAll(allocator, io, file);
     defer allocator.free(content);
 
-    var editor: fig.Editor(Lang) = .{ .allocator = allocator };
-    try editor.init(content);
-    defer editor.deinit();
-    if (edit_key) {
-        try editor.replaceKeyAtPath(path, replacement);
-    } else {
-        try editor.replaceValAtPath(path, replacement);
-    }
-    try file.writePositionalAll(io, editor.source.items, 0);
-    try file.setLength(io, editor.source.items.len);
+    const edited = try editSlice(Lang, allocator, content, path, replacement, edit_key);
+    try file.writePositionalAll(io, edited, 0);
+    try file.setLength(io, edited.len);
+}
+
+/// Edit the embedded config of a host file in place: extract the region, edit
+/// only that slice as its inner format, then splice it back between the
+/// retained fences so the rest of the host file is byte-identical.
+fn editEmbedded(
+    allocator: std.mem.Allocator,
+    io: Io,
+    file: Io.File,
+    embed_type: fig.Embed.Type,
+    path: []fig.AST.PathSegment,
+    replacement: []const u8,
+    edit_key: bool,
+) !void {
+    const content = try readAll(allocator, io, file);
+    defer allocator.free(content);
+
+    const embedded = try fig.Embed.extract(allocator, content, embed_type);
+    defer embedded.deinit(allocator);
+    const region = embedded.region;
+    const inner = content[region.content.start..region.content.end];
+
+    const edited_inner = switch (embed_type) {
+        .FrontmatterYaml, .EndmatterYaml => try editSlice(fig.Language.YAML, allocator, inner, path, replacement, edit_key),
+        .FrontmatterJson => blk: {
+            const quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{replacement});
+            break :blk try editSlice(fig.Language.JSON, allocator, inner, path, quoted, edit_key);
+        },
+    };
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.appendSlice(allocator, content[0..region.content.start]);
+    try out.appendSlice(allocator, edited_inner);
+    try out.appendSlice(allocator, content[region.content.end..]);
+
+    try file.writePositionalAll(io, out.items, 0);
+    try file.setLength(io, out.items.len);
 }
 
 fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !Io.File {
@@ -300,13 +369,29 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
     return path_in_progress.toOwnedSlice(allocator);
 }
 
-fn detectLanguageFromFileEnding(file_path: []const u8) !Format {
+/// Result of mapping a file extension to a parse strategy. `embed` is non-null
+/// when the file is a host document whose config lives in an embedded region;
+/// `format` then describes that region's inner format.
+const Detected = struct {
+    format: Format,
+    embed: ?fig.Embed.Type = null,
+};
+
+fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
     const dot = std.mem.findLast(u8, file_path, ".");
-    return std.meta.stringToEnum(Format, file_path[(dot orelse 0) + 1..file_path.len]) orelse {
+    const ext = file_path[(dot orelse 0) + 1 .. file_path.len];
+
+    // Markdown carries YAML frontmatter by default.
+    if (std.mem.eql(u8, ext, "md") or std.mem.eql(u8, ext, "markdown")) {
+        return .{ .format = .yaml, .embed = .FrontmatterYaml };
+    }
+
+    const format = std.meta.stringToEnum(Format, ext) orelse {
         const recognized_file_format = if (dot) |d| file_path[d..file_path.len] else "(none)";
         std.log.scoped(.detectLanguage).err("File `{s}` had ending: {s}", .{ file_path, recognized_file_format });
         return ArgError.UnsupportedFileFormat;
     };
+    return .{ .format = format, .embed = null };
 }
 
 const ArgError = error { UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
@@ -361,13 +446,15 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             };
         }
 
+        const detected = try detectLanguageFromFileEnding(file_path);
         config.options = .{ .edit = .{
             .file = file_path,
             .path = path,
             .replacement = replacement,
             .key = edit_key,
             .requested_help = requested_help,
-            .format = try detectLanguageFromFileEnding(file_path),
+            .format = detected.format,
+            .embed = detected.embed,
         } };
     } else if (std.mem.eql(u8, action_str, "get") or std.mem.eql(u8, action_str, "g")) {
         config.action = .get;
@@ -421,11 +508,12 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             path = try parsePath(allocator, positionals.items[1]);
         }
 
-        const detected_input = if (!requested_help and input_override == null)
+        const detected_input: ?Detected = if (!requested_help and input_override == null)
             try detectLanguageFromFileEnding(file_path)
         else
             null;
-        const input_format = input_override orelse detected_input orelse .json;
+        const input_format = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
+        const embed = if (detected_input) |d| d.embed else null;
 
         config.options = .{ .get = .{
             .file = file_path,
@@ -433,6 +521,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .from = input_format,
             .to = output_override orelse input_format,
             .requested_help = requested_help,
+            .embed = embed,
         } };
     } else {
         log.err("Action not recognized: {s}", .{action_str});

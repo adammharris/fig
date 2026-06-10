@@ -6,6 +6,7 @@ pub const Language = @import("language.zig");
 pub const Editor = @import("editor.zig").Editor;
 pub const Document = @import("document.zig");
 pub const AST = @import("ast.zig");
+pub const Embed = @import("embed.zig");
 
 test {
     _ = @import("json/tokenizer.zig");
@@ -15,6 +16,7 @@ test {
     _ = @import("yaml/parser.zig");
     _ = @import("yaml/printer.zig");
     _ = @import("editor.zig");
+    _ = @import("embed.zig");
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");
     }
