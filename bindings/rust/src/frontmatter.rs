@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 
 use serde::Serialize;
 
-use crate::editor::{borrow_str, to_ffi_path, value_text, Segment};
+use crate::editor::{borrow_str, to_ffi_keys, to_ffi_path, value_text, Segment};
 use crate::error::Error;
 use crate::ffi;
 
@@ -108,6 +108,52 @@ impl Frontmatter {
     pub fn remove_item(&mut self, path: &[Segment], index: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let status = unsafe { ffi::fig_fm_remove_seq_item(self.ptr(), p.as_ptr(), p.len(), index) };
+        Error::from_status(status)
+    }
+
+    /// Move the mapping entry at `src_path` to immediately before the entry at
+    /// `dest_path`. Both must name keys in the same mapping. The moved entry
+    /// keeps its owned comments; bytes between the two entries are preserved.
+    pub fn move_key(&mut self, src_path: &[Segment], dest_path: &[Segment]) -> Result<(), Error> {
+        let s = to_ffi_path(src_path);
+        let d = to_ffi_path(dest_path);
+        let status =
+            unsafe { ffi::fig_fm_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len()) };
+        Error::from_status(status)
+    }
+
+    /// Reorder the entries of the mapping at `path` (empty path = root) so
+    /// `keys` come first in that order; entries whose key is not listed keep
+    /// their original relative order and follow. Unknown keys are ignored. Each
+    /// entry's comments and interleaved trivia are preserved.
+    pub fn reorder_keys<S: AsRef<str>>(&mut self, path: &[Segment], keys: &[S]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let k = to_ffi_keys(keys);
+        let status = unsafe {
+            ffi::fig_fm_reorder_keys(self.ptr(), p.as_ptr(), p.len(), k.as_ptr(), k.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Move the sequence item at index `from` to index `to` (array-move
+    /// semantics). A block item keeps its owned comments; a flow sequence keeps
+    /// its separators. No-op when `from == to`.
+    pub fn move_item(&mut self, path: &[Segment], from: usize, to: usize) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status =
+            unsafe { ffi::fig_fm_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
+        Error::from_status(status)
+    }
+
+    /// Reorder the items of the sequence at `path` so the items at `indices`
+    /// (positions in the current order) come first, in that order; items not
+    /// listed keep their original relative order and follow. Out-of-range
+    /// indices are ignored.
+    pub fn reorder_items(&mut self, path: &[Segment], indices: &[usize]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_fm_reorder_items(self.ptr(), p.as_ptr(), p.len(), indices.as_ptr(), indices.len())
+        };
         Error::from_status(status)
     }
 

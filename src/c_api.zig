@@ -320,6 +320,39 @@ pub const FigPathSegment = extern struct {
 };
 
 const max_path_len = 128;
+const max_keys_len = 512;
+
+/// A borrowed UTF-8 string slice passed across the C ABI: `ptr[0..len]`. Used
+/// for the key list of `fig_*_reorder_keys`.
+pub const FigStr = extern struct {
+    ptr: ?[*]const u8,
+    len: usize,
+};
+
+/// Decode a C array of `FigStr` into `buf`. Returns the populated slice, or
+/// null on a malformed entry / over-long list. A zero-length entry decodes to
+/// an empty key regardless of its (possibly null) pointer.
+fn decodeKeys(
+    keys_ptr: ?[*]const FigStr,
+    keys_len: usize,
+    buf: [][]const u8,
+) ?[][]const u8 {
+    if (keys_len == 0) return buf[0..0];
+    if (keys_len > buf.len) return null;
+    const ks = keys_ptr orelse return null;
+    for (0..keys_len) |i| {
+        buf[i] = if (ks[i].len == 0) &.{} else (ks[i].ptr orelse return null)[0..ks[i].len];
+    }
+    return buf[0..keys_len];
+}
+
+/// View a C `usize` array as a Zig slice. Returns null only when the pointer is
+/// null for a non-empty length (a zero length is a valid empty list).
+fn decodeIndices(ptr: ?[*]const usize, len: usize) ?[]const usize {
+    if (len == 0) return &.{};
+    const p = ptr orelse return null;
+    return p[0..len];
+}
 
 /// Decode a C path array into `buf`. Returns the populated slice, or null on a
 /// malformed segment / over-long path.
@@ -529,6 +562,71 @@ pub export fn fig_editor_remove_seq_item(
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     return switch (handle.inner) {
         inline else => |*e| if (e.removeSeqItem(path, index)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_editor_move_key(
+    ed: ?*FigEditor,
+    src_ptr: ?[*]const FigPathSegment,
+    src_len: usize,
+    dest_ptr: ?[*]const FigPathSegment,
+    dest_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var src_buf: [max_path_len]AST.PathSegment = undefined;
+    var dest_buf: [max_path_len]AST.PathSegment = undefined;
+    const src = decodePath(src_ptr, src_len, &src_buf) orelse return .invalid_argument;
+    const dest = decodePath(dest_ptr, dest_len, &dest_buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.moveKey(src, dest)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_editor_reorder_keys(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    keys_ptr: ?[*]const FigStr,
+    keys_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var path_buf: [max_path_len]AST.PathSegment = undefined;
+    var keys_buf: [max_keys_len][]const u8 = undefined;
+    const path = decodePath(path_ptr, path_len, &path_buf) orelse return .invalid_argument;
+    const keys = decodeKeys(keys_ptr, keys_len, &keys_buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.reorderKeys(path, keys)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_editor_move_item(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    from: usize,
+    to: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.moveItem(path, from, to)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_editor_reorder_items(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    indices_ptr: ?[*]const usize,
+    indices_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const indices = decodeIndices(indices_ptr, indices_len) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.reorderItems(path, indices)) .ok else |err| editStatus(err),
     };
 }
 
@@ -782,6 +880,67 @@ pub export fn fig_fm_remove_seq_item(
     return .ok;
 }
 
+pub export fn fig_fm_move_key(
+    fm: ?*FigFrontmatter,
+    src_ptr: ?[*]const FigPathSegment,
+    src_len: usize,
+    dest_ptr: ?[*]const FigPathSegment,
+    dest_len: usize,
+) FigStatus {
+    const handle = fmFrom(fm) orelse return .invalid_argument;
+    var src_buf: [max_path_len]AST.PathSegment = undefined;
+    var dest_buf: [max_path_len]AST.PathSegment = undefined;
+    const src = decodePath(src_ptr, src_len, &src_buf) orelse return .invalid_argument;
+    const dest = decodePath(dest_ptr, dest_len, &dest_buf) orelse return .invalid_argument;
+    handle.editor.moveKey(src, dest) catch |err| return editStatus(err);
+    return .ok;
+}
+
+pub export fn fig_fm_reorder_keys(
+    fm: ?*FigFrontmatter,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    keys_ptr: ?[*]const FigStr,
+    keys_len: usize,
+) FigStatus {
+    const handle = fmFrom(fm) orelse return .invalid_argument;
+    var path_buf: [max_path_len]AST.PathSegment = undefined;
+    var keys_buf: [max_keys_len][]const u8 = undefined;
+    const path = decodePath(path_ptr, path_len, &path_buf) orelse return .invalid_argument;
+    const keys = decodeKeys(keys_ptr, keys_len, &keys_buf) orelse return .invalid_argument;
+    handle.editor.reorderKeys(path, keys) catch |err| return editStatus(err);
+    return .ok;
+}
+
+pub export fn fig_fm_move_item(
+    fm: ?*FigFrontmatter,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    from: usize,
+    to: usize,
+) FigStatus {
+    const handle = fmFrom(fm) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    handle.editor.moveItem(path, from, to) catch |err| return editStatus(err);
+    return .ok;
+}
+
+pub export fn fig_fm_reorder_items(
+    fm: ?*FigFrontmatter,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    indices_ptr: ?[*]const usize,
+    indices_len: usize,
+) FigStatus {
+    const handle = fmFrom(fm) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const indices = decodeIndices(indices_ptr, indices_len) orelse return .invalid_argument;
+    handle.editor.reorderItems(path, indices) catch |err| return editStatus(err);
+    return .ok;
+}
+
 /// Render the full host file with the edited frontmatter spliced back between
 /// the original fences. Borrowed bytes, valid until the next call or destroy.
 pub export fn fig_fm_render(
@@ -901,6 +1060,75 @@ test "frontmatter c abi preserves fences and body" {
         "---\ntitle: Hi\n# keep\ntags:\n- x\n- y\nauthor: me\n---\n# Body\ntext\n",
         ptr[0..len],
     );
+}
+
+fn figStr(s: []const u8) FigStr {
+    return .{ .ptr = s.ptr, .len = s.len };
+}
+
+test "frontmatter c abi reorder keys preserves comments, fences, body" {
+    const md = "---\ntitle: Hi\n# keep\ntags:\n- x\nauthor: me\n---\n# Body\ntext\n";
+    var out_fm: ?*FigFrontmatter = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
+    defer fig_fm_destroy(out_fm);
+
+    const keys = [_]FigStr{ figStr("author"), figStr("title") };
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_reorder_keys(out_fm, null, 0, &keys, keys.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings(
+        "---\nauthor: me\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n",
+        ptr[0..len],
+    );
+}
+
+test "frontmatter c abi move key preserves fences and body" {
+    const md = "---\na: 1\nb: 2\nc: 3\n---\nbody\n";
+    var out_fm: ?*FigFrontmatter = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
+    defer fig_fm_destroy(out_fm);
+
+    const src = [_]FigPathSegment{keySeg("c")};
+    const dest = [_]FigPathSegment{keySeg("a")};
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_move_key(out_fm, &src, 1, &dest, 1));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\nc: 3\na: 1\nb: 2\n---\nbody\n", ptr[0..len]);
+}
+
+test "frontmatter c abi reorder items in a block sequence value" {
+    const md = "---\ntags:\n- x\n- y\n- z\n---\nbody\n";
+    var out_fm: ?*FigFrontmatter = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
+    defer fig_fm_destroy(out_fm);
+
+    const path = [_]FigPathSegment{keySeg("tags")};
+    const indices = [_]usize{ 2, 0 };
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_reorder_items(out_fm, &path, 1, &indices, indices.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntags:\n- z\n- x\n- y\n---\nbody\n", ptr[0..len]);
+}
+
+test "frontmatter c abi move item in a flow sequence value" {
+    const md = "---\ntags: [x, y, z]\n---\nbody\n";
+    var out_fm: ?*FigFrontmatter = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
+    defer fig_fm_destroy(out_fm);
+
+    const path = [_]FigPathSegment{keySeg("tags")};
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_move_item(out_fm, &path, 1, 2, 0));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntags: [z, x, y]\n---\nbody\n", ptr[0..len]);
 }
 
 test "embed c abi locates region" {
