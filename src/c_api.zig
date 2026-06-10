@@ -16,6 +16,23 @@ const YamlParser = @import("yaml/parser.zig");
 const YamlType = @import("yaml/yaml.zig").Type;
 const YamlLang = @import("yaml/yaml.zig").Language;
 
+/// Logging for the C ABI build (this file is the static-lib root, so its
+/// `std_options` wins). The default `std.log` handler writes to stderr via
+/// `std.Io.Threaded`, which does not exist on `wasm32-freestanding` (no posix
+/// I/O) — referencing it fails to compile. A library has no business writing to
+/// stderr regardless, so drop logs on wasm and defer to the default elsewhere.
+pub const std_options: std.Options = .{ .logFn = figLogFn };
+
+fn figLogFn(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (builtin.cpu.arch.isWasm()) return;
+    std.log.defaultLog(level, scope, format, args);
+}
+
 /// Translation of `fig` errors to C ABI.
 pub const FigStatus = enum(c_int) {
     ok = 0,
