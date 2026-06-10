@@ -93,6 +93,15 @@ pub struct FigPathSegment {
     pub index: usize,
 }
 
+/// A borrowed UTF-8 string slice (`ptr[0..len]`) passed across the C ABI.
+/// Mirrors `FigStr` in `fig.h`; used for the key list of `*_reorder_keys`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FigStr {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
 // `FigSpan`/`FigRegion`/`fig_embed_extract` mirror the low-level embed C ABI.
 // The Rust-facing consumer is `Frontmatter` (which uses `fig_fm_*`); these are
 // declared for parity with the header and for any future low-level wrapper.
@@ -179,6 +188,34 @@ unsafe extern "C" {
         path_len: usize,
         index: usize,
     ) -> FigStatus;
+    pub fn fig_editor_move_key(
+        editor: *mut FigEditor,
+        src_path: *const FigPathSegment,
+        src_path_len: usize,
+        dest_path: *const FigPathSegment,
+        dest_path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_reorder_keys(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        keys: *const FigStr,
+        keys_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_move_item(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        from: usize,
+        to: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_reorder_items(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        indices: *const usize,
+        indices_len: usize,
+    ) -> FigStatus;
     pub fn fig_editor_source(
         editor: *const FigEditor,
         out_ptr: *mut *const u8,
@@ -247,6 +284,34 @@ unsafe extern "C" {
         path: *const FigPathSegment,
         path_len: usize,
         index: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_move_key(
+        fm: *mut FigFrontmatter,
+        src_path: *const FigPathSegment,
+        src_path_len: usize,
+        dest_path: *const FigPathSegment,
+        dest_path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_reorder_keys(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        keys: *const FigStr,
+        keys_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_move_item(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        from: usize,
+        to: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_reorder_items(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        indices: *const usize,
+        indices_len: usize,
     ) -> FigStatus;
     pub fn fig_fm_render(
         fm: *mut FigFrontmatter,

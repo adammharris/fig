@@ -148,7 +148,7 @@ fn normalize(id: FigNodeId) -> Option<FigNodeId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, Error, Format};
+    use super::{Document, Error, Format, Frontmatter, Segment};
 
     #[test]
     fn parses_json_document() {
@@ -160,5 +160,48 @@ mod tests {
     fn parse_error_is_reported() {
         let err = Document::parse(br#"{"name":"fig""#, Format::Json).unwrap_err();
         assert!(matches!(err, Error::Parse));
+    }
+
+    #[test]
+    fn frontmatter_reorder_keys_preserves_comments_and_body() {
+        let md = "---\ntitle: Hi\n# a comment\ntags:\n- x\nauthor: me\n---\n# Body\n";
+        let mut fm = Frontmatter::open(md.as_bytes()).unwrap();
+        // String keys (the diaryx call site passes `Vec<String>`).
+        let order = vec![String::from("author"), String::from("title")];
+        fm.reorder_keys(&[], &order).unwrap();
+        assert_eq!(
+            fm.render().unwrap(),
+            "---\nauthor: me\ntitle: Hi\n# a comment\ntags:\n- x\n---\n# Body\n",
+        );
+    }
+
+    #[test]
+    fn frontmatter_move_key_preserves_comments_and_body() {
+        let md = "---\na: 1\n# note for c\nc: 3\nb: 2\n---\nbody\n";
+        let mut fm = Frontmatter::open(md.as_bytes()).unwrap();
+        fm.move_key(&[Segment::Key("c")], &[Segment::Key("a")]).unwrap();
+        assert_eq!(
+            fm.render().unwrap(),
+            "---\n# note for c\nc: 3\na: 1\nb: 2\n---\nbody\n",
+        );
+    }
+
+    #[test]
+    fn frontmatter_reorder_items_in_block_sequence() {
+        let md = "---\ntags:\n- x\n- y\n- z\n---\nbody\n";
+        let mut fm = Frontmatter::open(md.as_bytes()).unwrap();
+        fm.reorder_items(&[Segment::Key("tags")], &[2, 0]).unwrap();
+        assert_eq!(
+            fm.render().unwrap(),
+            "---\ntags:\n- z\n- x\n- y\n---\nbody\n",
+        );
+    }
+
+    #[test]
+    fn frontmatter_move_item_in_flow_sequence_keeps_separators() {
+        let md = "---\ntags: [x, y, z]\n---\nbody\n";
+        let mut fm = Frontmatter::open(md.as_bytes()).unwrap();
+        fm.move_item(&[Segment::Key("tags")], 2, 0).unwrap();
+        assert_eq!(fm.render().unwrap(), "---\ntags: [z, x, y]\n---\nbody\n");
     }
 }

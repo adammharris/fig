@@ -104,6 +104,13 @@ typedef struct FigPathSegment {
     size_t index;          // element index when kind == 1
 } FigPathSegment;
 
+// A borrowed UTF-8 string slice: ptr[0..len]. Used for the key list of the
+// *_reorder_keys functions.
+typedef struct FigStr {
+    const uint8_t *ptr;
+    size_t len;
+} FigStr;
+
 typedef struct FigEditor FigEditor;
 
 // Create an editor over a copy of `input` in the given format. The handle owns
@@ -129,6 +136,23 @@ FigStatus fig_editor_prepend_seq(FigEditor *editor, const FigPathSegment *path, 
                                  const uint8_t *val, size_t val_len);
 FigStatus fig_editor_remove_seq_item(FigEditor *editor, const FigPathSegment *path,
                                      size_t path_len, size_t index);
+// Move the mapping entry at `src_path` to immediately before the entry at
+// `dest_path` (both must name keys in the same mapping). Reorder the entries of
+// the mapping at `path` so `keys` come first in order, the rest following in
+// original order; unknown keys are ignored. Owned comments travel with entries.
+FigStatus fig_editor_move_key(FigEditor *editor,
+                              const FigPathSegment *src_path, size_t src_path_len,
+                              const FigPathSegment *dest_path, size_t dest_path_len);
+FigStatus fig_editor_reorder_keys(FigEditor *editor, const FigPathSegment *path, size_t path_len,
+                                  const FigStr *keys, size_t keys_len);
+// Move the sequence item at index `from` to index `to` (array-move semantics).
+// Reorder the items of the sequence at `path` so the items at `indices` come
+// first in order, the rest following in original order; out-of-range indices
+// are ignored. Block items carry owned comments; flow sequences keep separators.
+FigStatus fig_editor_move_item(FigEditor *editor, const FigPathSegment *path, size_t path_len,
+                               size_t from, size_t to);
+FigStatus fig_editor_reorder_items(FigEditor *editor, const FigPathSegment *path, size_t path_len,
+                                   const size_t *indices, size_t indices_len);
 
 // Borrow the editor's current source bytes. Valid until the next mutation or
 // fig_editor_destroy.
@@ -181,6 +205,15 @@ FigStatus fig_fm_prepend_seq(FigFrontmatter *fm, const FigPathSegment *path, siz
                              const uint8_t *val, size_t val_len);
 FigStatus fig_fm_remove_seq_item(FigFrontmatter *fm, const FigPathSegment *path,
                                  size_t path_len, size_t index);
+FigStatus fig_fm_move_key(FigFrontmatter *fm,
+                          const FigPathSegment *src_path, size_t src_path_len,
+                          const FigPathSegment *dest_path, size_t dest_path_len);
+FigStatus fig_fm_reorder_keys(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
+                              const FigStr *keys, size_t keys_len);
+FigStatus fig_fm_move_item(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
+                           size_t from, size_t to);
+FigStatus fig_fm_reorder_items(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
+                               const size_t *indices, size_t indices_len);
 
 // Render the full host file with edited frontmatter. Borrowed bytes, valid
 // until the next call or fig_fm_destroy.

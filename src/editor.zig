@@ -203,6 +203,216 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(line_start, del_end), "");
         }
 
+        // ============
+        // MOVE / REORDER
+        // ============
+        //
+        // Like insert/delete, these never reserialize: they relocate whole entry
+        // blocks (a mapping key's owned comment block + line(s), or a sequence
+        // item's) and reuse `replaceAtSpan` to splice + reparse. The moved bytes
+        // are the originals, so comments, quoting, and formatting ride along.
+        // Block containers tile into per-entry blocks (trailing trivia rides with
+        // the preceding entry); a flow sequence (`[a, b]`) reuses its original
+        // separators so only the items move.
+
+        /// Move the mapping entry named by `src_path` to sit immediately before
+        /// the entry named by `dest_path`. Both paths must name keys in the
+        /// *same* block mapping. The moved entry carries its owned leading
+        /// comment block and any trailing same-line comment; the bytes between
+        /// the two entries are preserved. Moving an entry to before itself (or
+        /// into its own comment block) is a no-op.
+        pub fn moveKey(self: *Self, src_path: []const AST.PathSegment, dest_path: []const AST.PathSegment) !void {
+            const parsed = try self.getParsed();
+            const src = try parsed.ast.getNodeByPath(src_path);
+            if (src.kind != .keyvalue) return error.NotAMapping;
+            const dest = try parsed.ast.getNodeByPath(dest_path);
+            if (dest.kind != .keyvalue) return error.NotAMapping;
+            const source = self.source.items;
+            try self.moveBlock(
+                entryBlockStart(source, parsed.span(src)),
+                entryBlockEnd(source, parsed.span(src)),
+                entryBlockStart(source, parsed.span(dest)),
+            );
+        }
+
+        /// Move the sequence item at index `from` to index `to` (both positions
+        /// in the current order; standard array-move semantics — the item is
+        /// removed and reinserted, shifting the others to fill). A block item
+        /// carries its owned leading comment block. No-op when `from == to`.
+        pub fn moveItem(self: *Self, path: []const AST.PathSegment, from: usize, to: usize) !void {
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            if (node.kind != .sequence) return error.NotASequence;
+            const n = try seqLen(parsed, node);
+            if (from >= n or to >= n) return error.NotFound;
+            if (from == to) return;
+            // Build the post-move index order, then reorder by it.
+            const order = try self.allocator.alloc(usize, n);
+            defer self.allocator.free(order);
+            for (order, 0..) |*o, i| o.* = i;
+            const val = order[from];
+            if (from < to) {
+                var i = from;
+                while (i < to) : (i += 1) order[i] = order[i + 1];
+            } else {
+                var i = from;
+                while (i > to) : (i -= 1) order[i] = order[i - 1];
+            }
+            order[to] = val;
+            try self.reorderSeqNode(parsed, node, order);
+        }
+
+        /// Reorder the entries of the block mapping at `path` (empty path =
+        /// root) so the keys listed in `keys` come first, in that order; entries
+        /// whose key is not listed keep their original relative order and follow.
+        /// Keys in `keys` that the mapping does not contain are ignored. Each
+        /// entry's owned comments — and any interleaved blank lines / orphan
+        /// comments, which ride with the entry that precedes them — are
+        /// preserved, so no bytes are dropped. Errors on a flow mapping (`{…}`).
+        pub fn reorderKeys(self: *Self, path: []const AST.PathSegment, keys: []const []const u8) !void {
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            if (node.kind != .mapping) return error.NotAMapping;
+            const first_id = node.kind.mapping orelse return; // empty mapping
+            const source = self.source.items;
+            if (isFlow(source, parsed.span(node))) return error.NotAMapping;
+
+            // Gather each entry's key (for matching) and block, in document order.
+            var entry_keys: std.ArrayList([]const u8) = .empty;
+            defer entry_keys.deinit(self.allocator);
+            var blocks: std.ArrayList(Block) = .empty;
+            defer blocks.deinit(self.allocator);
+
+            var cur = parsed.ast.nodes[first_id];
+            var last_end: usize = 0;
+            while (true) {
+                if (cur.kind != .keyvalue) return error.InvalidDocument;
+                const key_node = parsed.ast.nodes[cur.kind.keyvalue.key];
+                const key = switch (key_node.kind) {
+                    .string => |s| s,
+                    else => return error.InvalidDocument,
+                };
+                try entry_keys.append(self.allocator, key);
+                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, parsed.span(cur)), .end = 0 });
+                last_end = entryBlockEnd(source, parsed.span(cur));
+                cur = parsed.ast.next(&cur) orelse break;
+            }
+            tileBlocks(blocks.items, last_end);
+
+            // Translate the requested keys into entry indices (first unused match
+            // wins), then reorder the blocks by that index list.
+            var order: std.ArrayList(usize) = .empty;
+            defer order.deinit(self.allocator);
+            const chosen = try self.allocator.alloc(bool, blocks.items.len);
+            defer self.allocator.free(chosen);
+            @memset(chosen, false);
+            for (keys) |k| {
+                for (entry_keys.items, 0..) |seen, i| {
+                    if (!chosen[i] and std.mem.eql(u8, seen, k)) {
+                        try order.append(self.allocator, i);
+                        chosen[i] = true;
+                        break;
+                    }
+                }
+            }
+            try self.reorderBlocks(blocks.items[0].start, last_end, blocks.items, order.items);
+        }
+
+        /// Reorder the items of the sequence at `path` (block or flow) so the
+        /// items at the indices listed in `indices` (positions in the current
+        /// order) come first, in that order; items not listed keep their
+        /// original relative order and follow. Out-of-range indices are ignored.
+        /// Block items carry their owned comments; a flow sequence keeps its
+        /// original separators so only the items move.
+        pub fn reorderItems(self: *Self, path: []const AST.PathSegment, indices: []const usize) !void {
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            if (node.kind != .sequence) return error.NotASequence;
+            try self.reorderSeqNode(parsed, node, indices);
+        }
+
+        // --- move / reorder internals ---
+
+        /// Reorder a sequence node's items by `order` (bring-to-front indices),
+        /// dispatching on flow vs block style.
+        fn reorderSeqNode(self: *Self, parsed: Document, node: AST.Node, order: []const usize) !void {
+            const source = self.source.items;
+            var spans: std.ArrayList(Span) = .empty;
+            defer spans.deinit(self.allocator);
+            var maybe = try parsed.ast.child(&node);
+            while (maybe) |item| {
+                try spans.append(self.allocator, parsed.span(item));
+                maybe = parsed.ast.next(&item);
+            }
+            if (spans.items.len == 0) return;
+            if (isFlow(source, parsed.span(node))) {
+                try self.reorderFlowItems(spans.items, order);
+                return;
+            }
+            var blocks: std.ArrayList(Block) = .empty;
+            defer blocks.deinit(self.allocator);
+            for (spans.items) |s| {
+                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, s), .end = 0 });
+            }
+            const last_end = entryBlockEnd(source, spans.items[spans.items.len - 1]);
+            tileBlocks(blocks.items, last_end);
+            try self.reorderBlocks(blocks.items[0].start, last_end, blocks.items, order);
+        }
+
+        /// Splice a block container's region so the entries indexed by `order`
+        /// (in document order) come first, then the rest in original order.
+        /// `blocks` must be in document order and tile `[region_start, region_end)`.
+        fn reorderBlocks(self: *Self, region_start: usize, region_end: usize, blocks: []const Block, order: []const usize) !void {
+            const perm = try fullOrder(self.allocator, order, blocks.len);
+            defer self.allocator.free(perm);
+            const source = self.source.items;
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            for (perm) |i| try appendBlockSep(&out, self.allocator, source[blocks[i].start..blocks[i].end]);
+            try self.replaceAtSpan(Span.init(region_start, region_end), out.items);
+        }
+
+        /// Splice a flow sequence (`[a, b, …]`) so its items follow `order`,
+        /// reusing each slot's original separator bytes so the comma/space
+        /// framing is preserved while only the item contents move.
+        fn reorderFlowItems(self: *Self, items: []const Span, order: []const usize) !void {
+            const perm = try fullOrder(self.allocator, order, items.len);
+            defer self.allocator.free(perm);
+            const source = self.source.items;
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            for (perm, 0..) |src_idx, slot| {
+                try out.appendSlice(self.allocator, source[items[src_idx].start..items[src_idx].end]);
+                // Reuse the separator that originally sat after position `slot`.
+                if (slot + 1 < perm.len) {
+                    try out.appendSlice(self.allocator, source[items[slot].end..items[slot + 1].start]);
+                }
+            }
+            try self.replaceAtSpan(Span.init(items[0].start, items[items.len - 1].end), out.items);
+        }
+
+        /// Move the block `[src_start, src_end)` so it begins at `dest_start`,
+        /// preserving the bytes between source and destination. No-op when the
+        /// destination falls within the source block.
+        fn moveBlock(self: *Self, src_start: usize, src_end: usize, dest_start: usize) !void {
+            if (dest_start >= src_start and dest_start <= src_end) return;
+            const source = self.source.items;
+            const moved = source[src_start..src_end];
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            if (src_end <= dest_start) {
+                // src precedes dest: [src][between][dest..] -> [between][src][dest..]
+                try appendBlockSep(&out, self.allocator, source[src_end..dest_start]);
+                try appendBlockSep(&out, self.allocator, moved);
+                try self.replaceAtSpan(Span.init(src_start, dest_start), out.items);
+            } else {
+                // dest precedes src: [dest..][between][src] -> [src][dest..][between]
+                try appendBlockSep(&out, self.allocator, moved);
+                try appendBlockSep(&out, self.allocator, source[dest_start..src_start]);
+                try self.replaceAtSpan(Span.init(dest_start, src_end), out.items);
+            }
+        }
+
         // --- insert helpers (build text, then splice) ---
 
         fn insertBlockKey(self: *Self, parsed: Document, mapping: AST.Node, key_text: []const u8, value_text: []const u8) !void {
@@ -446,6 +656,81 @@ fn commentBlockStart(source: []const u8, line_start: usize) usize {
         } else break;
     }
     return ls;
+}
+
+/// Start of a mapping entry's full block: its owned leading comment block
+/// (`commentBlockStart`) at the start of the key's line. Mirrors the span math
+/// `deleteKey` uses, factored out for move/reorder.
+fn entryBlockStart(source: []const u8, kv_span: Span) usize {
+    return commentBlockStart(source, lineStartBefore(source, kv_span.start));
+}
+
+/// End of a mapping entry's full block: just past the newline ending its last
+/// line (or `source.len` when the final line is unterminated).
+fn entryBlockEnd(source: []const u8, kv_span: Span) usize {
+    return lineEndAfter(source, kv_span.end -| 1);
+}
+
+/// Append a relocated entry `block` to `out`, guaranteeing a single '\n'
+/// separator from whatever precedes it. The block's own bytes are appended
+/// verbatim (its trailing newline, if any, is preserved), so concatenating
+/// blocks in a new order never welds two entries onto one line.
+fn appendBlockSep(out: *std.ArrayList(u8), allocator: std.mem.Allocator, block: []const u8) !void {
+    if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
+        try out.append(allocator, '\n');
+    }
+    try out.appendSlice(allocator, block);
+}
+
+/// A relocatable entry block: a byte range `[start, end)` covering one mapping
+/// entry or sequence item (its owned comment block through its last line).
+const Block = struct { start: usize, end: usize };
+
+/// Fill each block's `end` from the next block's `start` so the blocks tile a
+/// contiguous region; the final block runs to `last_end`. Trailing trivia (a
+/// blank line, an orphan comment) thus rides with the preceding entry.
+fn tileBlocks(blocks: []Block, last_end: usize) void {
+    for (blocks, 0..) |*b, i| {
+        b.end = if (i + 1 < blocks.len) blocks[i + 1].start else last_end;
+    }
+}
+
+/// Build a full permutation of `0..n`: the valid, de-duplicated indices in
+/// `order` first (in the given order), then every remaining index in ascending
+/// (original) order. Caller owns the returned slice. An empty `order` yields
+/// the identity, so a reorder with nothing to bring forward is a no-op.
+fn fullOrder(allocator: std.mem.Allocator, order: []const usize, n: usize) ![]usize {
+    const result = try allocator.alloc(usize, n);
+    errdefer allocator.free(result);
+    const used = try allocator.alloc(bool, n);
+    defer allocator.free(used);
+    @memset(used, false);
+    var k: usize = 0;
+    for (order) |idx| {
+        if (idx < n and !used[idx]) {
+            result[k] = idx;
+            used[idx] = true;
+            k += 1;
+        }
+    }
+    for (0..n) |i| {
+        if (!used[i]) {
+            result[k] = i;
+            k += 1;
+        }
+    }
+    return result;
+}
+
+/// Count the children of a container node.
+fn seqLen(parsed: Document, node: AST.Node) !usize {
+    var n: usize = 0;
+    var maybe = try parsed.ast.child(&node);
+    while (maybe) |c| {
+        n += 1;
+        maybe = parsed.ast.next(&c);
+    }
+    return n;
 }
 
 /// Drop a single trailing '\n' (the serializer ends every value with one).
@@ -782,4 +1067,222 @@ test "yaml reframe a nested mapping value" {
     defer ed.deinit();
     try ed.replaceValAtPath(&.{ .{ .key = "root" }, .{ .key = "c" } }, "- x");
     try expectSource(&ed, "root:\n  c:\n  - x\n");
+}
+
+// --- move key ---
+
+test "yaml move key forward (src before dest)" {
+    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
+    defer ed.deinit();
+    // Move a to before c: a lands between b and c.
+    try ed.moveKey(&.{.{ .key = "a" }}, &.{.{ .key = "c" }});
+    try expectSource(&ed, "b: 2\na: 1\nc: 3\n");
+}
+
+test "yaml move key backward (dest before src)" {
+    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
+    defer ed.deinit();
+    // Move c to before a.
+    try ed.moveKey(&.{.{ .key = "c" }}, &.{.{ .key = "a" }});
+    try expectSource(&ed, "c: 3\na: 1\nb: 2\n");
+}
+
+test "yaml move key carries owned comment" {
+    var ed = try newYamlEditor("a: 1\n# note for c\nc: 3\nb: 2\n");
+    defer ed.deinit();
+    try ed.moveKey(&.{.{ .key = "c" }}, &.{.{ .key = "a" }});
+    try expectSource(&ed, "# note for c\nc: 3\na: 1\nb: 2\n");
+}
+
+test "yaml move key carries trailing same-line comment" {
+    var ed = try newYamlEditor("a: 1\nb: 2 # keep\nc: 3\n");
+    defer ed.deinit();
+    try ed.moveKey(&.{.{ .key = "b" }}, &.{.{ .key = "a" }});
+    try expectSource(&ed, "b: 2 # keep\na: 1\nc: 3\n");
+}
+
+test "yaml move key with block scalar value" {
+    var ed = try newYamlEditor("a: |\n  x\n  y\nb: 2\n");
+    defer ed.deinit();
+    try ed.moveKey(&.{.{ .key = "b" }}, &.{.{ .key = "a" }});
+    try expectSource(&ed, "b: 2\na: |\n  x\n  y\n");
+}
+
+test "yaml move key to itself is a no-op" {
+    var ed = try newYamlEditor("a: 1\nb: 2\n");
+    defer ed.deinit();
+    try ed.moveKey(&.{.{ .key = "a" }}, &.{.{ .key = "a" }});
+    try expectSource(&ed, "a: 1\nb: 2\n");
+}
+
+// --- reorder keys ---
+
+test "yaml reorder keys full order" {
+    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{ "c", "a", "b" });
+    try expectSource(&ed, "c: 3\na: 1\nb: 2\n");
+}
+
+test "yaml reorder keys partial appends rest in original order" {
+    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\nd: 4\n");
+    defer ed.deinit();
+    // Only c, a listed; b and d keep their original relative order after.
+    try ed.reorderKeys(&.{}, &.{ "c", "a" });
+    try expectSource(&ed, "c: 3\na: 1\nb: 2\nd: 4\n");
+}
+
+test "yaml reorder keys preserves owned comments" {
+    var ed = try newYamlEditor("# about a\na: 1\nb: 2\n# about c\nc: 3\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{ "c", "b", "a" });
+    try expectSource(&ed, "# about c\nc: 3\nb: 2\n# about a\na: 1\n");
+}
+
+test "yaml reorder keys preserves interleaved blank line with preceding entry" {
+    var ed = try newYamlEditor("a: 1\n\nb: 2\nc: 3\n");
+    defer ed.deinit();
+    // The blank line rides with a (its preceding entry).
+    try ed.reorderKeys(&.{}, &.{ "c", "a", "b" });
+    try expectSource(&ed, "c: 3\na: 1\n\nb: 2\n");
+}
+
+test "yaml reorder keys unknown key ignored" {
+    var ed = try newYamlEditor("a: 1\nb: 2\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{ "z", "b", "a" });
+    try expectSource(&ed, "b: 2\na: 1\n");
+}
+
+test "yaml reorder keys no-op when order matches" {
+    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{ "a", "b", "c" });
+    try expectSource(&ed, "a: 1\nb: 2\nc: 3\n");
+}
+
+test "yaml reorder keys empty list keeps original order" {
+    var ed = try newYamlEditor("a: 1\nb: 2\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{});
+    try expectSource(&ed, "a: 1\nb: 2\n");
+}
+
+test "yaml reorder keys nested mapping" {
+    var ed = try newYamlEditor("root:\n  x: 1\n  y: 2\n  z: 3\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{.{ .key = "root" }}, &.{ "z", "x" });
+    try expectSource(&ed, "root:\n  z: 3\n  x: 1\n  y: 2\n");
+}
+
+test "yaml reorder keys with block scalar entry" {
+    var ed = try newYamlEditor("a: 1\nbody: |\n  line one\n  line two\nb: 2\n");
+    defer ed.deinit();
+    try ed.reorderKeys(&.{}, &.{ "body", "b", "a" });
+    try expectSource(&ed, "body: |\n  line one\n  line two\nb: 2\na: 1\n");
+}
+
+// --- move sequence item ---
+
+test "yaml move item block forward" {
+    var ed = try newYamlEditor("- a\n- b\n- c\n");
+    defer ed.deinit();
+    // Move item 0 (a) to index 2: remove a, reinsert -> b, c, a.
+    try ed.moveItem(&.{}, 0, 2);
+    try expectSource(&ed, "- b\n- c\n- a\n");
+}
+
+test "yaml move item block backward" {
+    var ed = try newYamlEditor("- a\n- b\n- c\n");
+    defer ed.deinit();
+    try ed.moveItem(&.{}, 2, 0);
+    try expectSource(&ed, "- c\n- a\n- b\n");
+}
+
+test "yaml move item carries owned comment" {
+    var ed = try newYamlEditor("- a\n# note for c\n- c\n- b\n");
+    defer ed.deinit();
+    // Items: a(0), c(1), b(2). Move c to the front.
+    try ed.moveItem(&.{}, 1, 0);
+    try expectSource(&ed, "# note for c\n- c\n- a\n- b\n");
+}
+
+test "yaml move item to itself is a no-op" {
+    var ed = try newYamlEditor("- a\n- b\n");
+    defer ed.deinit();
+    try ed.moveItem(&.{}, 1, 1);
+    try expectSource(&ed, "- a\n- b\n");
+}
+
+test "yaml move flow item" {
+    var ed = try newYamlEditor("t: [a, b, c]\n");
+    defer ed.deinit();
+    try ed.moveItem(&.{.{ .key = "t" }}, 0, 2);
+    try expectSource(&ed, "t: [b, c, a]\n");
+}
+
+// --- reorder sequence items ---
+
+test "yaml reorder items block partial" {
+    var ed = try newYamlEditor("- a\n- b\n- c\n");
+    defer ed.deinit();
+    // Bring index 2 then 0 to the front; the rest (b) follows in order.
+    try ed.reorderItems(&.{}, &.{ 2, 0 });
+    try expectSource(&ed, "- c\n- a\n- b\n");
+}
+
+test "yaml reorder items nested under key" {
+    var ed = try newYamlEditor("tags:\n- x\n- y\n- z\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{.{ .key = "tags" }}, &.{ 2, 1, 0 });
+    try expectSource(&ed, "tags:\n- z\n- y\n- x\n");
+}
+
+test "yaml reorder items indented nested seq" {
+    var ed = try newYamlEditor("k:\n  - a\n  - b\n  - c\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{.{ .key = "k" }}, &.{1});
+    try expectSource(&ed, "k:\n  - b\n  - a\n  - c\n");
+}
+
+test "yaml reorder items preserves owned comment" {
+    var ed = try newYamlEditor("- a\n# note for b\n- b\n- c\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{}, &.{ 1, 0 });
+    try expectSource(&ed, "# note for b\n- b\n- a\n- c\n");
+}
+
+test "yaml reorder flow items keeps spaced separators" {
+    var ed = try newYamlEditor("t: [a, b, c]\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{.{ .key = "t" }}, &.{ 2, 0 });
+    try expectSource(&ed, "t: [c, a, b]\n");
+}
+
+test "yaml reorder flow items keeps tight separators" {
+    var ed = try newYamlEditor("t: [a,b,c]\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{.{ .key = "t" }}, &.{ 2, 1, 0 });
+    try expectSource(&ed, "t: [c,b,a]\n");
+}
+
+test "yaml reorder items out of range index ignored" {
+    var ed = try newYamlEditor("- a\n- b\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{}, &.{ 9, 1 });
+    try expectSource(&ed, "- b\n- a\n");
+}
+
+test "yaml reorder items no-op when order matches" {
+    var ed = try newYamlEditor("- a\n- b\n- c\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{}, &.{ 0, 1, 2 });
+    try expectSource(&ed, "- a\n- b\n- c\n");
+}
+
+test "yaml reorder items empty list keeps original order" {
+    var ed = try newYamlEditor("- a\n- b\n");
+    defer ed.deinit();
+    try ed.reorderItems(&.{}, &.{});
+    try expectSource(&ed, "- a\n- b\n");
 }
