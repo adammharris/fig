@@ -1,6 +1,13 @@
+mod de;
+mod error;
 mod ffi;
 
 use std::ptr::NonNull;
+
+pub use de::from_str;
+pub use error::Error;
+
+use ffi::{FigNodeId, FigNodeKind, FIG_NODE_NONE};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
@@ -15,28 +22,6 @@ impl From<Format> for ffi::FigFormat {
             Format::Json => ffi::FigFormat::Json,
             Format::Jsonc => ffi::FigFormat::Jsonc,
             Format::Yaml => ffi::FigFormat::Yaml,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
-    InvalidArgument,
-    Parse,
-    OutOfMemory,
-    UnsupportedFormat,
-    Internal,
-}
-
-impl Error {
-    fn from_status(status: ffi::FigStatus) -> Result<(), Self> {
-        match status {
-            ffi::FigStatus::Ok => Ok(()),
-            ffi::FigStatus::InvalidArgument => Err(Self::InvalidArgument),
-            ffi::FigStatus::ParseError => Err(Self::Parse),
-            ffi::FigStatus::OutOfMemory => Err(Self::OutOfMemory),
-            ffi::FigStatus::UnsupportedFormat => Err(Self::UnsupportedFormat),
-            ffi::FigStatus::InternalError => Err(Self::Internal),
         }
     }
 }
@@ -59,6 +44,84 @@ impl Document {
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
         Ok(Self { raw })
     }
+
+    fn ptr(&self) -> *const ffi::FigDocument {
+        self.raw.as_ptr()
+    }
+
+    /// The root node, or `None` for an empty document.
+    pub(crate) fn root(&self) -> Option<FigNodeId> {
+        normalize(unsafe { ffi::fig_document_root(self.ptr()) })
+    }
+
+    pub(crate) fn kind(&self, node: FigNodeId) -> FigNodeKind {
+        unsafe { ffi::fig_node_kind(self.ptr(), node) }
+    }
+
+    pub(crate) fn first_child(&self, node: FigNodeId) -> Option<FigNodeId> {
+        normalize(unsafe { ffi::fig_node_first_child(self.ptr(), node) })
+    }
+
+    pub(crate) fn next_sibling(&self, node: FigNodeId) -> Option<FigNodeId> {
+        normalize(unsafe { ffi::fig_node_next_sibling(self.ptr(), node) })
+    }
+
+    pub(crate) fn child_count(&self, node: FigNodeId) -> usize {
+        unsafe { ffi::fig_node_child_count(self.ptr(), node) }
+    }
+
+    pub(crate) fn kv_key(&self, node: FigNodeId) -> Option<FigNodeId> {
+        normalize(unsafe { ffi::fig_keyvalue_key(self.ptr(), node) })
+    }
+
+    pub(crate) fn kv_value(&self, node: FigNodeId) -> Option<FigNodeId> {
+        normalize(unsafe { ffi::fig_keyvalue_value(self.ptr(), node) })
+    }
+
+    pub(crate) fn get_bool(&self, node: FigNodeId) -> Option<bool> {
+        let mut out = false;
+        unsafe { ffi::fig_node_bool(self.ptr(), node, &mut out) }.then_some(out)
+    }
+
+    /// The raw source text of a numeric scalar. Borrows document memory.
+    pub(crate) fn number_raw(&self, node: FigNodeId) -> Option<Result<&str, Error>> {
+        self.scalar_bytes(node, ffi::fig_node_number)
+            .map(|bytes| std::str::from_utf8(bytes).map_err(|_| Error::Utf8))
+    }
+
+    /// The bytes of a string scalar, as UTF-8. Borrows document memory.
+    pub(crate) fn get_str(&self, node: FigNodeId) -> Option<Result<&str, Error>> {
+        self.scalar_bytes(node, ffi::fig_node_string)
+            .map(|bytes| std::str::from_utf8(bytes).map_err(|_| Error::Utf8))
+    }
+
+    /// Shared helper for the byte-returning scalar accessors. The returned
+    /// slice borrows memory owned by the document (valid until drop), which we
+    /// tie to `&self`.
+    fn scalar_bytes(
+        &self,
+        node: FigNodeId,
+        accessor: unsafe extern "C" fn(
+            *const ffi::FigDocument,
+            FigNodeId,
+            *mut *const u8,
+            *mut usize,
+        ) -> bool,
+    ) -> Option<&[u8]> {
+        let mut ptr: *const u8 = std::ptr::null();
+        let mut len: usize = 0;
+        let ok = unsafe { accessor(self.ptr(), node, &mut ptr, &mut len) };
+        if !ok {
+            return None;
+        }
+        if len == 0 {
+            return Some(&[]);
+        }
+        // Safety: on success the ABI guarantees `ptr` points to `len` bytes
+        // owned by the document, valid until `fig_document_destroy` (i.e. our
+        // `Drop`). The returned borrow is bounded by `&self`.
+        Some(unsafe { std::slice::from_raw_parts(ptr, len) })
+    }
 }
 
 impl Drop for Document {
@@ -66,6 +129,14 @@ impl Drop for Document {
         unsafe {
             ffi::fig_document_destroy(self.raw.as_ptr());
         }
+    }
+}
+
+fn normalize(id: FigNodeId) -> Option<FigNodeId> {
+    if id == FIG_NODE_NONE {
+        None
+    } else {
+        Some(id)
     }
 }
 
@@ -82,6 +153,6 @@ mod tests {
     #[test]
     fn parse_error_is_reported() {
         let err = Document::parse(br#"{"name":"fig""#, Format::Json).unwrap_err();
-        assert_eq!(err, Error::Parse);
+        assert!(matches!(err, Error::Parse));
     }
 }

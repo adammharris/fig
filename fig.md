@@ -26,6 +26,10 @@ It is currently in early alpha. Most features are not implemented yet.
 Other planned features:
 - JSONC, JSON5, YAML (1.2.2), TOML (1.1)
 - Rust bindings + publish as crate
+- Richer parse errors across the C ABI: the parse entry point currently returns
+  only a status code (no message, line, or column). Consumers like Diaryx
+  surface YAML errors to users, so the ABI should be extended to return parse
+  diagnostics (message + source location).
 - Round-trip byte matching
 - Edit in place + sorting, both in files and in other plain text files
 - Conversion between different config formats

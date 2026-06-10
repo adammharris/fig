@@ -17,6 +17,7 @@ test {
     _ = @import("yaml/printer.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
+    _ = @import("c_api.zig");
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");
     }

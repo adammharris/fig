@@ -1,5 +1,6 @@
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
@@ -35,6 +36,12 @@ fn main() {
         panic!("`zig build` failed with status {status}");
     }
 
+    // Apple's `ld` rejects Zig's static archive ("not 8-byte aligned"); repack
+    // it with the system tools so it links.
+    if cargo_target.contains("apple-darwin") {
+        repack_archive_for_apple_ld(&prefix.join("lib").join("libfig.a"));
+    }
+
     println!(
         "cargo:rustc-link-search=native={}",
         prefix.join("lib").display()
@@ -50,6 +57,53 @@ fn main() {
         "cargo:rerun-if-changed={}",
         repo_root.join("include/fig.h").display()
     );
+}
+
+/// Repackage a Zig-produced static archive so Apple's `ld` accepts it.
+///
+/// Zig's archiver writes members with a zero file mode and without 8-byte
+/// alignment. LLD tolerates this, but ld64 errors with "not 8-byte aligned".
+/// Extract the members, restore read permissions (so `libtool` can open them),
+/// and rebuild the archive with `libtool`, whose output ld64 accepts.
+fn repack_archive_for_apple_ld(lib_path: &Path) {
+    let work = lib_path
+        .parent()
+        .expect("library path has a parent")
+        .join("repack");
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).expect("create repack work dir");
+
+    run(Command::new("ar").arg("x").arg(lib_path).current_dir(&work));
+
+    // Collect the extracted object files, fixing their permissions.
+    let mut objects = Vec::new();
+    for entry in fs::read_dir(&work).expect("read repack work dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|ext| ext == "o") {
+            run(Command::new("chmod").arg("u+rw").arg(&path));
+            objects.push(path);
+        }
+    }
+    assert!(
+        !objects.is_empty(),
+        "no object files extracted from {}",
+        lib_path.display()
+    );
+
+    let mut libtool = Command::new("libtool");
+    libtool.arg("-static").arg("-o").arg(lib_path).args(&objects);
+    run(&mut libtool);
+
+    let _ = fs::remove_dir_all(&work);
+}
+
+fn run(command: &mut Command) {
+    let status = command
+        .status()
+        .unwrap_or_else(|e| panic!("failed to run {command:?}: {e}"));
+    if !status.success() {
+        panic!("{command:?} failed with status {status}");
+    }
 }
 
 fn zig_target_for_cargo_target(target: &str, host: &str) -> Option<&'static str> {
