@@ -55,7 +55,41 @@ pub fn Editor(comptime Language: type) type {
             const parsed = try self.getParsed();
             const node = try parsed.ast.getValByPath(path);
             const span = parsed.span(node);
+            // For a YAML mapping value, reframe the whole `: value` so the new
+            // value is correctly shaped whatever its form — a scalar stays
+            // inline, a block collection descends onto the following lines —
+            // rather than splicing into the old value's slot, which can't
+            // change inline<->block (e.g. `k: []` -> a block list). JSON has no
+            // block style, so it keeps the direct splice.
+            if (Language == Yaml and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .key) {
+                try self.reframeMappingValue(parsed, path, span, replacement);
+                return;
+            }
             try self.replaceAtSpan(span, replacement);
+        }
+
+        /// Replace a mapping key's value, re-emitting `: value` through
+        /// `writeMapValue` so the new value's framing (inline scalar vs block
+        /// collection on following lines) is always valid regardless of the old
+        /// value's shape.
+        fn reframeMappingValue(self: *Self, parsed: Document, path: []const AST.PathSegment, val_span: Span, replacement: []const u8) !void {
+            const source = self.source.items;
+            const key_node = try parsed.ast.getKeyByPath(path);
+            const key_span = parsed.span(key_node);
+            const col = columnOf(source, key_span.start);
+            // The `:` indicator sits just past the key (a plain key cannot
+            // contain `:`, and a quoted key's `:` is inside `key_span`).
+            const colon = std.mem.indexOfScalarPos(u8, source, key_span.end, ':') orelse
+                return error.InvalidDocument;
+
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            // writeMapValue emits the `:` itself, so replace from the existing
+            // colon through the old value's end (a null value is a zero-width
+            // span at the colon, hence the `@max`).
+            try self.writeMapValue(&out, col, replacement);
+            const end = @max(val_span.end, colon + 1);
+            try self.replaceAtSpan(Span.init(colon, end), out.items);
         }
 
         pub fn replaceKeyAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
@@ -197,13 +231,17 @@ pub fn Editor(comptime Language: type) type {
             const nl = std.mem.indexOfScalar(u8, v, '\n');
             const first_line = std.mem.trimStart(u8, if (nl) |i| v[0..i] else v, " ");
             const is_block_scalar = first_line.len > 0 and (first_line[0] == '|' or first_line[0] == '>');
-            if (nl == null or is_block_scalar) {
+            // A block sequence is recognizable even on a single line (`- a`); it
+            // must still descend, since `key: - a` is invalid. A scalar value
+            // (no line break, not a sequence dash) stays inline. (A serialized
+            // scalar that would read as a dash is quoted, so this is safe.)
+            const is_seq = std.mem.startsWith(u8, first_line, "- ") or std.mem.eql(u8, first_line, "-");
+            if (is_block_scalar or (nl == null and !is_seq)) {
                 try out.appendSlice(self.allocator, ": ");
                 try reindentInto(out, self.allocator, v, col);
                 return;
             }
             // Block collection value: descend onto the next lines.
-            const is_seq = first_line.len > 0 and first_line[0] == '-';
             const child_col = if (is_seq) col else col + 2;
             try out.append(self.allocator, ':');
             var it = std.mem.splitScalar(u8, v, '\n');
@@ -686,4 +724,62 @@ test "yaml failed edit rolls back source and keeps editor usable" {
     // ...and the document still matches it, so a later valid edit works.
     try ed.replaceValAtPath(&.{.{ .key = "a" }}, "9");
     try expectSource(&ed, "a: 9\nb: 2\n");
+}
+
+// --- value reframing on replace (inline <-> block) ---
+
+test "yaml replace inline empty seq with a block list" {
+    var ed = try newYamlEditor("t: []\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "t" }}, "- a\n- b");
+    try expectSource(&ed, "t:\n- a\n- b\n");
+}
+
+test "yaml replace block list with an inline empty seq" {
+    var ed = try newYamlEditor("t:\n- a\n- b\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "t" }}, "[]");
+    try expectSource(&ed, "t: []\n");
+}
+
+test "yaml replace scalar with a single-item block list" {
+    var ed = try newYamlEditor("k: old\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "k" }}, "- a");
+    try expectSource(&ed, "k:\n- a\n");
+}
+
+test "yaml replace null value with a block list" {
+    var ed = try newYamlEditor("k:\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "k" }}, "- a");
+    try expectSource(&ed, "k:\n- a\n");
+}
+
+test "yaml replace scalar with a nested mapping" {
+    var ed = try newYamlEditor("m: x\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "m" }}, "a: 1\nb: 2");
+    try expectSource(&ed, "m:\n  a: 1\n  b: 2\n");
+}
+
+test "yaml replace scalar with scalar keeps it inline" {
+    var ed = try newYamlEditor("title: Hello\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "title" }}, "Hi");
+    try expectSource(&ed, "title: Hi\n");
+}
+
+test "yaml replace preserves a trailing line comment" {
+    var ed = try newYamlEditor("title: Hello # note\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "title" }}, "Hi");
+    try expectSource(&ed, "title: Hi # note\n");
+}
+
+test "yaml reframe a nested mapping value" {
+    var ed = try newYamlEditor("root:\n  c: []\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{ .{ .key = "root" }, .{ .key = "c" } }, "- x");
+    try expectSource(&ed, "root:\n  c:\n  - x\n");
 }
