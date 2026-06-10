@@ -98,6 +98,33 @@ pub fn next(self: *const AST, node: *const Node) ?Node {
     return if (self.nodes[node.id].next_sibling) |id| self.nodes[id] else null;
 }
 
+/// Returns a container's last child, following `next_sibling` to the end.
+/// Null when the container is empty. Errors if `node` is not a container.
+pub fn lastChild(self: *const AST, node: *const Node) !?Node {
+    var current = (try self.child(node)) orelse return null;
+    while (self.next(&current)) |sibling| current = sibling;
+    return current;
+}
+
+/// Returns the key node of a mapping's first entry, or null when empty.
+/// Used to recover a mapping's indentation column. Errors if `node` is not a
+/// mapping or its first child is not a keyvalue.
+pub fn firstChildKey(self: *const AST, node: *const Node) !?Node {
+    if (node.kind != .mapping) return error.NotAMapping;
+    const first = (try self.child(node)) orelse return null;
+    return switch (first.kind) {
+        .keyvalue => |kv| self.nodes[kv.key],
+        else => error.InvalidDocument,
+    };
+}
+
+/// Returns the raw node at `path` without unwrapping keyvalue pairs, so callers
+/// editing structure can see the whole `key: value` span. Compare
+/// `getKeyByPath`/`getValByPath`, which unwrap to the key or value node.
+pub fn getNodeByPath(self: *const AST, path: []const PathSegment) !Node {
+    return self.nodes[try self.getIdByPath(path)];
+}
+
 /// Represents part of a path in the Document structure. Used like:
 /// ```zig
 /// &[_]Document.PathSegment{

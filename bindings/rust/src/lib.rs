@@ -1,11 +1,17 @@
 mod de;
+mod editor;
 mod error;
 mod ffi;
+mod frontmatter;
+mod ser;
 
 use std::ptr::NonNull;
 
 pub use de::from_str;
+pub use editor::{Editor, Segment};
 pub use error::Error;
+pub use frontmatter::Frontmatter;
+pub use ser::to_string;
 
 use ffi::{FigNodeId, FigNodeKind, FIG_NODE_NONE};
 

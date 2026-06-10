@@ -9,6 +9,7 @@ pub enum FigStatus {
     ParseError = 2,
     OutOfMemory = 3,
     UnsupportedFormat = 4,
+    NotFound = 5,
     InternalError = 255,
 }
 
@@ -73,4 +74,183 @@ unsafe extern "C" {
         out_ptr: *mut *const u8,
         out_len: *mut usize,
     ) -> bool;
+}
+
+// ---- editing (write path) ----
+
+pub enum FigEditor {}
+pub enum FigFrontmatter {}
+
+/// One step of a path: `kind == 0` selects mapping key `key_ptr[0..key_len]`;
+/// `kind == 1` selects sequence element `index`. Mirrors `FigPathSegment` in
+/// `fig.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FigPathSegment {
+    pub kind: i32,
+    pub key_ptr: *const u8,
+    pub key_len: usize,
+    pub index: usize,
+}
+
+// `FigSpan`/`FigRegion`/`fig_embed_extract` mirror the low-level embed C ABI.
+// The Rust-facing consumer is `Frontmatter` (which uses `fig_fm_*`); these are
+// declared for parity with the header and for any future low-level wrapper.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
+pub struct FigSpan {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
+pub struct FigRegion {
+    pub open_fence: FigSpan,
+    pub content: FigSpan,
+    pub close_fence: FigSpan,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(dead_code)]
+pub enum FigEmbedType {
+    FrontmatterYaml = 0,
+    FrontmatterJson = 1,
+    EndmatterYaml = 2,
+}
+
+unsafe extern "C" {
+    pub fn fig_editor_create(
+        input: *const u8,
+        input_len: usize,
+        format: c_int,
+        out_editor: *mut *mut FigEditor,
+    ) -> FigStatus;
+    pub fn fig_editor_destroy(editor: *mut FigEditor);
+
+    pub fn fig_editor_replace_val(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        repl: *const u8,
+        repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_replace_key(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        repl: *const u8,
+        repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_insert_key(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        key: *const u8,
+        key_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_delete_key(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_append_seq(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_prepend_seq(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_remove_seq_item(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        index: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_source(
+        editor: *const FigEditor,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
+
+    #[allow(dead_code)]
+    pub fn fig_embed_extract(
+        input: *const u8,
+        input_len: usize,
+        embed_type: c_int,
+        out_region: *mut FigRegion,
+    ) -> FigStatus;
+
+    pub fn fig_fm_open(
+        markdown: *const u8,
+        markdown_len: usize,
+        out_fm: *mut *mut FigFrontmatter,
+    ) -> FigStatus;
+    pub fn fig_fm_destroy(fm: *mut FigFrontmatter);
+
+    pub fn fig_fm_replace_val(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        repl: *const u8,
+        repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_replace_key(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        repl: *const u8,
+        repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_insert_key(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        key: *const u8,
+        key_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_delete_key(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_append_seq(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_prepend_seq(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_remove_seq_item(
+        fm: *mut FigFrontmatter,
+        path: *const FigPathSegment,
+        path_len: usize,
+        index: usize,
+    ) -> FigStatus;
+    pub fn fig_fm_render(
+        fm: *mut FigFrontmatter,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
 }

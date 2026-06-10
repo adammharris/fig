@@ -100,6 +100,12 @@ pub fn extract(allocator: Allocator, source: []const u8, t: Type) !Embedded {
     return .{ .source = source, .type = t, .region = region, .document = document };
 }
 
+/// Locate the region of type `t` in `source` without parsing its content.
+/// Useful when a caller only needs the fence/content spans (e.g. to splice).
+pub fn locateRegion(source: []const u8, t: Type) Error!Region {
+    return locate(source, archetypeOf(t));
+}
+
 /// Parse an explicit content span as `t`'s inner format, no host scanning.
 pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Type) !Document {
     const slice = Span.of(u8, content, source);

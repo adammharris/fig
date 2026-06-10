@@ -21,6 +21,8 @@ pub enum Error {
     OutOfMemory,
     /// The requested format is not supported.
     UnsupportedFormat,
+    /// A path, key, or embedded region was not found.
+    NotFound,
     /// An unexpected internal error occurred.
     Internal,
     /// A scalar's bytes were not valid UTF-8.
@@ -39,6 +41,7 @@ impl Error {
             ffi::FigStatus::ParseError => Err(Self::Parse),
             ffi::FigStatus::OutOfMemory => Err(Self::OutOfMemory),
             ffi::FigStatus::UnsupportedFormat => Err(Self::UnsupportedFormat),
+            ffi::FigStatus::NotFound => Err(Self::NotFound),
             ffi::FigStatus::InternalError => Err(Self::Internal),
         }
     }
@@ -51,6 +54,7 @@ impl fmt::Display for Error {
             Error::Parse => f.write_str("failed to parse input"),
             Error::OutOfMemory => f.write_str("out of memory"),
             Error::UnsupportedFormat => f.write_str("unsupported format"),
+            Error::NotFound => f.write_str("path or region not found"),
             Error::Internal => f.write_str("internal error"),
             Error::Utf8 => f.write_str("scalar was not valid UTF-8"),
             Error::Number(raw) => write!(f, "invalid number: {raw}"),
@@ -62,6 +66,12 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 impl serde::de::Error for Error {
+    fn custom<T: fmt::Display>(msg: T) -> Self {
+        Error::Message(msg.to_string())
+    }
+}
+
+impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Error::Message(msg.to_string())
     }
