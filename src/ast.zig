@@ -74,6 +74,12 @@ pub const Node = struct {
         sequence: ?Id,
         mapping: ?Id,
         keyvalue: struct { key: Id, value: Id },
+        /// A `*name` alias: a reference to an anchored node. The payload is the
+        /// alias name (no leading `*`); the target is resolved on demand via
+        /// `resolveAlias` (kept out of the node so equal documents compare equal
+        /// regardless of whether resolution has run). A non-YAML printer never
+        /// sees this — `materialize` expands aliases to copied subtrees first.
+        alias: []const u8,
         pub const Number = struct {
             raw: []const u8,
             kind: enum { integer, float },
@@ -91,6 +97,7 @@ pub const Node = struct {
                 .sequence => |value| value == other.sequence,
                 .mapping => |value| value == other.mapping,
                 .keyvalue => |value| value.key == other.keyvalue.key and value.value == other.keyvalue.value,
+                .alias => |value| util.eql(u8, value, other.alias),
             };
         }
     };
@@ -172,6 +179,99 @@ pub fn getKeyByPath(self: *const AST, path: []const PathSegment) !Node {
         return self.nodes[node.kind.keyvalue.key]
     else
         return node;
+}
+
+// ===========================================
+// REFERENCE-LAYER RESOLUTION (read-only, opt-in)
+// ===========================================
+// The default navigation above never follows aliases or merge keys — an `alias`
+// node is an opaque leaf. These helpers resolve the YAML reference layer on
+// demand, for callers (materialize, the editor's "follow" mode) that explicitly
+// want it.
+
+pub const ResolveError = error{ UndefinedAlias, AliasCycle, TooDeep, NotAMapping };
+
+/// Resolves a `*name` alias node to the id of the anchor it references — the
+/// nearest `&name` defined before the alias (YAML aliases refer backward). For a
+/// non-alias node, returns its own id. The result may itself be an alias
+/// (`&x *y`); a caller wanting a concrete value follows the chain with a guard.
+pub fn resolveAlias(self: *const AST, node: Node) ResolveError!Node.Id {
+    const name = switch (node.kind) {
+        .alias => |n| n,
+        else => return node.id,
+    };
+    var best: ?Node.Id = null;
+    for (self.anchors) |a| {
+        if (a.node >= node.id) break; // sorted by id; anchors must precede the alias
+        if (util.eql(u8, a.name, name)) best = a.node;
+    }
+    return best orelse error.UndefinedAlias;
+}
+
+/// Fully resolves a node through any chain of aliases to a concrete node id,
+/// guarding against cycles (`&a [*a]`) and runaway depth.
+pub fn resolveDeep(self: *const AST, node: Node) ResolveError!Node.Id {
+    var current = node;
+    var hops: usize = 0;
+    while (current.kind == .alias) {
+        if (hops >= 100) return error.TooDeep;
+        hops += 1;
+        const target = try self.resolveAlias(current);
+        if (target == current.id) return error.AliasCycle;
+        current = self.nodes[target];
+    }
+    return current.id;
+}
+
+/// Looks up `key` in `mapping`, consulting a `<<` merge key when the key is not a
+/// direct child. The merge value is a single alias to a mapping, an inline
+/// mapping, or a sequence of those (earlier entries win); the host mapping's own
+/// keys take precedence over anything merged. Returns the value node id, or null
+/// if absent. Read-only and opt-in; cycle/recursion guarded.
+pub fn mergedChild(self: *const AST, mapping: Node, key: []const u8) ResolveError!?Node.Id {
+    var visited: [64]Node.Id = undefined;
+    return self.mergedChildInner(mapping, key, &visited, 0);
+}
+
+fn mergedChildInner(self: *const AST, mapping: Node, key: []const u8, visited: []Node.Id, depth: usize) ResolveError!?Node.Id {
+    if (mapping.kind != .mapping) return error.NotAMapping;
+    for (visited[0..depth]) |v| if (v == mapping.id) return error.AliasCycle;
+    if (depth >= visited.len) return error.TooDeep;
+    visited[depth] = mapping.id;
+
+    // Direct children win; remember a `<<` merge value for the fallback.
+    var merge_value: ?Node.Id = null;
+    var entry = mapping.kind.mapping;
+    while (entry) |cid| : (entry = self.nodes[cid].next_sibling) {
+        const kv = self.nodes[cid].kind.keyvalue;
+        const kkind = self.nodes[kv.key].kind;
+        if (kkind != .string) continue;
+        if (util.eql(u8, kkind.string, "<<")) {
+            merge_value = kv.value;
+        } else if (util.eql(u8, kkind.string, key)) {
+            return kv.value;
+        }
+    }
+
+    const mv = merge_value orelse return null;
+    const mvn = self.nodes[mv];
+    switch (mvn.kind) {
+        .sequence => |first| {
+            var e = first;
+            while (e) |eid| : (e = self.nodes[eid].next_sibling) {
+                const target = self.nodes[try self.resolveDeep(self.nodes[eid])];
+                if (target.kind != .mapping) continue;
+                if (try self.mergedChildInner(target, key, visited, depth + 1)) |found| return found;
+            }
+        },
+        .alias, .mapping => {
+            const target = self.nodes[try self.resolveDeep(mvn)];
+            if (target.kind == .mapping)
+                if (try self.mergedChildInner(target, key, visited, depth + 1)) |found| return found;
+        },
+        else => {},
+    }
+    return null;
 }
 
 /// Get a node at a specific path. If a keyvalue is found, get the value.

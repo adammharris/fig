@@ -164,6 +164,7 @@ pub const FigNodeKind = enum(c_int) {
     sequence = 5,
     mapping = 6,
     keyvalue = 7,
+    alias = 8,
 };
 
 fn handleFrom(doc: ?*const FigDocument) ?*const DocumentHandle {
@@ -199,6 +200,7 @@ pub export fn fig_node_kind(doc: ?*const FigDocument, node: FigNodeId) FigNodeKi
         .sequence => .sequence,
         .mapping => .mapping,
         .keyvalue => .keyvalue,
+        .alias => .alias,
     };
 }
 

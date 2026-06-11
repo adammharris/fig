@@ -27,6 +27,8 @@ pub const Kind = enum {
     block_header, // `|`/`>` plus chomping/indent indicators
     block_scalar, // raw body lines of a block scalar
     tag, // `!!type`, `!suffix`, `!handle!suffix`, or verbatim `!<...>` node property
+    anchor, // `&name` node property
+    alias, // `*name` whole node (a reference to an anchored node)
     doc_start, // `---` document start marker
     doc_end, // `...` document end marker
     end_of_file,
@@ -40,7 +42,7 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ InvalidIndent, TabIndent, InvalidBlockHeader, InvalidTag, OutOfMemory, UnclosedString };
+const TokenizeError = error{ InvalidIndent, TabIndent, InvalidBlockHeader, InvalidTag, InvalidAnchor, InvalidAlias, OutOfMemory, UnclosedString };
 
 const Line = struct {
     start: usize,
@@ -440,6 +442,36 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
             },
+            '&' => {
+                // `&name` anchors the node that follows — a property, like a tag,
+                // so `at_content_start` stays true. The name (`ns-anchor-char+`)
+                // runs to whitespace/EOL/flow-indicator and must be non-empty and
+                // separated from its node (`&a,b` in block is malformed).
+                if (self.flow_depth > 0 or at_content_start) {
+                    const end = anchorNameEnd(self.source, cursor + 1, line.end);
+                    if (end == cursor + 1 or !tagSeparated(self.source, end, line.end, self.flow_depth > 0))
+                        return TokenizeError.InvalidAnchor;
+                    try self.addToken(.init(.anchor, .init(cursor, end)));
+                    cursor = end;
+                } else {
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
+                }
+            },
+            '*' => {
+                // `*name` is an alias: a whole node referencing an earlier anchor.
+                // Unlike a property it IS the node, so `at_content_start` flips to
+                // false afterward.
+                if (self.flow_depth > 0 or at_content_start) {
+                    const end = anchorNameEnd(self.source, cursor + 1, line.end);
+                    if (end == cursor + 1 or !tagSeparated(self.source, end, line.end, self.flow_depth > 0))
+                        return TokenizeError.InvalidAlias;
+                    try self.addToken(.init(.alias, .init(cursor, end)));
+                    cursor = end;
+                    at_content_start = false;
+                } else {
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
+                }
+            },
             else => try self.handlePlain(cursor, &line, &cursor, &at_content_start),
         }
     }
@@ -676,6 +708,21 @@ fn tagEnd(source: []const u8, start: usize, line_end: usize, flow: bool) ?usize 
         }
     }
     _ = flow;
+    return end;
+}
+
+/// Scans an anchor/alias name (`ns-anchor-char+`) starting at `start` (just past
+/// the `&`/`*`). The name runs to whitespace, end-of-line, or a flow indicator
+/// (`,[]{}` are excluded from `ns-anchor-char`). Returns `start` for an empty
+/// name (the caller rejects it).
+fn anchorNameEnd(source: []const u8, start: usize, line_end: usize) usize {
+    var end = start;
+    while (end < line_end) : (end += 1) {
+        switch (source[end]) {
+            ' ', '\t', ',', '[', ']', '{', '}' => break,
+            else => {},
+        }
+    }
     return end;
 }
 
@@ -966,10 +1013,10 @@ fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
 /// i.e. the next node is the document root, which has no indentation floor.
 fn precededOnlyByTrivia(self: *const Tokenizer) bool {
     for (self.tokens.items) |t| switch (t.kind) {
-        // A `.tag` (and, later, `&anchor`) is a node property, not structural
-        // content: a root node keeps its root position when tag-prefixed, so a
-        // tagged multi-line root scalar (`!!str\nd\ne`) still gathers its lines.
-        .doc_start, .newline, .whitespace, .comment, .tag => {},
+        // A `.tag`/`.anchor` is a node property, not structural content: a root
+        // node keeps its root position when prefixed by one, so a tagged/anchored
+        // multi-line root scalar (`!!str\nd\ne`) still gathers its lines.
+        .doc_start, .newline, .whitespace, .comment, .tag, .anchor => {},
         else => return false,
     };
     return true;
@@ -1110,6 +1157,50 @@ test "yaml tag: a bang mid-scalar stays plain content" {
             tok(.scalar, 0, 3),
             tok(.newline, 3, 4),
             tok(.end_of_file, 4, 4),
+        },
+    );
+}
+
+test "yaml anchor: property before a value" {
+    try testTokenizer(
+        "k: &a 1\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.anchor, 3, 5),
+            tok(.whitespace, 5, 6),
+            tok(.scalar, 6, 7),
+            tok(.newline, 7, 8),
+            tok(.end_of_file, 8, 8),
+        },
+    );
+}
+
+test "yaml alias: whole-node reference" {
+    try testTokenizer(
+        "*a\n",
+        &.{
+            tok(.alias, 0, 2),
+            tok(.newline, 2, 3),
+            tok(.end_of_file, 3, 3),
+        },
+    );
+}
+
+test "yaml anchor/alias: empty name and unseparated forms are invalid" {
+    try testTokenizerError("k: & x\n", error.InvalidAnchor); // empty name
+    try testTokenizerError("k: *\n", error.InvalidAlias); // empty name
+    try testTokenizerError("- &a,b\n", error.InvalidAnchor); // unseparated in block
+}
+
+test "yaml anchor/alias: ampersand and star mid-scalar stay plain" {
+    try testTokenizer(
+        "a&b*c\n",
+        &.{
+            tok(.scalar, 0, 5),
+            tok(.newline, 5, 6),
+            tok(.end_of_file, 6, 6),
         },
     );
 }

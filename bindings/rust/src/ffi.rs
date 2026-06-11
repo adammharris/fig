@@ -41,6 +41,7 @@ pub enum FigNodeKind {
     Sequence = 5,
     Mapping = 6,
     Keyvalue = 7,
+    Alias = 8,
 }
 
 unsafe extern "C" {

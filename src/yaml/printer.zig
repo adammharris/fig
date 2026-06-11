@@ -28,6 +28,11 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
         .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
         .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
         .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth),
+        .alias => |name| {
+            try writer.writeByte('*');
+            try writer.writeAll(name);
+            try writer.writeByte('\n');
+        },
     }
 }
 
@@ -130,6 +135,10 @@ fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writ
         .string => |value| try printScalar(writer, value),
         .sequence => |child| if (child == null) try writer.writeAll("[]") else try writer.writeAll("[...]"),
         .mapping => |child| if (child == null) try writer.writeAll("{}") else try writer.writeAll("{...}"),
+        .alias => |name| {
+            try writer.writeByte('*');
+            try writer.writeAll(name);
+        },
         .keyvalue => unreachable,
     }
 }
