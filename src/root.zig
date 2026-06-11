@@ -15,6 +15,7 @@ test {
     _ = @import("yaml/tokenizer.zig");
     _ = @import("yaml/parser.zig");
     _ = @import("yaml/printer.zig");
+    _ = @import("yaml/materialize.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("c_api.zig");

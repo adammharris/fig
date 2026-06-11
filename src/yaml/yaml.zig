@@ -5,6 +5,7 @@ const AST = @import("../ast.zig");
 pub const Parser = @import("parser.zig");
 pub const Tokenizer = @import("tokenizer.zig");
 pub const Printer = @import("printer.zig");
+pub const Materialize = @import("materialize.zig");
 pub const Type = enum {
     v1_2_2,
     // TODO: earlier versions of YAML spec?
@@ -19,4 +20,9 @@ pub const Language = struct {
     }
     pub const print = Printer.print;
     pub const printNode = Printer.printNode;
+    /// Collapse the reference layer (aliases/merges/tags/anchors) into a core AST
+    /// before handing it to a non-YAML printer. Optional Language decl: callers
+    /// gate on `@hasDecl(Lang, "materialize")`.
+    pub const materialize = Materialize.materialize;
+    pub const TagMode = Materialize.TagMode;
 };
