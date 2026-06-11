@@ -52,8 +52,14 @@ node_anchor_spans: std.ArrayList(?Span) = .empty,
 anchors: std.ArrayList(AST.Anchor) = .empty,
 // Node properties (`!tag`, `&anchor`) seen but not yet attached to the node they
 // decorate. Consumed by the next `addNode`.
-pending_tag: ?struct { text: []const u8, span: Span } = null,
-pending_anchor: ?struct { name: []const u8, span: Span } = null,
+pending_tag: ?PendingTag = null,
+pending_anchor: ?PendingAnchor = null,
+// When a second property of the same kind appears before its node is built, the
+// earlier one belongs to a container that opens first and its first key/element
+// carries the later one (`&map\n&key k: v`, `top: &node\n  &k key: v`). The
+// earlier property is parked here and claimed by the next `openContainer`.
+container_tag: ?PendingTag = null,
+container_anchor: ?PendingAnchor = null,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
@@ -66,9 +72,16 @@ value_only_indents: usize = 0,
 root: ?AST.Node.Id = null,
 doc_started: bool = false,
 doc_ended: bool = false,
+// True while still on the `---` marker line. A block collection may not begin
+// there (`--- a: b`, `--- - x` are invalid — only a scalar or flow node fits on
+// the marker line); cleared at the first newline.
+on_doc_start_line: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
+
+const PendingTag = struct { text: []const u8, span: Span };
+const PendingAnchor = struct { name: []const u8, span: Span };
 
 const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty, UndefinedAlias };
 const ParserError = ParseError || std.mem.Allocator.Error;
@@ -129,6 +142,12 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 if (self.value_only_indents > 0) {
                     self.value_only_indents -= 1;
                     _ = self.advance();
+                } else if (self.force_new_container and (self.pending_anchor != null or self.pending_tag != null)) {
+                    // The indent being closed held only a node property (`seq:\n
+                    // &a\n- x`): it opened no container, so skip the close and keep
+                    // the property for the value at the dedented (indentless) level.
+                    self.force_new_container = false;
+                    _ = self.advance();
                 } else {
                     try self.closePendingEmptyValue();
                     const dedent = self.advance();
@@ -145,12 +164,16 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     }
                 }
             },
-            .newline => _ = self.advance(),
+            .newline => {
+                self.on_doc_start_line = false;
+                _ = self.advance();
+            },
             .doc_start => {
                 // A second document start (or one after content) is multi-doc,
                 // which is out of scope.
                 if (self.doc_started or self.nodes.items.len > 0) return ParseError.MultipleDocuments;
                 self.doc_started = true;
+                self.on_doc_start_line = true;
                 _ = self.advance();
             },
             .doc_end => {
@@ -159,6 +182,12 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
             },
             .dash => {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
+                // A block sequence cannot begin on the `---` marker line.
+                if (self.on_doc_start_line) return ParseError.UnexpectedToken;
+                // A block sequence's `-` must begin its own line. A property on the
+                // same line before it (`&anchor - x`) is invalid — unlike a compact
+                // `: - x` value, which is parsed in parseMappingValue, not here.
+                if (self.pendingPropOnLineOf(self.peek().span.start)) return ParseError.UnexpectedToken;
                 try self.closeSequenceItemContinuation();
                 try self.parseSequenceEntry();
             },
@@ -190,6 +219,8 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
                 if (self.isMappingStart()) {
+                    // A block mapping cannot begin on the `---` marker line.
+                    if (self.on_doc_start_line) return ParseError.UnexpectedToken;
                     try self.parseMappingEntry();
                 } else if (self.container_stack.items.len == 0 and self.root == null) {
                     // A bare scalar is a valid single-node document, but a plain
@@ -230,6 +261,10 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 if (self.container_stack.items.len == 0 and self.root == null) {
                     const value_id = try self.parseBlockScalar();
                     try self.finishValue(value_id);
+                } else if (self.force_new_container and self.currentAwaitsValue()) {
+                    // A block scalar written on the line after its key (`k:\n  >1`).
+                    const value_id = try self.parseBlockScalar();
+                    try self.attachDeferredValue(value_id);
                 } else {
                     return ParseError.UnexpectedToken;
                 }
@@ -265,7 +300,20 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 // attaches it). Covers `!!str foo`, `&a [1]`, `&a key: v`, an
                 // anchored/tagged root, an anchor on its own line, etc.
                 if (self.doc_ended) return ParseError.MultipleDocuments;
+                const in_container = self.container_stack.items.len > 0;
                 try self.consumePendingProperties();
+                // A property standing alone on its line inside a container is valid
+                // only as a deferred value that out-indents its key/dash (a fresh
+                // indent over a mapping awaiting a value or a sequence after a dash).
+                // Otherwise it is misplaced: at the key's own column (`seq:\n&a\n-
+                // x`), or floating in a sequence with no dash (`- a\n&b\n- c`).
+                if (in_container) switch (self.peek().kind) {
+                    .newline, .dedent, .end_of_file => {
+                        if (!(self.force_new_container and self.currentAwaitsValue()))
+                            return ParseError.UnexpectedToken;
+                    },
+                    else => {},
+                };
             },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
@@ -277,6 +325,10 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         const id = try self.closeContainer(self.peek().span.end);
         try self.finishValue(id);
     }
+
+    // A parked container property that never opened a container means two
+    // properties of one kind decorated a single node (`&a &b scalar`) — invalid.
+    if (self.container_anchor != null or self.container_tag != null) return ParseError.DuplicateProperty;
 
     // Every alias must reference an anchor defined earlier in the document.
     try self.resolveAliasesOrError();
@@ -811,14 +863,12 @@ fn parseFlowNode(self: *Parser) ParserError!AST.Node.Id {
     while (true) {
         switch (self.peek().kind) {
             .tag => {
-                if (self.pending_tag != null) return ParseError.DuplicateProperty;
                 const t = self.advance();
-                self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+                try self.stashTag(t.source(self.source), t.span);
             },
             .anchor => {
-                if (self.pending_anchor != null) return ParseError.DuplicateProperty;
                 const a = self.advance();
-                self.pending_anchor = .{ .name = a.source(self.source)[1..], .span = a.span };
+                try self.stashAnchor(a.source(self.source)[1..], a.span);
             },
             else => break,
         }
@@ -1071,10 +1121,26 @@ fn ensureContainer(self: *Parser, kind: ContainerKind) ParserError!AST.Node.Id {
 }
 
 fn openContainer(self: *Parser, kind: ContainerKind, start: usize) ParserError!AST.Node.Id {
-    const id = try self.addNode(switch (kind) {
+    const empty: AST.Node.Kind = switch (kind) {
         .sequence => .{ .sequence = null },
         .mapping => .{ .mapping = null },
-    }, .init(start, start));
+    };
+    // A container claims a parked container-slot property (an anchor/tag that
+    // preceded it while another property is pending for its first child); the
+    // pending property is preserved for that child. With no parked property, the
+    // container takes the pending one normally (a lone `&a` before a collection).
+    const id = if (self.container_anchor != null or self.container_tag != null) blk: {
+        const child_anchor = self.pending_anchor;
+        const child_tag = self.pending_tag;
+        self.pending_anchor = self.container_anchor;
+        self.pending_tag = self.container_tag;
+        self.container_anchor = null;
+        self.container_tag = null;
+        const new_id = try self.addNode(empty, .init(start, start));
+        self.pending_anchor = child_anchor;
+        self.pending_tag = child_tag;
+        break :blk new_id;
+    } else try self.addNode(empty, .init(start, start));
 
     try self.container_stack.append(self.allocator, .{
         .id = id,
@@ -1557,19 +1623,51 @@ fn consumePendingProperties(self: *Parser) ParserError!void {
         self.skipTriviaNoNewline();
         switch (self.peek().kind) {
             .tag => {
-                if (self.pending_tag != null) return ParseError.DuplicateProperty;
                 const t = self.advance();
-                self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+                try self.stashTag(t.source(self.source), t.span);
             },
             .anchor => {
-                if (self.pending_anchor != null) return ParseError.DuplicateProperty;
                 const a = self.advance();
                 // Strip the leading `&`; the name is the rest of the token.
-                self.pending_anchor = .{ .name = a.source(self.source)[1..], .span = a.span };
+                try self.stashAnchor(a.source(self.source)[1..], a.span);
             },
             else => break,
         }
     }
+}
+
+/// True when a pending anchor/tag property sits on the same source line as the
+/// token starting at `at` (no newline between them).
+fn pendingPropOnLineOf(self: *const Parser, at: usize) bool {
+    const sameLine = struct {
+        fn f(src: []const u8, from: usize, to: usize) bool {
+            return from <= to and std.mem.indexOfScalar(u8, src[from..to], '\n') == null;
+        }
+    }.f;
+    if (self.pending_anchor) |p| if (sameLine(self.source, p.span.end, at)) return true;
+    if (self.pending_tag) |p| if (sameLine(self.source, p.span.end, at)) return true;
+    return false;
+}
+
+/// Record an anchor as pending. A second pending anchor means the first belongs
+/// to a container about to open (parked in `container_anchor`); a third is a real
+/// duplicate on one node.
+fn stashAnchor(self: *Parser, name: []const u8, span: Span) ParserError!void {
+    if (self.pending_anchor) |prev| {
+        if (self.container_anchor != null) return ParseError.DuplicateProperty;
+        self.container_anchor = prev;
+        self.pending_anchor = null;
+    }
+    self.pending_anchor = .{ .name = name, .span = span };
+}
+
+fn stashTag(self: *Parser, text: []const u8, span: Span) ParserError!void {
+    if (self.pending_tag) |prev| {
+        if (self.container_tag != null) return ParseError.DuplicateProperty;
+        self.container_tag = prev;
+        self.pending_tag = null;
+    }
+    self.pending_tag = .{ .text = text, .span = span };
 }
 
 fn startOfCurrentToken(self: *const Parser) usize {
@@ -1762,6 +1860,58 @@ test "yaml merge: cyclic alias does not hang" {
     try testing.expect((try doc.ast.mergedChild(a, "k")) != null);
     // A missing key forces the merge to be followed → cycle detected, not a hang.
     try testing.expectError(error.AliasCycle, doc.ast.mergedChild(a, "absent"));
+}
+
+test "yaml anchor: collection and its first key both anchored" {
+    // 6BFJ/7BMT shape: the container claims the earlier property, its first key
+    // the later one.
+    const doc = try Parser.parse(testing.allocator, "top: &node\n  &k key: one\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const top = try doc.ast.getValByPath(&.{.{ .key = "top" }});
+    try testing.expect(top.kind == .mapping);
+    try testing.expectEqualSlices(u8, "node", doc.ast.node_anchors[top.id].?);
+}
+
+test "yaml anchor: next-line value must out-indent its key" {
+    // SKE5 valid (anchor out-indents), G9HC invalid (anchor at the key's column).
+    {
+        const doc = try Parser.parse(testing.allocator, "seq:\n &a\n- x\n", .v1_2_2);
+        defer doc.deinit(testing.allocator);
+        const seq = try doc.ast.getValByPath(&.{.{ .key = "seq" }});
+        try testing.expect(seq.kind == .sequence);
+        try testing.expectEqualSlices(u8, "a", doc.ast.node_anchors[seq.id].?);
+    }
+    try testParserError("seq:\n&a\n- x\n", error.UnexpectedToken); // G9HC
+}
+
+test "yaml anchor: misplaced property is rejected" {
+    try testParserError("&anchor - sequence entry\n", error.UnexpectedToken); // SY6V (same line)
+    try testParserError("- a\n&b\n- c\n", error.UnexpectedToken); // GT5M (floating in seq)
+}
+
+test "yaml: a block collection cannot begin on the --- marker line" {
+    try testParserError("--- a: b\n", error.UnexpectedToken);
+    try testParserError("--- &anchor a: b\n", error.UnexpectedToken); // CXX2
+    try testParserError("--- - x\n", error.UnexpectedToken);
+    // ...but a mapping on the line after the marker is fine.
+    const doc = try Parser.parse(testing.allocator, "---\na: b\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "b", (try doc.ast.getValByPath(&.{.{ .key = "a" }})).kind.string);
+}
+
+test "yaml plain scalar: trailing comment on a continuation line" {
+    const doc = try Parser.parse(testing.allocator, "b: plain\n value  # comment\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "plain value", (try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind.string);
+}
+
+test "yaml block scalar: next-line header with explicit indent over the owner column" {
+    // `folded:\n  >1\n value`: content indents from the key column (0) + 1, not
+    // the header line's indent.
+    const doc = try Parser.parse(testing.allocator, "folded:\n  >1\n value\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const v = try doc.ast.getValByPath(&.{.{ .key = "folded" }});
+    try testing.expect(v.kind == .string);
 }
 
 test "yaml tag: untagged node has null side-table entry" {
