@@ -100,21 +100,26 @@ fn printSequenceMapping(writer: *Writer, document: *const AST, first_pair: AST.N
 fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usize) Writer.Error!void {
     const value = document.nodes[kv.value];
     try writeIndent(writer, depth);
+    try writeProps(writer, document, kv.key); // `&k key:` / `!!str key:`
     try printScalar(writer, document.nodes[kv.key].kind.string);
     switch (value.kind) {
         .mapping => |child| {
+            try writer.writeByte(':');
+            try writePropsAfterColon(writer, document, kv.value); // `: &a` before the block
             if (child == null) {
-                try writer.writeAll(": {}\n");
+                try writer.writeAll(" {}\n");
             } else {
-                try writer.writeAll(":\n");
+                try writer.writeByte('\n');
                 try printMapping(writer, document, child, depth + 1);
             }
         },
         .sequence => |child| {
+            try writer.writeByte(':');
+            try writePropsAfterColon(writer, document, kv.value);
             if (child == null) {
-                try writer.writeAll(": []\n");
+                try writer.writeAll(" []\n");
             } else {
-                try writer.writeAll(":\n");
+                try writer.writeByte('\n');
                 try printSequence(writer, document, child, depth + 1);
             }
         },
@@ -128,6 +133,7 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
 
 fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writer.Error!void {
     const node = document.nodes[id];
+    try writeProps(writer, document, id);
     switch (node.kind) {
         .null_ => try writer.writeAll("null"),
         .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
@@ -141,6 +147,37 @@ fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writ
         },
         .keyvalue => unreachable,
     }
+}
+
+/// Emit a node's anchor/tag properties (`&name `, `!tag `) from the AST
+/// side-tables, so a full reserialize keeps the reference layer intact (an
+/// anchored value stays anchored, rather than leaving any alias to it dangling).
+/// Order matches YAML's `c-ns-properties`: anchor then tag, both optional.
+fn writeProps(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!void {
+    if (id < ast.node_anchors.len) if (ast.node_anchors[id]) |name| {
+        try writer.writeByte('&');
+        try writer.writeAll(name);
+        try writer.writeByte(' ');
+    };
+    if (id < ast.node_tags.len) if (ast.node_tags[id]) |tag| {
+        try writer.writeAll(tag);
+        try writer.writeByte(' ');
+    };
+}
+
+/// Like `writeProps` but for the position right after a mapping value's `:`,
+/// before a block collection or `{}`/`[]`: emits ` &name`/` !tag` with a leading
+/// (not trailing) space, so `key:` becomes `key: &a` and a propless value keeps
+/// its original `key:` / `key: {}` framing.
+fn writePropsAfterColon(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!void {
+    if (id < ast.node_anchors.len) if (ast.node_anchors[id]) |name| {
+        try writer.writeAll(" &");
+        try writer.writeAll(name);
+    };
+    if (id < ast.node_tags.len) if (ast.node_tags[id]) |tag| {
+        try writer.writeByte(' ');
+        try writer.writeAll(tag);
+    };
 }
 
 fn printScalar(writer: *Writer, raw: []const u8) Writer.Error!void {
