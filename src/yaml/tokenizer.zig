@@ -26,6 +26,7 @@ pub const Kind = enum {
     whitespace,
     block_header, // `|`/`>` plus chomping/indent indicators
     block_scalar, // raw body lines of a block scalar
+    tag, // `!!type`, `!suffix`, `!handle!suffix`, or verbatim `!<...>` node property
     doc_start, // `---` document start marker
     doc_end, // `...` document end marker
     end_of_file,
@@ -39,7 +40,7 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ InvalidIndent, TabIndent, InvalidBlockHeader, OutOfMemory, UnclosedString };
+const TokenizeError = error{ InvalidIndent, TabIndent, InvalidBlockHeader, InvalidTag, OutOfMemory, UnclosedString };
 
 const Line = struct {
     start: usize,
@@ -417,6 +418,28 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                     try self.handlePlain(cursor, &line, &cursor, &at_content_start);
                 }
             },
+            '!' => {
+                // A `!` at node start (or anywhere in flow) introduces a tag
+                // property on the node that follows. `at_content_start` stays
+                // true: the tagged node is still to come (mirrors `?`/anchors).
+                // Otherwise (`!` is unreachable mid-scalar — `scalarEnd` swallows
+                // it) we defer to `handlePlain`.
+                if ((self.flow_depth > 0 or at_content_start)) {
+                    if (tagEnd(self.source, cursor, line.end, self.flow_depth > 0)) |end| {
+                        // The tag must be separated from its node; `!!str,xxx` and
+                        // `!a{}b` (a flow indicator butted onto the tag in block
+                        // context) are malformed.
+                        if (!tagSeparated(self.source, end, line.end, self.flow_depth > 0))
+                            return TokenizeError.InvalidTag;
+                        try self.addToken(.init(.tag, .init(cursor, end)));
+                        cursor = end;
+                    } else {
+                        return TokenizeError.InvalidTag;
+                    }
+                } else {
+                    try self.handlePlain(cursor, &line, &cursor, &at_content_start);
+                }
+            },
             else => try self.handlePlain(cursor, &line, &cursor, &at_content_start),
         }
     }
@@ -624,6 +647,49 @@ fn addScalar(self: *Tokenizer, start: usize, end: usize) TokenizeError!void {
     if (trimmed_end > start) {
         try self.addToken(.init(.scalar, .init(start, trimmed_end)));
     }
+}
+
+/// If a tag property begins at `start` (`source[start] == '!'`), returns the
+/// index just past it. Handles the verbatim form `!<...>` (scanned to its
+/// closing `>`, since it may contain `,`/`:`), the shorthand forms (`!`, `!!type`,
+/// `!suffix`, `!handle!suffix`) which run to a whitespace/EOL terminator (and, in
+/// flow, to a flow indicator). A bare `!` (the non-specific tag) is valid.
+/// Returns null only for a malformed verbatim tag (unclosed or empty `!<>`).
+fn tagEnd(source: []const u8, start: usize, line_end: usize, flow: bool) ?usize {
+    var end = start + 1;
+    if (end < line_end and source[end] == '<') {
+        end += 1;
+        const verbatim_start = end;
+        while (end < line_end and source[end] != '>') end += 1;
+        if (end >= line_end or end == verbatim_start) return null;
+        return end + 1; // include the closing `>`
+    }
+    while (end < line_end) : (end += 1) {
+        switch (source[end]) {
+            // Whitespace ends a tag in any context; flow indicators are never
+            // valid tag characters (`ns-tag-char` excludes `,[]{}`), so they end
+            // the shorthand too. The separation check in the caller then decides
+            // whether what follows is legal (a node after a space, or — in flow —
+            // a flow indicator) or a malformed tag like `!!str,`/`!a{}b`.
+            ' ', '\t', ',', '[', ']', '{', '}' => break,
+            else => {},
+        }
+    }
+    _ = flow;
+    return end;
+}
+
+/// A tag property must be separated from the node it decorates: by whitespace or
+/// end-of-line in any context, or — inside flow — by a flow indicator (so a
+/// tagged-null flow entry like `[!!str, x]` is legal). A tag butted directly
+/// against other content (`!!str,xxx`, `!a{}b`) in block context is malformed.
+fn tagSeparated(source: []const u8, end: usize, line_end: usize, flow: bool) bool {
+    if (end >= line_end) return true;
+    return switch (source[end]) {
+        ' ', '\t' => true,
+        ',', '[', ']', '{', '}' => flow,
+        else => false,
+    };
 }
 
 fn scalarEnd(source: []const u8, start: usize, line_end: usize, flow: bool) usize {
@@ -900,7 +966,10 @@ fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
 /// i.e. the next node is the document root, which has no indentation floor.
 fn precededOnlyByTrivia(self: *const Tokenizer) bool {
     for (self.tokens.items) |t| switch (t.kind) {
-        .doc_start, .newline, .whitespace, .comment => {},
+        // A `.tag` (and, later, `&anchor`) is a node property, not structural
+        // content: a root node keeps its root position when tag-prefixed, so a
+        // tagged multi-line root scalar (`!!str\nd\ne`) still gathers its lines.
+        .doc_start, .newline, .whitespace, .comment, .tag => {},
         else => return false,
     };
     return true;
@@ -964,6 +1033,90 @@ test "yaml flat mapping" {
             tok(.end_of_file, 18, 18),
         },
     );
+}
+
+test "yaml tag: core shorthand on mapping value" {
+    try testTokenizer(
+        "k: !!int 5\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.colon, 1, 2),
+            tok(.whitespace, 2, 3),
+            tok(.tag, 3, 8),
+            tok(.whitespace, 8, 9),
+            tok(.scalar, 9, 10),
+            tok(.newline, 10, 11),
+            tok(.end_of_file, 11, 11),
+        },
+    );
+}
+
+test "yaml tag: local tag at node start" {
+    try testTokenizer(
+        "!foo bar\n",
+        &.{
+            tok(.tag, 0, 4),
+            tok(.whitespace, 4, 5),
+            tok(.scalar, 5, 8),
+            tok(.newline, 8, 9),
+            tok(.end_of_file, 9, 9),
+        },
+    );
+}
+
+test "yaml tag: verbatim form scans to closing bracket" {
+    try testTokenizer(
+        "!<tag:x> y\n",
+        &.{
+            tok(.tag, 0, 8),
+            tok(.whitespace, 8, 9),
+            tok(.scalar, 9, 10),
+            tok(.newline, 10, 11),
+            tok(.end_of_file, 11, 11),
+        },
+    );
+}
+
+test "yaml tag: bare non-specific tag" {
+    try testTokenizer(
+        "!\n",
+        &.{
+            tok(.tag, 0, 1),
+            tok(.newline, 1, 2),
+            tok(.end_of_file, 2, 2),
+        },
+    );
+}
+
+test "yaml tag: in flow collection" {
+    try testTokenizer(
+        "[!!str x]\n",
+        &.{
+            tok(.flow_seq_start, 0, 1),
+            tok(.tag, 1, 6),
+            tok(.whitespace, 6, 7),
+            tok(.scalar, 7, 8),
+            tok(.flow_seq_end, 8, 9),
+            tok(.newline, 9, 10),
+            tok(.end_of_file, 10, 10),
+        },
+    );
+}
+
+test "yaml tag: a bang mid-scalar stays plain content" {
+    try testTokenizer(
+        "a!b\n",
+        &.{
+            tok(.scalar, 0, 3),
+            tok(.newline, 3, 4),
+            tok(.end_of_file, 4, 4),
+        },
+    );
+}
+
+test "yaml tag: not separated from a flow indicator in block is invalid" {
+    try testTokenizerError("!!str,xxx\n", error.InvalidTag);
+    try testTokenizerError("!a{}b x\n", error.InvalidTag);
 }
 
 test "yaml flat sequence" {

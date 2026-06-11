@@ -18,6 +18,12 @@ pub fn deinit(self: *AST) void {
     }
     self.allocator.free(self.owned_strings);
     self.allocator.free(self.nodes);
+    // Free only the OUTER slices of the YAML reference-layer side-tables. Their
+    // inner strings (tag text, anchor names) alias `self.source` or already live
+    // in `owned_strings`; freeing them here would double-free.
+    self.allocator.free(self.node_tags);
+    self.allocator.free(self.node_anchors);
+    self.allocator.free(self.anchors);
 }
 
 allocator: Allocator,
@@ -28,6 +34,28 @@ root: Node.Id,
 
 /// Complete node tree, such that `ast.nodes[node.id] == node`
 nodes: []const Node,
+
+// ── YAML reference/annotation layer (side-tables) ──────────────────────────
+// These hold the DECODED data the resolver/materializer/printers need. Printers
+// take `*const AST` (never `Document`), so the decoded names/strings must live
+// here; only the source *spans* of the `&name`/`!tag` tokens live on `Document`.
+// All three are empty (`&.{}`) for documents with no anchors/aliases/tags, and
+// for non-YAML formats.
+
+/// Indexed by node id: the decoded tag string attached to that node (e.g.
+/// `"!!str"`, `"!foo"`), or null. Empty when the document declares no tags.
+node_tags: []const ?[]const u8 = &.{},
+
+/// Indexed by node id: the anchor NAME defined on that node (no leading `&`),
+/// or null. Empty when the document declares no anchors.
+node_anchors: []const ?[]const u8 = &.{},
+
+/// Anchor definitions in source/id order (redefinition allowed → duplicate
+/// names permitted). Consulted by `resolveAlias`/`mergedChild`. Empty when the
+/// document declares no anchors.
+anchors: []const Anchor = &.{},
+
+pub const Anchor = struct { name: []const u8, node: Node.Id };
 
 /// Represents a unit of data in an AST.
 pub const Node = struct {
