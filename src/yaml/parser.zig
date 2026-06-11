@@ -50,9 +50,10 @@ node_anchors: std.ArrayList(?[]const u8) = .empty,
 node_tag_spans: std.ArrayList(?Span) = .empty,
 node_anchor_spans: std.ArrayList(?Span) = .empty,
 anchors: std.ArrayList(AST.Anchor) = .empty,
-// A node property (`!tag`; later `&anchor`) seen but not yet attached to the
-// node it decorates. Consumed by the next `addNode`.
+// Node properties (`!tag`, `&anchor`) seen but not yet attached to the node they
+// decorate. Consumed by the next `addNode`.
 pending_tag: ?struct { text: []const u8, span: Span } = null,
+pending_anchor: ?struct { name: []const u8, span: Span } = null,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
@@ -69,7 +70,7 @@ doc_ended: bool = false,
 allocator: std.mem.Allocator,
 source: []const u8 = "",
 
-const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty };
+const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty, UndefinedAlias };
 const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
@@ -207,6 +208,22 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     return ParseError.UnexpectedToken;
                 }
             },
+            .alias => {
+                // An alias is a whole value node (`k: *a`, `- *a`, `*a : b`).
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                try self.closeSequenceItemContinuation();
+                if (self.isMappingStart()) {
+                    try self.parseMappingEntry();
+                } else if (self.container_stack.items.len == 0 and self.root == null) {
+                    const value_id = try self.parseAlias();
+                    try self.finishValue(value_id);
+                } else if (self.force_new_container and self.currentAwaitsValue()) {
+                    const value_id = try self.parseAlias();
+                    try self.attachDeferredValue(value_id);
+                } else {
+                    return ParseError.UnexpectedToken;
+                }
+            },
             .block_header => {
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.closeSequenceItemContinuation();
@@ -242,10 +259,11 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     try self.attachDeferredValue(node_id);
                 }
             },
-            .tag => {
+            .tag, .anchor => {
                 // A node property at a value/root position: stash it; the node it
                 // decorates is parsed on a following loop iteration (and `addNode`
-                // attaches it). Covers `!!str foo`, `!!seq [1]`, a tagged root, etc.
+                // attaches it). Covers `!!str foo`, `&a [1]`, `&a key: v`, an
+                // anchored/tagged root, an anchor on its own line, etc.
                 if (self.doc_ended) return ParseError.MultipleDocuments;
                 try self.consumePendingProperties();
             },
@@ -259,6 +277,9 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         const id = try self.closeContainer(self.peek().span.end);
         try self.finishValue(id);
     }
+
+    // Every alias must reference an anchor defined earlier in the document.
+    try self.resolveAliasesOrError();
 
     // An empty document — no content node, only comments, blank lines, or
     // document markers — is valid; its root is the null node.
@@ -351,6 +372,18 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
             const value_id = try self.parseBlockScalar();
             try self.finishValue(value_id);
         },
+        .alias => {
+            // A sequence entry that is an alias (`- *a`), or an alias key mapping
+            // entry (`- *a : b`).
+            if (self.isMappingStart()) {
+                const mapping_id = try self.openContainer(.mapping, self.peek().span.start);
+                self.containerById(mapping_id).continues_sequence_item = true;
+                try self.parseMappingEntry();
+            } else {
+                const value_id = try self.parseAlias();
+                try self.finishValue(value_id);
+            }
+        },
         .flow_seq_start, .flow_map_start => {
             const value_id = try self.parseFlowNode();
             try self.finishValue(value_id);
@@ -376,7 +409,7 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
     const mapping_id = try self.ensureContainer(.mapping);
     try self.closePendingEmptyValue();
 
-    const key_id = try self.parseScalar();
+    const key_id = try self.parseKeyNode();
     self.skipTriviaNoNewline();
     if (self.peek().kind != .colon) return ParseError.UnexpectedToken;
     const colon = self.advance();
@@ -442,6 +475,11 @@ fn parseMappingValue(self: *Parser, allow_compact: bool) ParserError!void {
         .block_header => {
             const value_id = try self.parseBlockScalar();
             try self.finishValue(value_id);
+        },
+        .alias => {
+            const value_id = try self.parseAlias();
+            try self.finishValue(value_id);
+            try self.requireValueEnd();
         },
         .flow_seq_start, .flow_map_start => {
             const value_id = try self.parseFlowNode();
@@ -509,6 +547,7 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
         },
         .flow_seq_start, .flow_map_start => try self.parseFlowNode(),
         .block_header => try self.parseBlockScalar(),
+        .alias => try self.parseAlias(), // `? *a`
         .dash => {
             // A complex key that is itself a block sequence (`? - a\n  - b`).
             // Open it as a child container and mark the mapping as building its
@@ -552,6 +591,42 @@ fn parseScalar(self: *Parser) ParserError!AST.Node.Id {
     if (self.peek().kind != .scalar) return ParseError.UnexpectedToken;
     const token = self.advance();
     return self.addNode(try self.scalarKind(token.source(self.source)), token.span);
+}
+
+/// Validates that every `*name` alias references an anchor `&name` defined
+/// earlier in the document (YAML aliases refer backward). `self.anchors` is in
+/// node-id order, so an alias resolves to the nearest preceding anchor of the
+/// same name; an alias with none is `error.UndefinedAlias`.
+fn resolveAliasesOrError(self: *Parser) ParserError!void {
+    for (self.nodes.items) |node| {
+        const name = switch (node.kind) {
+            .alias => |n| n,
+            else => continue,
+        };
+        var found = false;
+        for (self.anchors.items) |a| {
+            if (a.node >= node.id) break; // sorted by id; no anchor at/after the alias
+            if (std.mem.eql(u8, a.name, name)) found = true;
+        }
+        if (!found) return ParseError.UndefinedAlias;
+    }
+}
+
+/// Parses a `*name` alias token into an `alias` node. The target anchor is not
+/// resolved here; a post-parse pass validates that every alias resolves (see
+/// `resolveAliasesOrError`).
+fn parseAlias(self: *Parser) ParserError!AST.Node.Id {
+    // An alias node takes no properties: `&b *a` / `!!str *a` are malformed
+    // (`c-ns-alias-node ::= "*" ns-anchor-name`, nothing else).
+    if (self.pending_anchor != null or self.pending_tag != null) return ParseError.UnexpectedToken;
+    const token = self.advance(); // .alias, span covers `*name`
+    return self.addNode(.{ .alias = token.source(self.source)[1..] }, token.span);
+}
+
+/// Parses an implicit mapping key, which is usually a scalar but may also be an
+/// alias (`*a : b`).
+fn parseKeyNode(self: *Parser) ParserError!AST.Node.Id {
+    return if (self.peek().kind == .alias) self.parseAlias() else self.parseScalar();
 }
 
 const BlockStyle = enum { literal, folded };
@@ -733,15 +808,25 @@ fn parseFlowNode(self: *Parser) ParserError!AST.Node.Id {
     self.skipFlowTrivia();
     // A tag on a flow node (`[!!str x]`, `{!!int 1: a}`). Flow trivia spans line
     // breaks, so drain with the flow-aware skipper rather than the block one.
-    while (self.peek().kind == .tag) {
-        if (self.pending_tag != null) return ParseError.DuplicateProperty;
-        const t = self.advance();
-        self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+    while (true) {
+        switch (self.peek().kind) {
+            .tag => {
+                if (self.pending_tag != null) return ParseError.DuplicateProperty;
+                const t = self.advance();
+                self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+            },
+            .anchor => {
+                if (self.pending_anchor != null) return ParseError.DuplicateProperty;
+                const a = self.advance();
+                self.pending_anchor = .{ .name = a.source(self.source)[1..], .span = a.span };
+            },
+            else => break,
+        }
         self.skipFlowTrivia();
     }
-    // A tag with no node of its own — terminated by a flow indicator — decorates
-    // an implicit null (`{!!str : bar}`, `[!!str, x]`, `{a: !!str}`).
-    if (self.pending_tag != null) switch (self.peek().kind) {
+    // A property with no node of its own — terminated by a flow indicator —
+    // decorates an implicit null (`{!!str : bar}`, `[&a, x]`, `{a: !!str}`).
+    if (self.pending_tag != null or self.pending_anchor != null) switch (self.peek().kind) {
         .comma, .colon, .flow_map_end, .flow_seq_end => {
             const at = self.peek().span.start;
             return self.addNode(.null_, .init(at, at));
@@ -751,6 +836,7 @@ fn parseFlowNode(self: *Parser) ParserError!AST.Node.Id {
     return switch (self.peek().kind) {
         .flow_seq_start => self.parseFlowSequence(),
         .flow_map_start => self.parseFlowMapping(),
+        .alias => self.parseAlias(),
         .scalar => {
             if (invalidFlowScalar(self.peek().source(self.source))) return ParseError.UnexpectedToken;
             return self.parseScalar();
@@ -1413,10 +1499,14 @@ fn invalidPlainStart(source: []const u8) bool {
 }
 
 fn isMappingStart(self: *const Parser) bool {
-    if (self.peek().kind != .scalar) return false;
-    // An implicit block mapping key must be a single line; a multi-line scalar
-    // (e.g. a folded quoted string) cannot be a key.
-    if (std.mem.indexOfScalar(u8, self.peek().source(self.source), '\n') != null) return false;
+    switch (self.peek().kind) {
+        // An implicit block mapping key must be a single line; a multi-line
+        // scalar (e.g. a folded quoted string) cannot be a key.
+        .scalar => if (std.mem.indexOfScalar(u8, self.peek().source(self.source), '\n') != null) return false,
+        // An alias may be a key (`*a : b`).
+        .alias => {},
+        else => return false,
+    }
 
     var lookahead = self.index + 1;
     while (lookahead < self.tokens.len) : (lookahead += 1) {
@@ -1436,19 +1526,23 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
         .kind = kind,
         .next_sibling = null,
     });
-    // Consume any pending node property onto this node and keep all side-tables
+    // Consume any pending node properties onto this node and keep all side-tables
     // length-synced with `nodes`.
     const tag = self.pending_tag;
+    const anchor = self.pending_anchor;
     self.pending_tag = null;
+    self.pending_anchor = null;
     var node_span = span;
     // Extend the node's span leftward to cover its property prefix, so the editor
-    // sees `!tag value` as one editable unit (and a replace can't orphan `!tag `).
+    // sees `&a !tag value` as one editable unit (a replace can't orphan `&a `).
     if (tag) |t| node_span.start = @min(node_span.start, t.span.start);
+    if (anchor) |a| node_span.start = @min(node_span.start, a.span.start);
     try self.node_spans.append(self.allocator, node_span);
     try self.node_tags.append(self.allocator, if (tag) |t| t.text else null);
     try self.node_tag_spans.append(self.allocator, if (tag) |t| t.span else null);
-    try self.node_anchors.append(self.allocator, null);
-    try self.node_anchor_spans.append(self.allocator, null);
+    try self.node_anchors.append(self.allocator, if (anchor) |a| a.name else null);
+    try self.node_anchor_spans.append(self.allocator, if (anchor) |a| a.span else null);
+    if (anchor) |a| try self.anchors.append(self.allocator, .{ .name = a.name, .node = id });
     return id;
 }
 
@@ -1461,10 +1555,20 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
 fn consumePendingProperties(self: *Parser) ParserError!void {
     while (true) {
         self.skipTriviaNoNewline();
-        if (self.peek().kind != .tag) break;
-        if (self.pending_tag != null) return ParseError.DuplicateProperty;
-        const t = self.advance();
-        self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+        switch (self.peek().kind) {
+            .tag => {
+                if (self.pending_tag != null) return ParseError.DuplicateProperty;
+                const t = self.advance();
+                self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+            },
+            .anchor => {
+                if (self.pending_anchor != null) return ParseError.DuplicateProperty;
+                const a = self.advance();
+                // Strip the leading `&`; the name is the rest of the token.
+                self.pending_anchor = .{ .name = a.source(self.source)[1..], .span = a.span };
+            },
+            else => break,
+        }
     }
 }
 
@@ -1590,6 +1694,74 @@ test "yaml tag: deferred null sequence item keeps its tag and the next item" {
     try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[item0.id].?);
     try testing.expectEqualSlices(u8, "y", item1.kind.string);
     try testing.expect(doc.ast.node_tags[item1.id] == null);
+}
+
+test "yaml anchor/alias: anchor recorded, alias resolves to it" {
+    const doc = try Parser.parse(testing.allocator, "a: &x 1\nb: *x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const a_val = try doc.ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expectEqualSlices(u8, "x", doc.ast.node_anchors[a_val.id].?);
+    const b_val = try doc.ast.getValByPath(&.{.{ .key = "b" }});
+    try testing.expectEqualSlices(u8, "x", b_val.kind.alias);
+    try testing.expectEqual(a_val.id, try doc.ast.resolveAlias(b_val));
+}
+
+test "yaml anchor/alias: anchor on a collection" {
+    const doc = try Parser.parse(testing.allocator, "a: &x [1, 2]\nb: *x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const a_val = try doc.ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expect(a_val.kind == .sequence);
+    try testing.expectEqualSlices(u8, "x", doc.ast.node_anchors[a_val.id].?);
+    const b_val = try doc.ast.getValByPath(&.{.{ .key = "b" }});
+    try testing.expectEqual(a_val.id, try doc.ast.resolveAlias(b_val));
+}
+
+test "yaml anchor/alias: nearest preceding anchor wins on redefinition" {
+    const doc = try Parser.parse(testing.allocator, "- &x 1\n- &x 2\n- *x\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const item1 = try doc.ast.getValByPath(&.{.{ .index = 1 }}); // the second &x
+    const alias = try doc.ast.getValByPath(&.{.{ .index = 2 }});
+    try testing.expectEqual(item1.id, try doc.ast.resolveAlias(alias));
+}
+
+test "yaml anchor/alias: undefined alias is rejected" {
+    try testParserError("p: *missing\n", error.UndefinedAlias);
+}
+
+test "yaml merge: << pulls keys, host overrides, sequence earlier-wins" {
+    const src =
+        \\base: &b
+        \\  x: 1
+        \\  y: 2
+        \\over: &o
+        \\  x: 9
+        \\derived:
+        \\  <<: [*o, *b]
+        \\  y: 3
+        \\
+    ;
+    const doc = try Parser.parse(testing.allocator, src, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const derived = try doc.ast.getValByPath(&.{.{ .key = "derived" }});
+    // y: host wins (3)
+    const y = (try doc.ast.mergedChild(derived, "y")).?;
+    try testing.expectEqualSlices(u8, "3", doc.ast.nodes[y].kind.number.raw);
+    // x: not local → from merge; earlier source (*o) wins over *b → 9
+    const x = (try doc.ast.mergedChild(derived, "x")).?;
+    try testing.expectEqualSlices(u8, "9", doc.ast.nodes[x].kind.number.raw);
+    // absent key → null
+    try testing.expect((try doc.ast.mergedChild(derived, "nope")) == null);
+}
+
+test "yaml merge: cyclic alias does not hang" {
+    // A mapping that merges itself via an anchor on itself.
+    const doc = try Parser.parse(testing.allocator, "a: &m\n  <<: *m\n  k: 1\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const a = try doc.ast.getValByPath(&.{.{ .key = "a" }});
+    // Direct key resolves without touching the cycle.
+    try testing.expect((try doc.ast.mergedChild(a, "k")) != null);
+    // A missing key forces the merge to be followed → cycle detected, not a hang.
+    try testing.expectError(error.AliasCycle, doc.ast.mergedChild(a, "absent"));
 }
 
 test "yaml tag: untagged node has null side-table entry" {

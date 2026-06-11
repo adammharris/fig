@@ -56,6 +56,7 @@ typedef enum FigNodeKind {
     FIG_NODE_SEQUENCE = 5,
     FIG_NODE_MAPPING  = 6,
     FIG_NODE_KEYVALUE = 7,
+    FIG_NODE_ALIAS    = 8, // a YAML `*name` alias node (unresolved reference)
 } FigNodeKind;
 
 // The node that contains all others. FIG_NODE_NONE for an empty document.

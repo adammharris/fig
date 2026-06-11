@@ -3,14 +3,19 @@ const std = @import("std");
 const AST = @import("../ast.zig");
 const Writer = std.Io.Writer;
 
+/// JSON cannot represent a YAML alias. A materialized AST contains none (aliases
+/// are expanded to copied subtrees by `yaml.materialize`), so reaching one here
+/// means an unmaterialized YAML AST was handed to the JSON printer.
+pub const Error = Writer.Error || error{UnresolvedAlias};
+
 /// Prints a given document in JSON format.
-pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
+pub fn print(writer: *Writer, ast: *const AST) Error!void {
     try printNode(writer, ast, ast.root, 0);
     try writer.writeByte('\n');
     try writer.flush();
 }
 
-pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Error!void {
     const node = ast.nodes[id];
     switch (node.kind) {
         .null_ => try writer.writeAll("null"),
@@ -24,10 +29,11 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
             try writer.writeAll(": ");
             try printNode(writer, ast, kv.value, depth);
         },
+        .alias => return error.UnresolvedAlias,
     }
 }
 
-fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Writer.Error!void {
+fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
     if (first_child == null) {
         try writer.writeAll("[]");
         return;
@@ -46,7 +52,7 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
     try writer.writeByte(']');
 }
 
-fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Writer.Error!void {
+fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
     if (first_child == null) {
         try writer.writeAll("{}");
         return;

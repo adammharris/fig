@@ -29,20 +29,11 @@ const activeTag = std.meta.activeTag;
 
 const max_file = 4 * 1024 * 1024;
 
-// Suite tags for features fig does not yet support. (Tags — `tag`/`unknown-tag`/
-// `local-tag` — are now parsed and attached as side-tables, so they are no longer
-// excluded; anchors/aliases and directives remain out of scope for now.)
+// Suite tags for features fig does not yet support. Tags and anchors/aliases are
+// now parsed (tags attach as side-tables; aliases are real nodes resolved via the
+// anchor table), so only directives remain out of scope.
 const oos_tags = [_][]const u8{
-    "anchor",    "alias", // anchors & aliases
     "directive", // %YAML / %TAG directives
-};
-
-// Anchor/alias markers in the event tree: a node token followed by `&name`/
-// `*name`. A `&`/`*` inside scalar content sits after the value indicator
-// (`=VAL :a & b`) and so is not matched.
-const anchor_markers = [_][]const u8{
-    "+MAP &", "+MAP *", "+SEQ &", "+SEQ *",
-    "=VAL &", "=VAL *", "=ALI &", "=ALI *",
 };
 
 const Skip = struct { id: []const u8, reasons: []const u8 };
@@ -266,12 +257,6 @@ fn outOfScopeReasons(arena: std.mem.Allocator, tags: []const u8, tree: []const u
     }
     if (std.mem.count(u8, tree, "+DOC") >= 2) try add(&reasons, arena, "multi-document");
     if (hasDirective(data)) try add(&reasons, arena, "directive");
-    for (anchor_markers) |marker| {
-        if (std.mem.indexOf(u8, tree, marker) != null) {
-            try add(&reasons, arena, "anchor");
-            break;
-        }
-    }
 
     std.mem.sort([]const u8, reasons.items, {}, lessThanStr);
     return reasons.items;

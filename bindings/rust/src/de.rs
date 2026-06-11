@@ -60,7 +60,10 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'a> {
             FigNodeKind::String => visitor.visit_str(self.str_value(id)?),
             FigNodeKind::Sequence => visitor.visit_seq(SeqAccess::new(self.doc, id)),
             FigNodeKind::Mapping => visitor.visit_map(MapAccess::new(self.doc, id)),
-            FigNodeKind::Keyvalue | FigNodeKind::Invalid => {
+            // A bare keyvalue/invalid node, or an unresolved YAML alias (the
+            // document was not materialized to expand `*name` references), cannot
+            // be deserialized directly.
+            FigNodeKind::Keyvalue | FigNodeKind::Invalid | FigNodeKind::Alias => {
                 Err(Error::Message("malformed document".into()))
             }
         }
