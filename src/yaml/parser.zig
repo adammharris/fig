@@ -41,6 +41,18 @@ const OpenContainer = struct {
 
 nodes: std.ArrayList(AST.Node) = .empty,
 node_spans: std.ArrayList(Span) = .empty,
+// YAML reference/annotation side-tables, kept length-synced with `nodes` by
+// `addNode`. Decoded strings (node_tags/node_anchors) hand off to the AST; spans
+// hand off to the Document. `anchors` is the name→id table (filled in a later
+// phase; empty for tag-only documents).
+node_tags: std.ArrayList(?[]const u8) = .empty,
+node_anchors: std.ArrayList(?[]const u8) = .empty,
+node_tag_spans: std.ArrayList(?Span) = .empty,
+node_anchor_spans: std.ArrayList(?Span) = .empty,
+anchors: std.ArrayList(AST.Anchor) = .empty,
+// A node property (`!tag`; later `&anchor`) seen but not yet attached to the
+// node it decorates. Consumed by the next `addNode`.
+pending_tag: ?struct { text: []const u8, span: Span } = null,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
@@ -57,14 +69,18 @@ doc_ended: bool = false,
 allocator: std.mem.Allocator,
 source: []const u8 = "",
 
-const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments };
+const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty };
 const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
 /// Pass allocator, input, and type, and get a Document.
 pub fn parseAbstract(allocator: std.mem.Allocator, input: []const u8, format: Type) !AST {
     const parsed = try parse(allocator, input, format);
+    // Drop the Document-side span tables; the abstract AST keeps the decoded
+    // tag/anchor strings it carries itself.
     allocator.free(parsed.node_spans);
+    allocator.free(parsed.node_tag_spans);
+    allocator.free(parsed.node_anchor_spans);
     return parsed.ast;
 }
 
@@ -226,6 +242,13 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     try self.attachDeferredValue(node_id);
                 }
             },
+            .tag => {
+                // A node property at a value/root position: stash it; the node it
+                // decorates is parsed on a following loop iteration (and `addNode`
+                // attaches it). Covers `!!str foo`, `!!seq [1]`, a tagged root, etc.
+                if (self.doc_ended) return ParseError.MultipleDocuments;
+                try self.consumePendingProperties();
+            },
             .end_of_file => break,
             else => return ParseError.UnexpectedToken,
         }
@@ -246,6 +269,21 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(node_spans);
     self.node_spans = .empty;
+    const node_tags = try self.node_tags.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_tags);
+    self.node_tags = .empty;
+    const node_anchors = try self.node_anchors.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_anchors);
+    self.node_anchors = .empty;
+    const anchors = try self.anchors.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(anchors);
+    self.anchors = .empty;
+    const node_tag_spans = try self.node_tag_spans.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_tag_spans);
+    self.node_tag_spans = .empty;
+    const node_anchor_spans = try self.node_anchor_spans.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_anchor_spans);
+    self.node_anchor_spans = .empty;
     const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
     self.owned_strings = .empty;
     return .{
@@ -255,8 +293,13 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
             .owned_strings = owned_strings,
             .root = root,
             .nodes = nodes,
+            .node_tags = node_tags,
+            .node_anchors = node_anchors,
+            .anchors = anchors,
         },
         .node_spans = node_spans,
+        .node_tag_spans = node_tag_spans,
+        .node_anchor_spans = node_anchor_spans,
     };
 }
 
@@ -264,6 +307,11 @@ pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
     self.node_spans.deinit(self.allocator);
+    self.node_tags.deinit(self.allocator);
+    self.node_anchors.deinit(self.allocator);
+    self.node_tag_spans.deinit(self.allocator);
+    self.node_anchor_spans.deinit(self.allocator);
+    self.anchors.deinit(self.allocator);
     for (self.owned_strings.items) |string| {
         self.allocator.free(string);
     }
@@ -273,8 +321,16 @@ pub fn deinit(self: *Parser) void {
 fn parseSequenceEntry(self: *Parser) ParserError!void {
     const dash = self.advance();
     const sequence_id = try self.ensureContainer(.sequence);
+    // A preceding dash at this same indent with no value (`-\n- x`) is a null
+    // entry: finalize it (creating its null node — which also consumes a tag like
+    // `- !!str\n- y`) before starting this entry. When the previous dash's value
+    // was instead deferred to a more-indented line, `ensureContainer` opened a new
+    // child container, so `currentContainer` is not this sequence and nothing is
+    // finalized here.
+    if (self.currentContainer().id == sequence_id) try self.closePendingEmptyValue();
     self.clearPendingSequenceItem(sequence_id);
     self.skipTriviaNoNewline();
+    try self.consumePendingProperties(); // `- !!str x`
 
     switch (self.peek().kind) {
         .newline, .dedent, .end_of_file => {
@@ -345,6 +401,7 @@ fn parseMappingEntry(self: *Parser) ParserError!void {
 /// is only legal after an explicit-value indicator.
 fn parseMappingValue(self: *Parser, allow_compact: bool) ParserError!void {
     self.skipTriviaNoNewline();
+    try self.consumePendingProperties(); // `k: !!int 5` (or `k: !!str` → tagged null)
     switch (self.peek().kind) {
         .scalar => {
             if (allow_compact and self.isMappingStart()) {
@@ -428,6 +485,7 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
     try self.closePendingEmptyValue();
 
     self.skipTriviaNoNewline();
+    try self.consumePendingProperties(); // `? !!str key`
     const key_id = switch (self.peek().kind) {
         .scalar => key: {
             if (self.isMappingStart()) {
@@ -673,6 +731,23 @@ fn autodetectIndent(body: []const u8) usize {
 /// are treated as trivia throughout.
 fn parseFlowNode(self: *Parser) ParserError!AST.Node.Id {
     self.skipFlowTrivia();
+    // A tag on a flow node (`[!!str x]`, `{!!int 1: a}`). Flow trivia spans line
+    // breaks, so drain with the flow-aware skipper rather than the block one.
+    while (self.peek().kind == .tag) {
+        if (self.pending_tag != null) return ParseError.DuplicateProperty;
+        const t = self.advance();
+        self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+        self.skipFlowTrivia();
+    }
+    // A tag with no node of its own — terminated by a flow indicator — decorates
+    // an implicit null (`{!!str : bar}`, `[!!str, x]`, `{a: !!str}`).
+    if (self.pending_tag != null) switch (self.peek().kind) {
+        .comma, .colon, .flow_map_end, .flow_seq_end => {
+            const at = self.peek().span.start;
+            return self.addNode(.null_, .init(at, at));
+        },
+        else => {},
+    };
     return switch (self.peek().kind) {
         .flow_seq_start => self.parseFlowSequence(),
         .flow_map_start => self.parseFlowMapping(),
@@ -1361,8 +1436,36 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
         .kind = kind,
         .next_sibling = null,
     });
-    try self.node_spans.append(self.allocator, span);
+    // Consume any pending node property onto this node and keep all side-tables
+    // length-synced with `nodes`.
+    const tag = self.pending_tag;
+    self.pending_tag = null;
+    var node_span = span;
+    // Extend the node's span leftward to cover its property prefix, so the editor
+    // sees `!tag value` as one editable unit (and a replace can't orphan `!tag `).
+    if (tag) |t| node_span.start = @min(node_span.start, t.span.start);
+    try self.node_spans.append(self.allocator, node_span);
+    try self.node_tags.append(self.allocator, if (tag) |t| t.text else null);
+    try self.node_tag_spans.append(self.allocator, if (tag) |t| t.span else null);
+    try self.node_anchors.append(self.allocator, null);
+    try self.node_anchor_spans.append(self.allocator, null);
     return id;
+}
+
+/// Drain leading node-property tokens (tags; later anchors) onto the parser's
+/// pending state, to be attached to the next node by `addNode`. A node may carry
+/// at most one tag, so a second one before the node is rejected. A tag with no
+/// following node is not an error: it decorates an implicit null (`k: !!str`,
+/// or `!!str` alone → a tagged null root), created downstream by the empty-value
+/// machinery or the root fallback, which also routes through `addNode`.
+fn consumePendingProperties(self: *Parser) ParserError!void {
+    while (true) {
+        self.skipTriviaNoNewline();
+        if (self.peek().kind != .tag) break;
+        if (self.pending_tag != null) return ParseError.DuplicateProperty;
+        const t = self.advance();
+        self.pending_tag = .{ .text = t.source(self.source), .span = t.span };
+    }
 }
 
 fn startOfCurrentToken(self: *const Parser) usize {
@@ -1416,6 +1519,85 @@ fn testParserError(input: []const u8, expected_error: anyerror) !void {
     } else |err| {
         try testing.expectEqual(expected_error, err);
     }
+}
+
+test "yaml tag: attaches to mapping value and extends span left" {
+    const doc = try Parser.parse(testing.allocator, "k: !!int 5\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const value = try doc.ast.getValByPath(&.{.{ .key = "k" }});
+    // At parse the value is still classified structurally (tags apply at
+    // materialize), but the tag string is recorded on the side-table...
+    try testing.expectEqualSlices(u8, "!!int", doc.ast.node_tags[value.id].?);
+    // ...and the node's span was extended leftward to cover the `!!int ` prefix.
+    try testing.expectEqualSlices(u8, "!!int 5", Span.of(u8, doc.span(value), doc.source));
+    try testing.expectEqualSlices(u8, "!!int", Span.of(u8, doc.tagSpan(value).?, doc.source));
+}
+
+test "yaml tag: on root scalar" {
+    const doc = try Parser.parse(testing.allocator, "!!str foo\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const root = doc.ast.nodes[doc.ast.root];
+    try testing.expectEqualSlices(u8, "foo", root.kind.string);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[root.id].?);
+}
+
+test "yaml tag: bare bang is a tagged null root" {
+    const doc = try Parser.parse(testing.allocator, "!\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const root = doc.ast.nodes[doc.ast.root];
+    try testing.expect(root.kind == .null_);
+    try testing.expectEqualSlices(u8, "!", doc.ast.node_tags[root.id].?);
+}
+
+test "yaml tag: empty value is a tagged null" {
+    const doc = try Parser.parse(testing.allocator, "t: !!str\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const value = try doc.ast.getValByPath(&.{.{ .key = "t" }});
+    try testing.expect(value.kind == .null_);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[value.id].?);
+}
+
+test "yaml tag: two tags on one node is rejected" {
+    try testParserError("!!str !!int x\n", error.DuplicateProperty);
+}
+
+test "yaml tag: flow tagged-null value" {
+    const doc = try Parser.parse(testing.allocator, "{a: !!str}\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const a_val = try doc.ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expect(a_val.kind == .null_);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[a_val.id].?);
+}
+
+test "yaml tag: flow tagged-null key" {
+    const doc = try Parser.parse(testing.allocator, "{!!str : bar}\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const root = doc.ast.nodes[doc.ast.root];
+    const kv = doc.ast.nodes[root.kind.mapping.?];
+    const key = doc.ast.nodes[kv.kind.keyvalue.key];
+    try testing.expect(key.kind == .null_);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[key.id].?);
+}
+
+test "yaml tag: deferred null sequence item keeps its tag and the next item" {
+    // Regression: `- !!str\n- y` must be [null(tagged), "y"], not drop item 0 /
+    // leak the tag into item 1.
+    const doc = try Parser.parse(testing.allocator, "- !!str\n- y\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const item0 = try doc.ast.getValByPath(&.{.{ .index = 0 }});
+    const item1 = try doc.ast.getValByPath(&.{.{ .index = 1 }});
+    try testing.expect(item0.kind == .null_);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[item0.id].?);
+    try testing.expectEqualSlices(u8, "y", item1.kind.string);
+    try testing.expect(doc.ast.node_tags[item1.id] == null);
+}
+
+test "yaml tag: untagged node has null side-table entry" {
+    const doc = try Parser.parse(testing.allocator, "a: 1\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const value = try doc.ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expect(doc.ast.node_tags[value.id] == null);
+    try testing.expect(doc.tagSpan(value) == null);
 }
 
 test "simple YAML document" {

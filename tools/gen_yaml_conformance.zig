@@ -29,10 +29,11 @@ const activeTag = std.meta.activeTag;
 
 const max_file = 4 * 1024 * 1024;
 
-// Suite tags for features fig does not intend to support.
+// Suite tags for features fig does not yet support. (Tags — `tag`/`unknown-tag`/
+// `local-tag` — are now parsed and attached as side-tables, so they are no longer
+// excluded; anchors/aliases and directives remain out of scope for now.)
 const oos_tags = [_][]const u8{
-    "anchor",     "alias", // anchors & aliases
-    "tag",        "unknown-tag", "local-tag", // explicit tags
+    "anchor",    "alias", // anchors & aliases
     "directive", // %YAML / %TAG directives
 };
 

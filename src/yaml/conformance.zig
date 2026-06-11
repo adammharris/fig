@@ -26,11 +26,11 @@ const max_fixture_size = 1024 * 1024;
 
 // Baseline scores. These are a ratchet: raise them as coverage improves; never
 // lower them without a deliberate reason. A run below baseline fails the test.
-const accept_baseline = 221;
-const reject_baseline = 74;
+const accept_baseline = 239;
+const reject_baseline = 76;
 // Multi-document streams parsed via Embed.extractStream (the single-document
 // parser refuses a stream; the splitter feeds it one document at a time).
-const stream_baseline = 10;
+const stream_baseline = 11;
 
 const Score = struct {
     correct: usize = 0,
