@@ -22,14 +22,12 @@
 6LVF	directive
 6M2F	alias anchor
 6WLZ	directive local-tag multi-document tag
-6XDY	multi-document
 6ZKB	directive multi-document
 735Y	tag
 74H7	tag
 7BMT	anchor
 7BUB	alias anchor
 7FWL	tag unknown-tag
-7Z25	multi-document
 8MK2	tag
 8XYN	anchor
 9DXL	directive multi-document
@@ -58,15 +56,12 @@ H7J7	anchor tag
 H7TQ	directive
 HMQ5	alias anchor tag
 J7PZ	tag unknown-tag
-JHB9	multi-document
 JS2J	alias anchor
 KSS4	anchor multi-document
-L383	multi-document
 L94M	tag
 LE5A	alias anchor tag
 LHL4	tag
 M5C3	local-tag tag
-M7A3	multi-document
 MUS6	directive
 MUS6-1	directive
 MUS6-2	directive
@@ -74,15 +69,12 @@ MUS6-3	directive
 MUS6-4	directive
 MUS6-5	directive
 MUS6-6	directive
-NKF9	multi-document
 P76L	directive tag unknown-tag
-PUW8	multi-document
 PW8X	anchor
 QLJ7	directive multi-document tag
 RHX7	directive
 RTP8	directive
 RZP5	anchor
-RZT7	multi-document
 S4JQ	tag
 SF5V	directive
 SKE5	anchor
@@ -92,9 +84,7 @@ SY6V	anchor
 U3C3	directive tag
 U3XV	anchor
 U99R	tag
-U9NS	multi-document
 UGM3	alias anchor tag unknown-tag
-UT92	multi-document
 V55R	alias anchor
 W4TN	directive multi-document
 W5VH	alias anchor
