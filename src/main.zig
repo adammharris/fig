@@ -42,6 +42,9 @@ const CliActionOptions = union(CliAction) {
         from: Format,
         to: Format,
         requested_help: bool = false,
+        /// When converting YAML to another format, drop unknown/custom tags
+        /// instead of erroring on them. Has no effect on parsing or YAML→YAML.
+        lax_tags: bool = false,
         /// When set, the input is extracted from a host document of this
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
@@ -187,21 +190,33 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
             };
 
-            const node_id = if (opts.path) |p| (try doc.ast.getValByPath(p)).id else doc.ast.root;
+            // Converting YAML to a non-YAML format resolves the reference layer
+            // first (aliases → copies, merges → flattened, tags applied/dropped).
+            // YAML→YAML keeps it intact for round-trip; JSON never has it.
+            const src_is_yaml = opts.from == .yaml or opts.from == .yml;
+            const dst_is_yaml = opts.to == .yaml or opts.to == .yml;
+            const ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
+                const mode: fig.Language.YAML.TagMode = if (opts.lax_tags) .lax else .strict;
+                const mat = try init.arena.allocator().create(fig.AST);
+                mat.* = try fig.Language.YAML.materialize(init.arena.allocator(), &doc.ast, mode);
+                break :blk mat;
+            } else &doc.ast;
+
+            const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
             switch (opts.to) {
                 .json, .jsonc => {
                     if (opts.path == null) {
-                        try fig.Language.JSON.print(stdout_terminal.writer, &doc.ast);
+                        try fig.Language.JSON.print(stdout_terminal.writer, ast);
                     } else {
-                        try fig.Language.JSON.printNode(stdout_terminal.writer, &doc.ast, node_id, 0);
+                        try fig.Language.JSON.printNode(stdout_terminal.writer, ast, node_id, 0);
                     }
                 },
                 .yaml, .yml => {
                     if (opts.path == null) {
-                        try fig.Language.YAML.print(stdout_terminal.writer, &doc.ast);
+                        try fig.Language.YAML.print(stdout_terminal.writer, ast);
                     } else {
-                        try fig.Language.YAML.printNode(stdout_terminal.writer, &doc.ast, node_id, 0);
+                        try fig.Language.YAML.printNode(stdout_terminal.writer, ast, node_id, 0);
                     }
                 },
             }
@@ -461,11 +476,14 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
 
         var input_override: ?Format = null;
         var output_override: ?Format = null;
+        var lax_tags = false;
         var positionals: std.ArrayList([]const u8) = .empty;
         defer positionals.deinit(allocator);
 
         while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
+            if (std.mem.eql(u8, arg, "--lax-tags")) {
+                lax_tags = true;
+            } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
                 const fmt = args.next() orelse {
                     log.err("Missing format value after {s}\n", .{arg});
                     return ArgError.MissingGetArgument;
@@ -521,6 +539,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .from = input_format,
             .to = output_override orelse input_format,
             .requested_help = requested_help,
+            .lax_tags = lax_tags,
             .embed = embed,
         } };
     } else {
