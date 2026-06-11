@@ -13,9 +13,11 @@
 //! Each test item is written to:
 //!     testdata/yaml/accept/<id>.yaml   (must parse)
 //!     testdata/yaml/reject/<id>.yaml   (must fail to parse)
+//!     testdata/yaml/stream/<id>.yaml   (purely multi-document; must split +
+//!                                       parse via Embed.extractStream)
 //! Multi-item files become <id>-1.yaml, <id>-2.yaml, ... Out-of-scope tests
-//! (anchors, aliases, tags, directives, multi-document) are excluded and listed
-//! in testdata/yaml/skiplist.txt instead.
+//! (anchors, aliases, tags, directives, and multi-document streams that also
+//! use those features) are excluded and listed in testdata/yaml/skiplist.txt.
 //!
 //! Usage: zig build gen-yaml-conformance -- <path-to-yaml-test-suite> [<fig-root>]
 
@@ -65,6 +67,9 @@ pub fn main(init: std.process.Init) !void {
     const src_path = try std.fs.path.join(arena, &.{ suite, "src" });
     const accept_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "accept" });
     const reject_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "reject" });
+    // Multi-document streams: parsed via the Embed.extractStream splitter (the
+    // single-document parser refuses a stream), so they get their own category.
+    const stream_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "stream" });
     const yaml_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml" });
 
     const cwd = std.Io.Dir.cwd();
@@ -74,6 +79,9 @@ pub fn main(init: std.process.Init) !void {
     defer accept_dir.close(io);
     var reject_dir = try cwd.openDir(io, reject_path, .{ .iterate = true });
     defer reject_dir.close(io);
+    try cwd.createDirPath(io, stream_path);
+    var stream_dir = try cwd.openDir(io, stream_path, .{ .iterate = true });
+    defer stream_dir.close(io);
     var yaml_dir = try cwd.openDir(io, yaml_path, .{});
     defer yaml_dir.close(io);
 
@@ -81,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
     // previous run (or a test that has since moved category) must be cleared.
     try clearFixtures(io, accept_dir);
     try clearFixtures(io, reject_dir);
+    try clearFixtures(io, stream_dir);
 
     // Collect and sort the source file names for deterministic output.
     var names: std.ArrayList([]const u8) = .empty;
@@ -94,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
 
     var n_accept: usize = 0;
     var n_reject: usize = 0;
+    var n_stream: usize = 0;
     var n_noyaml: usize = 0;
     var skips: std.ArrayList(Skip) = .empty;
 
@@ -136,15 +146,23 @@ pub fn main(init: std.process.Init) !void {
             const data = try decode(arena, yaml);
 
             const reasons = try outOfScopeReasons(arena, tags, tree, data);
+            const file = try std.fmt.allocPrint(arena, "{s}.yaml", .{test_id});
             if (reasons.len > 0) {
-                try skips.append(arena, .{
-                    .id = test_id,
-                    .reasons = try std.mem.join(arena, " ", reasons),
-                });
+                // A *purely* multi-document stream (no anchors/tags/directives) is
+                // in scope via the Embed.extractStream splitter. A failing one
+                // would need the splitter to reject — keep those skiplisted.
+                if (!fail and reasons.len == 1 and std.mem.eql(u8, reasons[0], "multi-document")) {
+                    try stream_dir.writeFile(io, .{ .sub_path = file, .data = data });
+                    n_stream += 1;
+                } else {
+                    try skips.append(arena, .{
+                        .id = test_id,
+                        .reasons = try std.mem.join(arena, " ", reasons),
+                    });
+                }
                 continue;
             }
 
-            const file = try std.fmt.allocPrint(arena, "{s}.yaml", .{test_id});
             if (fail) {
                 try reject_dir.writeFile(io, .{ .sub_path = file, .data = data });
                 n_reject += 1;
@@ -159,8 +177,8 @@ pub fn main(init: std.process.Init) !void {
     try writeSkiplist(io, yaml_dir, arena, skips.items);
 
     std.debug.print(
-        "accept: {d}  reject: {d}  out-of-scope(skipped): {d}  no-yaml-field: {d}\n",
-        .{ n_accept, n_reject, skips.items.len, n_noyaml },
+        "accept: {d}  reject: {d}  stream: {d}  out-of-scope(skipped): {d}  no-yaml-field: {d}\n",
+        .{ n_accept, n_reject, n_stream, skips.items.len, n_noyaml },
     );
 }
 
