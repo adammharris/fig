@@ -365,6 +365,16 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                         // document root (`>` or `--- >`); its body may sit at col 0.
                         // Check before emitting the header token itself.
                         const root = self.precededOnlyByTrivia();
+                        // A header on its own line is a deferred value; an explicit
+                        // indentation indicator counts from the OWNING key/dash
+                        // column (recovered from the token stream), not this line's
+                        // indent (`folded:\n  >1\n value` → content at owner+1).
+                        // Computed before emitting the header so the scan-back does
+                        // not see the header itself.
+                        const owner = if (cursor == line.content_start)
+                            (self.deferredOwnerIndent() orelse block_owner_indent)
+                        else
+                            block_owner_indent;
                         try self.addToken(.init(.block_header, .init(cursor, hdr_end)));
                         var rest = hdr_end;
                         while (rest < line.end and isBlank(self.source[rest])) rest += 1;
@@ -372,7 +382,7 @@ fn tokenizeLineContent(self: *Tokenizer, line_in: Line) TokenizeError!void {
                             try self.addToken(.init(.comment, .init(rest, line.end)));
                         }
                         self.pending_block = .{
-                            .header_indent = block_owner_indent,
+                            .header_indent = owner,
                             .explicit_indent = explicitIndent(self.source, cursor, hdr_end),
                             .root = root,
                         };
@@ -593,9 +603,18 @@ fn gatherPlainContinuation(self: *Tokenizer, line: Line, floor: ?usize) Tokenize
         // A leading sequence/explicit-key/value indicator starts a structure.
         if ((fc == '-' or fc == '?' or fc == ':') and
             (ws + 1 >= end or isBlank(self.source[ws + 1]))) break;
-        // A colon or comment anywhere makes this a mapping entry or comment, not
-        // a pure plain continuation.
-        if (scalarEnd(self.source, ws, end, false) != end) break;
+        const se = scalarEnd(self.source, ws, end, false);
+        if (se != end) {
+            // Stopped early: a `:` value indicator means this line is a mapping
+            // entry, not a continuation — stop without consuming it. A trailing
+            // `#` comment still leaves a valid final continuation line, so gather
+            // its content up to the comment, then stop.
+            if (self.source[se] == '#') result = .{
+                .content_end = trimRightSpaces(self.source, ws, se),
+                .last_line = .{ .start = line_start, .content_start = spaces, .end = end, .newline_end = newline_end },
+            };
+            break;
+        }
 
         result = .{
             .content_end = trimRightSpaces(self.source, ws, end),
@@ -1011,6 +1030,37 @@ fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
 
 /// True when only a document-start marker and trivia have been emitted so far —
 /// i.e. the next node is the document root, which has no indentation floor.
+/// Column (0-based) of `pos` on its source line.
+fn columnOf(self: *const Tokenizer, pos: usize) usize {
+    var i = pos;
+    while (i > 0 and self.source[i - 1] != '\n') i -= 1;
+    return pos - i;
+}
+
+/// For a block header that opens a key/dash's deferred value (it sits alone on a
+/// line below the `key:`/`-`), returns the owning node's column — the key before
+/// the introducing `:`, or the `-` itself — by scanning back past intervening
+/// trivia, indents, and node properties. Null if no such introducer is found.
+fn deferredOwnerIndent(self: *const Tokenizer) ?usize {
+    var idx = self.tokens.items.len;
+    while (idx > 0) : (idx -= 1) switch (self.tokens.items[idx - 1].kind) {
+        .whitespace, .newline, .comment, .indent, .dedent, .tag, .anchor => {},
+        .colon => {
+            // The owner is the key written before this colon.
+            var k = idx - 1;
+            while (k > 0) : (k -= 1) switch (self.tokens.items[k - 1].kind) {
+                .whitespace, .comment => {},
+                else => break,
+            };
+            if (k == 0) return null;
+            return self.columnOf(self.tokens.items[k - 1].span.start);
+        },
+        .dash => return self.columnOf(self.tokens.items[idx - 1].span.start),
+        else => return null,
+    };
+    return null;
+}
+
 fn precededOnlyByTrivia(self: *const Tokenizer) bool {
     for (self.tokens.items) |t| switch (t.kind) {
         // A `.tag`/`.anchor` is a node property, not structural content: a root
