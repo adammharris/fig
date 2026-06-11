@@ -51,9 +51,25 @@ pub fn Editor(comptime Language: type) type {
             };
         }
 
+        /// Replace the value at `path`. Reference-layer behavior is copy-on-write:
+        /// editing a value that is an alias (`b: *x`) replaces the `*x` text with
+        /// the new literal (severing only that alias — its anchor and any other
+        /// alias are untouched), which falls out of splicing the alias node's own
+        /// span. A key supplied only by a `<<` merge is materialized locally,
+        /// shadowing the merge. Use `replaceValAtPathFollowing` to edit through to
+        /// a shared anchor instead.
         pub fn replaceValAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
             const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
+            const node = parsed.ast.getValByPath(path) catch |err| {
+                // A merge-only key surfaces as NotFound (default nav doesn't follow
+                // `<<`); COW it by inserting a local `key: value` that shadows the
+                // merge.
+                if (Language == Yaml and err == error.NotFound and try self.mergeSuppliesKey(parsed, path)) {
+                    try self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, replacement);
+                    return;
+                }
+                return err;
+            };
             const span = parsed.span(node);
             // For a YAML mapping value, reframe the whole `: value` so the new
             // value is correctly shaped whatever its form — a scalar stays
@@ -90,6 +106,47 @@ pub fn Editor(comptime Language: type) type {
             try self.writeMapValue(&out, col, replacement);
             const end = @max(val_span.end, colon + 1);
             try self.replaceAtSpan(Span.init(colon, end), out.items);
+        }
+
+        /// Like `replaceValAtPath`, but follow into the reference layer: when the
+        /// target value is an alias, edit the *anchored node* (the shared source),
+        /// so every alias to that anchor reflects the change. The `&name` (and any
+        /// tag) prefix is preserved — only the anchored value's bytes are
+        /// replaced. A non-alias target behaves exactly like `replaceValAtPath`.
+        pub fn replaceValAtPathFollowing(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
+            const parsed = try self.getParsed();
+            const node = parsed.ast.getValByPath(path) catch {
+                return self.replaceValAtPath(path, replacement);
+            };
+            if (Language == Yaml and node.kind == .alias) {
+                const target = parsed.ast.nodes[try parsed.ast.resolveAlias(node)];
+                try self.replaceAtSpan(self.valueSpanWithoutProps(parsed, target), replacement);
+                return;
+            }
+            try self.replaceValAtPath(path, replacement);
+        }
+
+        /// True when `path`'s final `.key` segment is not a physical entry of its
+        /// parent mapping but is supplied by a `<<` merge.
+        fn mergeSuppliesKey(self: *Self, parsed: Document, path: []const AST.PathSegment) !bool {
+            _ = self;
+            if (path.len == 0 or std.meta.activeTag(path[path.len - 1]) != .key) return false;
+            const parent = parsed.ast.getValByPath(path[0 .. path.len - 1]) catch return false;
+            if (parent.kind != .mapping) return false;
+            return (parsed.ast.mergedChild(parent, path[path.len - 1].key) catch return false) != null;
+        }
+
+        /// The span of `node`'s value bytes, excluding any leading `&anchor`/`!tag`
+        /// property prefix (the node's stored span starts at the property). Used by
+        /// follow-mode so editing the anchored value keeps the anchor intact.
+        fn valueSpanWithoutProps(self: *Self, parsed: Document, node: AST.Node) Span {
+            const source = self.source.items;
+            const full = parsed.span(node);
+            var start = full.start;
+            if (parsed.anchorSpan(node)) |a| start = @max(start, a.end);
+            if (parsed.tagSpan(node)) |t| start = @max(start, t.end);
+            while (start < full.end and (source[start] == ' ' or source[start] == '\t')) start += 1;
+            return Span.init(start, full.end);
         }
 
         pub fn replaceKeyAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
@@ -137,7 +194,14 @@ pub fn Editor(comptime Language: type) type {
         /// `#` lines with no intervening blank line), leaving no blank gap.
         pub fn deleteKey(self: *Self, path: []const AST.PathSegment) !void {
             const parsed = try self.getParsed();
-            const node = try parsed.ast.getNodeByPath(path);
+            const node = parsed.ast.getNodeByPath(path) catch |err| {
+                // A key that exists only via a `<<` merge has no physical line to
+                // delete, and there is no YAML syntax to un-inherit it — deleting
+                // the merge source is a different operation. Refuse explicitly.
+                if (Language == Yaml and err == error.NotFound and try self.mergeSuppliesKey(parsed, path))
+                    return error.MergeOnlyKey;
+                return err;
+            };
             if (node.kind != .keyvalue) return error.NotAMapping;
             const span = parsed.span(node);
             const source = self.source.items;
@@ -801,6 +865,35 @@ fn expectSource(ed: *const Editor(Yaml), expected: []const u8) !void {
     errdefer log.err("actual:   \"{s}\"", .{ed.source.items});
     errdefer log.err("expected: \"{s}\"", .{expected});
     try std.testing.expectEqualStrings(expected, ed.source.items);
+}
+
+// --- reference layer: COW + opt-in follow ---
+
+test "yaml edit through alias is copy-on-write (severs only that alias)" {
+    var ed = try newYamlEditor("a: &x 1\nb: *x\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "b" }}, "5");
+    try expectSource(&ed, "a: &x 1\nb: 5\n"); // anchor + value of `a` untouched
+}
+
+test "yaml follow-mode edits the anchored value, keeping the anchor" {
+    var ed = try newYamlEditor("a: &x 1\nb: *x\n");
+    defer ed.deinit();
+    try ed.replaceValAtPathFollowing(&.{.{ .key = "b" }}, "5");
+    try expectSource(&ed, "a: &x 5\nb: *x\n"); // shared source changed; alias intact
+}
+
+test "yaml COW materializes a merge-only key locally" {
+    var ed = try newYamlEditor("base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{ .{ .key = "d" }, .{ .key = "x" } }, "5");
+    try expectSource(&ed, "base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n  x: 5\n");
+}
+
+test "yaml deleting a merge-only key is refused" {
+    var ed = try newYamlEditor("base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.MergeOnlyKey, ed.deleteKey(&.{ .{ .key = "d" }, .{ .key = "x" } }));
 }
 
 // --- insert key, block ---
