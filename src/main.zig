@@ -90,7 +90,7 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|zon] <file> [path]
+            \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|toml|zon] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
             \\  path format: dot syntax for keys, bracket syntax for indices
@@ -232,9 +232,13 @@ pub fn main(init: std.process.Init) !void {
                         try fig.Language.YAML.printNode(stdout_terminal.writer, ast, node_id, 0);
                     }
                 },
-                // Printing TOML output (tables, dotted keys, arrays-of-tables)
-                // is not implemented yet; TOML is supported as an input only.
-                .toml => return error.TomlOutputUnsupported,
+                .toml => {
+                    if (opts.path == null) {
+                        try fig.Language.TOML.print(stdout_terminal.writer, ast);
+                    } else {
+                        try fig.Language.TOML.printNode(stdout_terminal.writer, ast, node_id, 0);
+                    }
+                },
                 .zon => {
                     if (opts.path == null) {
                         try fig.Language.ZON.print(stdout_terminal.writer, ast);
