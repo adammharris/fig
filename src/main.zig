@@ -172,10 +172,14 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => {
                     try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key);
                 },
-                // In-place TOML editing is not implemented yet: a logical table
-                // is assembled from scattered source lines, so a table node has
-                // no single contiguous span for the span-based editor.
-                .toml => return error.TomlEditingUnsupported,
+                // TOML value/key replacement: a value or key node has a tight,
+                // contiguous span (the parser's node_spans point at the original
+                // source bytes), so the generic span-splice editor handles it
+                // even when the owning table is assembled from scattered headers.
+                // The replacement is taken verbatim as a TOML literal, like YAML
+                // and ZON. (Structural inserts/deletes that must place text
+                // relative to a scattered table are still unsupported.)
+                .toml => try editDocument(fig.Language.TOML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),
                 // ZON edits take the replacement verbatim (a literal ZON value),
                 // like YAML — the editor splices and reparses it.
                 .zon => try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),

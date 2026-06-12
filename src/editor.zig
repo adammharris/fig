@@ -853,6 +853,91 @@ test "simple key edit" {
     try testEditor("[{\"hello\":\"world\"}]", &[_]AST.PathSegment{ .{ .index = 0 }, .{ .key = "hello" } }, .key, "\"greetings\"", "[{\"greetings\":\"world\"}]");
 }
 
+// --- TOML value/key replacement (point edits on contiguous spans) ---
+//
+// TOML structural editing (insert/delete/move into scattered tables) is not
+// supported, but replacing an existing value or renaming a key is: those nodes
+// have tight, contiguous spans even when the owning table is assembled from
+// scattered headers. The generic span-splice-reparse editor handles them with
+// no TOML-specific logic; the replacement text is a verbatim TOML literal.
+
+const Toml = @import("toml/toml.zig").Language;
+
+fn newTomlEditor(input: []const u8) !Editor(Toml) {
+    var ed: Editor(Toml) = .{ .allocator = std.testing.allocator };
+    try ed.init(input);
+    return ed;
+}
+
+fn expectTomlSource(ed: *const Editor(Toml), expected: []const u8) !void {
+    errdefer log.err("actual:   \"{s}\"", .{ed.source.items});
+    errdefer log.err("expected: \"{s}\"", .{expected});
+    try std.testing.expectEqualStrings(expected, ed.source.items);
+}
+
+test "toml replace root scalar value" {
+    var ed = try newTomlEditor("title = \"old\"\nport = 8080\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "port" }}, "9090");
+    try expectTomlSource(&ed, "title = \"old\"\nport = 9090\n");
+}
+
+test "toml replace string value keeps quoting verbatim" {
+    var ed = try newTomlEditor("title = \"old\"\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "title" }}, "\"new title\"");
+    try expectTomlSource(&ed, "title = \"new title\"\n");
+}
+
+test "toml replace value in a table" {
+    var ed = try newTomlEditor("[server]\nhost = \"a\"\nport = 1\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{ .{ .key = "server" }, .{ .key = "port" } }, "2");
+    try expectTomlSource(&ed, "[server]\nhost = \"a\"\nport = 2\n");
+}
+
+test "toml replace value through scattered table headers" {
+    var ed = try newTomlEditor("[a]\nx = 1\n[a.b]\ny = 2\n[a.c]\nz = 3\n");
+    defer ed.deinit();
+    // The owning table `a` spans the whole file (it nests b and c), but the
+    // value node's span is contiguous, so the point edit is exact.
+    try ed.replaceValAtPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "y" } }, "99");
+    try expectTomlSource(&ed, "[a]\nx = 1\n[a.b]\ny = 99\n[a.c]\nz = 3\n");
+}
+
+test "toml replace dotted-key value" {
+    var ed = try newTomlEditor("a.b.c = 1\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" } }, "2");
+    try expectTomlSource(&ed, "a.b.c = 2\n");
+}
+
+test "toml replace value with an inline array" {
+    var ed = try newTomlEditor("ports = [1, 2]\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "ports" }}, "[3, 4, 5]");
+    try expectTomlSource(&ed, "ports = [3, 4, 5]\n");
+}
+
+test "toml rename a leaf key" {
+    var ed = try newTomlEditor("[server]\nport = 8080\n");
+    defer ed.deinit();
+    try ed.replaceKeyAtPath(&.{ .{ .key = "server" }, .{ .key = "port" } }, "listen_port");
+    try expectTomlSource(&ed, "[server]\nlisten_port = 8080\n");
+}
+
+test "toml failed edit rolls back and keeps editor usable" {
+    var ed = try newTomlEditor("a = 1\nb = 2\n");
+    defer ed.deinit();
+    // An unterminated array fails to reparse; the source must be restored.
+    if (ed.replaceValAtPath(&.{.{ .key = "a" }}, "[oops")) |_| {
+        return error.TestExpectedFailedEdit;
+    } else |_| {}
+    try expectTomlSource(&ed, "a = 1\nb = 2\n");
+    try ed.replaceValAtPath(&.{.{ .key = "a" }}, "9");
+    try expectTomlSource(&ed, "a = 9\nb = 2\n");
+}
+
 const Yaml = @import("yaml/yaml.zig").Language;
 
 fn newYamlEditor(input: []const u8) !Editor(Yaml) {
