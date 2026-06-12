@@ -19,7 +19,16 @@ fn main() {
         .arg("build")
         .arg("install-c-lib")
         .arg("-Doptimize=ReleaseFast")
-        .arg("-Dstrip=true");
+        .arg("-Dstrip=true")
+        // Pin the CPU to the portable baseline. Without this, `zig build` for a
+        // host target (no `-Dtarget`) compiles for the *build machine's* native
+        // CPU, baking in whatever vector ISA it happens to have (AVX2/AVX-512:
+        // `ymm`/`zmm`/`kmov`). The resulting `libfig.a` gets cached (e.g. by
+        // Swatinem/rust-cache) and later restored onto a different, older CPU —
+        // GitHub's x86_64 Linux runner fleet is heterogeneous — where the first
+        // wide-vector instruction faults with SIGILL. Baseline codegen runs
+        // everywhere; the parser is not vector-bound, so the cost is negligible.
+        .arg("-Dcpu=baseline");
 
     if let Some(zig_target) = zig_target_for_cargo_target(&cargo_target, &cargo_host) {
         command.arg(format!("-Dtarget={zig_target}"));
