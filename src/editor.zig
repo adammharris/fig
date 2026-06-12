@@ -176,6 +176,8 @@ pub fn Editor(comptime Language: type) type {
             const node = try parsed.ast.getValByPath(path);
             const span = parsed.span(node);
             const source = self.source.items;
+            if (Language == Toml)
+                return self.tomlInsertKey(parsed, node, span, path.len == 0, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -205,6 +207,16 @@ pub fn Editor(comptime Language: type) type {
             if (node.kind != .keyvalue) return error.NotAMapping;
             const span = parsed.span(node);
             const source = self.source.items;
+            // A TOML `[header]` table or `[[array]]` element has no contiguous
+            // line span (its body is assembled from scattered headers), so a
+            // line-based delete would only remove the header key. Refuse it; only
+            // scalar/array/inline-table/dotted entries delete cleanly. (Detected
+            // by the entry's line starting with `[`, which a normal `key = value`
+            // never does.)
+            if (Language == Toml) {
+                const fns = firstNonSpace(source, lineStartBefore(source, span.start));
+                if (fns < source.len and source[fns] == '[') return error.CannotDeleteTable;
+            }
             const line_start = lineStartBefore(source, span.start);
             const del_start = commentBlockStart(source, line_start);
             const del_end = lineEndAfter(source, span.end -| 1);
@@ -223,6 +235,9 @@ pub fn Editor(comptime Language: type) type {
                 try self.insertFlowItem(span, first != null, value_text);
                 return;
             }
+            // A non-flow TOML sequence is an array-of-tables; use
+            // `appendTableToArray` for those. (TOML has no block scalar array.)
+            if (Language == Toml) return error.NotAnInlineArray;
             const last = (try parsed.ast.lastChild(&node)) orelse return error.NotASequence;
             const first_item = (try parsed.ast.child(&node)).?;
             const dash_col = dashColumn(source, parsed.span(first_item).start);
@@ -241,6 +256,7 @@ pub fn Editor(comptime Language: type) type {
                 try self.prependFlowItem(span, node.kind.sequence != null, value_text);
                 return;
             }
+            if (Language == Toml) return error.NotAnInlineArray;
             const first_item = (try parsed.ast.child(&node)) orelse return error.NotASequence;
             const first_start = parsed.span(first_item).start;
             const line_start = lineStartBefore(source, first_start);
@@ -262,6 +278,7 @@ pub fn Editor(comptime Language: type) type {
                 try self.removeFlowItem(item_span, index == 0);
                 return;
             }
+            if (Language == Toml) return error.NotAnInlineArray;
             const line_start = commentBlockStart(source, lineStartBefore(source, item_span.start));
             const del_end = lineEndAfter(source, item_span.end -| 1);
             try self.replaceAtSpan(Span.init(line_start, del_end), "");
@@ -413,6 +430,7 @@ pub fn Editor(comptime Language: type) type {
                 try self.reorderFlowItems(spans.items, order);
                 return;
             }
+            if (Language == Toml) return error.NotAnInlineArray;
             var blocks: std.ArrayList(Block) = .empty;
             defer blocks.deinit(self.allocator);
             for (spans.items) |s| {
@@ -493,6 +511,119 @@ pub fn Editor(comptime Language: type) type {
             try out.appendSlice(self.allocator, key_text);
             try self.writeMapValue(&out, col, value_text);
             try out.append(self.allocator, '\n');
+            try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+        }
+
+        // --- TOML structural inserts ---
+        //
+        // TOML splits a logical table across `[header]`…dotted-key…lines, so an
+        // insert must land where the new entry attaches to the *intended* table.
+        // A scalar `key = value` is placed at the end of the table's own header
+        // region — after its last direct (non-`[header]`) entry, before any
+        // sub-table header opens — never after a sub-table, which would silently
+        // reparent it. `key_text`/`value_text` are verbatim TOML literals.
+
+        fn tomlInsertKey(self: *Self, parsed: Document, node: AST.Node, span: Span, is_root: bool, key_text: []const u8, value_text: []const u8) !void {
+            if (node.kind != .mapping) return error.NotAMapping;
+            const source = self.source.items;
+            // Inline table `{ … }`: splice a `key = value` inside the braces.
+            if (isFlow(source, span))
+                return self.tomlInsertFlowEntry(parsed, node, span, key_text, value_text);
+
+            // Block table: scan its direct children for the in-region ones (those
+            // whose line does not start with `[` — i.e. scalars, arrays, inline
+            // tables, and dotted sub-tables, all of which live under this table's
+            // header). The last such child's line is where the new entry goes; its
+            // column sets the indentation.
+            var last_end: ?usize = null;
+            var col: usize = 0;
+            var col_set = false;
+            var cur = node.kind.mapping;
+            while (cur) |id| : (cur = parsed.ast.nodes[id].next_sibling) {
+                const kv_span = parsed.span(parsed.ast.nodes[id]);
+                const ls = lineStartBefore(source, kv_span.start);
+                const fns = firstNonSpace(source, ls);
+                if (fns < source.len and source[fns] == '[') continue; // sub-table header: out of region
+                last_end = kv_span.end;
+                if (!col_set) {
+                    col = fns - ls;
+                    col_set = true;
+                }
+            }
+
+            const insert_at = if (last_end) |e|
+                lineEndAfter(source, e -| 1)
+            else if (is_root)
+                0 // empty document: top of file
+            else
+                lineEndAfter(source, span.end -| 1); // header-only table: just past its `[header]` line
+
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
+            try out.appendNTimes(self.allocator, ' ', col);
+            try out.appendSlice(self.allocator, key_text);
+            try out.appendSlice(self.allocator, " = ");
+            try out.appendSlice(self.allocator, value_text);
+            try out.append(self.allocator, '\n');
+            try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+        }
+
+        /// Splice `key = value` into an inline table, keeping the conventional
+        /// `{ a = 1, b = 2 }` spacing: into a non-empty table the entry is inserted
+        /// right after the last entry's value (`…1` → `…1, key = value`); into an
+        /// empty `{}` it is padded with surrounding spaces (`{ key = value }`).
+        fn tomlInsertFlowEntry(self: *Self, parsed: Document, node: AST.Node, span: Span, key_text: []const u8, value_text: []const u8) !void {
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            const at = if (node.kind.mapping) |first| blk: {
+                var last = first;
+                while (parsed.ast.nodes[last].next_sibling) |n| last = n;
+                try out.appendSlice(self.allocator, ", ");
+                break :blk parsed.span(parsed.ast.nodes[last]).end;
+            } else blk: {
+                try out.append(self.allocator, ' ');
+                break :blk span.start + 1; // just after '{'
+            };
+            try out.appendSlice(self.allocator, key_text);
+            try out.appendSlice(self.allocator, " = ");
+            try out.appendSlice(self.allocator, value_text);
+            if (node.kind.mapping == null) try out.append(self.allocator, ' ');
+            try self.replaceAtSpan(Span.init(at, at), out.items);
+        }
+
+        /// Append a new `[[header]]` element to the array-of-tables at `path`,
+        /// with `body_text` (verbatim TOML `key = value` lines, possibly empty) as
+        /// its contents. The element is spliced after the AoT's current last
+        /// element — past every line of that element's subtree, so a nested
+        /// sub-table inside it is not split. TOML-only.
+        pub fn appendTableToArray(self: *Self, path: []const AST.PathSegment, body_text: []const u8) !void {
+            if (Language != Toml) @compileError("appendTableToArray is TOML-only");
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            if (node.kind != .sequence) return error.NotAnArrayOfTables;
+            var elem = node.kind.sequence orelse return error.NotAnArrayOfTables;
+            var last_elem = elem;
+            while (true) {
+                if (parsed.ast.nodes[elem].kind != .mapping) return error.NotAnArrayOfTables;
+                last_elem = elem;
+                elem = parsed.ast.nodes[elem].next_sibling orelse break;
+            }
+            const source = self.source.items;
+            const end = subtreeMaxEnd(parsed, last_elem);
+            const insert_at = lineEndAfter(source, end -| 1);
+
+            var out: std.ArrayList(u8) = .empty;
+            defer out.deinit(self.allocator);
+            if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
+            try out.append(self.allocator, '\n'); // blank line before the new header
+            try out.appendSlice(self.allocator, "[[");
+            try appendTomlHeaderPath(&out, self.allocator, path);
+            try out.appendSlice(self.allocator, "]]\n");
+            if (body_text.len > 0) {
+                try out.appendSlice(self.allocator, body_text);
+                if (body_text[body_text.len - 1] != '\n') try out.append(self.allocator, '\n');
+            }
             try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
         }
 
@@ -821,6 +952,66 @@ fn reindentInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value_tex
     }
 }
 
+// --- TOML structural helpers ---
+
+/// Largest source `end` over the subtree rooted at `id` — the textual end of an
+/// AoT element including any nested `[header]`/`[[header]]` sub-tables (whose own
+/// node spans point at their header key, with their body following). Used to
+/// find where a new `[[…]]` element can be spliced without splitting the prior
+/// element's contents.
+fn subtreeMaxEnd(parsed: Document, id: AST.Node.Id) usize {
+    var max = parsed.span(parsed.ast.nodes[id]).end;
+    switch (parsed.ast.nodes[id].kind) {
+        .mapping => |first| {
+            var c = first;
+            while (c) |cid| : (c = parsed.ast.nodes[cid].next_sibling) max = @max(max, subtreeMaxEnd(parsed, cid));
+        },
+        .sequence => |first| {
+            var c = first;
+            while (c) |cid| : (c = parsed.ast.nodes[cid].next_sibling) max = @max(max, subtreeMaxEnd(parsed, cid));
+        },
+        .keyvalue => |kv| max = @max(max, @max(subtreeMaxEnd(parsed, kv.key), subtreeMaxEnd(parsed, kv.value))),
+        else => {},
+    }
+    return max;
+}
+
+/// Render a TOML header path (`a.b.c`) from a PathSegment list into `out`. Index
+/// segments are skipped — `[[a.b]]` always targets `a`'s last element, so the
+/// index is implied. Each key prints bare when it is all `[A-Za-z0-9_-]`, else as
+/// a basic-quoted string.
+fn appendTomlHeaderPath(out: *std.ArrayList(u8), allocator: std.mem.Allocator, path: []const AST.PathSegment) !void {
+    var first = true;
+    for (path) |seg| switch (seg) {
+        .index => {},
+        .key => |k| {
+            if (!first) try out.append(allocator, '.');
+            first = false;
+            if (isTomlBareKey(k)) {
+                try out.appendSlice(allocator, k);
+            } else {
+                try out.append(allocator, '"');
+                for (k) |ch| switch (ch) {
+                    '"' => try out.appendSlice(allocator, "\\\""),
+                    '\\' => try out.appendSlice(allocator, "\\\\"),
+                    else => try out.append(allocator, ch),
+                };
+                try out.append(allocator, '"');
+            }
+        },
+    };
+}
+
+fn isTomlBareKey(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        const ok = (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or
+            (c >= '0' and c <= '9') or c == '_' or c == '-';
+        if (!ok) return false;
+    }
+    return true;
+}
+
 // =======
 // TESTING
 // =======
@@ -936,6 +1127,184 @@ test "toml failed edit rolls back and keeps editor usable" {
     try expectTomlSource(&ed, "a = 1\nb = 2\n");
     try ed.replaceValAtPath(&.{.{ .key = "a" }}, "9");
     try expectTomlSource(&ed, "a = 9\nb = 2\n");
+}
+
+// --- TOML structural editing (insert/delete scalar keys, inline arrays, AoT append) ---
+//
+// Format-preserving via spans; the genuinely scattered cases (whole-table
+// delete/move, non-contiguous tables) refuse with a clear error.
+
+test "toml insert key into root" {
+    var ed = try newTomlEditor("a = 1\nb = 2\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{}, "c", "3");
+    try expectTomlSource(&ed, "a = 1\nb = 2\nc = 3\n");
+}
+
+test "toml insert key into empty document" {
+    var ed = try newTomlEditor("");
+    defer ed.deinit();
+    try ed.insertKey(&.{}, "a", "1");
+    try expectTomlSource(&ed, "a = 1\n");
+}
+
+test "toml insert root key goes above the first header" {
+    // The new root key must land in root's own region — before `[t]` opens —
+    // not after the table (which would reparent it into `[t]`).
+    var ed = try newTomlEditor("x = 1\n[t]\ny = 2\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{}, "z", "3");
+    try expectTomlSource(&ed, "x = 1\nz = 3\n[t]\ny = 2\n");
+}
+
+test "toml insert key into a table" {
+    var ed = try newTomlEditor("[server]\nhost = \"a\"\nport = 1\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "server" }}, "tls", "true");
+    try expectTomlSource(&ed, "[server]\nhost = \"a\"\nport = 1\ntls = true\n");
+}
+
+test "toml insert into a table that has a sub-table inserts before the sub-header" {
+    var ed = try newTomlEditor("[a]\nx = 1\n[a.b]\ny = 2\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "a" }}, "w", "9");
+    try expectTomlSource(&ed, "[a]\nx = 1\nw = 9\n[a.b]\ny = 2\n");
+}
+
+test "toml insert into a header-only table" {
+    var ed = try newTomlEditor("[a]\n[a.b]\ny = 2\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "a" }}, "x", "1");
+    try expectTomlSource(&ed, "[a]\nx = 1\n[a.b]\ny = 2\n");
+}
+
+test "toml insert preserves the column of existing entries" {
+    var ed = try newTomlEditor("[a]\n  x = 1\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "a" }}, "y", "2");
+    try expectTomlSource(&ed, "[a]\n  x = 1\n  y = 2\n");
+}
+
+test "toml insert into an inline table" {
+    var ed = try newTomlEditor("p = { x = 1 }\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "p" }}, "y", "2");
+    try expectTomlSource(&ed, "p = { x = 1, y = 2 }\n");
+}
+
+test "toml insert into an empty inline table" {
+    var ed = try newTomlEditor("p = {}\n");
+    defer ed.deinit();
+    try ed.insertKey(&.{.{ .key = "p" }}, "x", "1");
+    try expectTomlSource(&ed, "p = { x = 1 }\n");
+}
+
+test "toml insert duplicate key rolls back" {
+    var ed = try newTomlEditor("a = 1\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.DuplicateKey, ed.insertKey(&.{}, "a", "2"));
+    try expectTomlSource(&ed, "a = 1\n");
+}
+
+test "toml delete scalar key" {
+    var ed = try newTomlEditor("a = 1\nb = 2\nc = 3\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectTomlSource(&ed, "a = 1\nc = 3\n");
+}
+
+test "toml delete key with owned comment" {
+    var ed = try newTomlEditor("a = 1\n# note\nb = 2\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectTomlSource(&ed, "a = 1\n");
+}
+
+test "toml delete key inside a table" {
+    var ed = try newTomlEditor("[t]\nx = 1\ny = 2\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "t" }, .{ .key = "x" } });
+    try expectTomlSource(&ed, "[t]\ny = 2\n");
+}
+
+test "toml delete an inline-table-valued key" {
+    var ed = try newTomlEditor("a = 1\np = { x = 1, y = 2 }\nb = 2\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "p" }});
+    try expectTomlSource(&ed, "a = 1\nb = 2\n");
+}
+
+test "toml delete dotted key removes the line" {
+    var ed = try newTomlEditor("a.b.c = 1\na.b.d = 2\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" } });
+    try expectTomlSource(&ed, "a.b.d = 2\n");
+}
+
+test "toml deleting a header table is refused" {
+    var ed = try newTomlEditor("[a]\nx = 1\n[a.b]\ny = 2\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.CannotDeleteTable, ed.deleteKey(&.{ .{ .key = "a" }, .{ .key = "b" } }));
+    try expectTomlSource(&ed, "[a]\nx = 1\n[a.b]\ny = 2\n");
+}
+
+test "toml deleting an array-of-tables is refused" {
+    var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.CannotDeleteTable, ed.deleteKey(&.{.{ .key = "fruit" }}));
+}
+
+test "toml inline array append/prepend/remove" {
+    var ed = try newTomlEditor("ports = [1, 2]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectTomlSource(&ed, "ports = [1, 2, 3]\n");
+    try ed.prependToSeq(&.{.{ .key = "ports" }}, "0");
+    try expectTomlSource(&ed, "ports = [0, 1, 2, 3]\n");
+    try ed.removeSeqItem(&.{.{ .key = "ports" }}, 2);
+    try expectTomlSource(&ed, "ports = [0, 1, 3]\n");
+}
+
+test "toml inline array ops on array-of-tables are refused" {
+    var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.NotAnInlineArray, ed.appendToSeq(&.{.{ .key = "fruit" }}, "1"));
+}
+
+test "toml append array-of-tables element" {
+    var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
+    defer ed.deinit();
+    try ed.appendTableToArray(&.{.{ .key = "fruit" }}, "name = \"pear\"\n");
+    try expectTomlSource(&ed, "[[fruit]]\nname = \"apple\"\n\n[[fruit]]\nname = \"pear\"\n");
+}
+
+test "toml append AoT element after one with a sub-table" {
+    // The new element must splice past the last element's nested sub-table, not
+    // into the middle of it.
+    var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n\n[fruit.variety]\nkind = \"red\"\n");
+    defer ed.deinit();
+    try ed.appendTableToArray(&.{.{ .key = "fruit" }}, "name = \"pear\"\n");
+    try expectTomlSource(&ed, "[[fruit]]\nname = \"apple\"\n\n[fruit.variety]\nkind = \"red\"\n\n[[fruit]]\nname = \"pear\"\n");
+}
+
+test "toml append empty AoT element" {
+    var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
+    defer ed.deinit();
+    try ed.appendTableToArray(&.{.{ .key = "fruit" }}, "");
+    try expectTomlSource(&ed, "[[fruit]]\nname = \"apple\"\n\n[[fruit]]\n");
+}
+
+test "toml append AoT with a dotted header path" {
+    var ed = try newTomlEditor("[[a.b]]\nx = 1\n");
+    defer ed.deinit();
+    try ed.appendTableToArray(&.{ .{ .key = "a" }, .{ .key = "b" } }, "x = 2\n");
+    try expectTomlSource(&ed, "[[a.b]]\nx = 1\n\n[[a.b]]\nx = 2\n");
+}
+
+test "toml appendTableToArray on a non-AoT is refused" {
+    var ed = try newTomlEditor("nums = [1, 2]\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.NotAnArrayOfTables, ed.appendTableToArray(&.{.{ .key = "nums" }}, "x = 1\n"));
 }
 
 const Yaml = @import("yaml/yaml.zig").Language;
