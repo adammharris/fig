@@ -45,6 +45,11 @@ const CliActionOptions = union(CliAction) {
         /// When converting YAML to another format, drop unknown/custom tags
         /// instead of erroring on them. Has no effect on parsing or YAML→YAML.
         lax_tags: bool = false,
+        /// Lossless conversion: preserve values the target format can't represent
+        /// natively (a null in TOML, a TOML datetime in JSON, …) through a `$fig`
+        /// envelope, and reconstruct any such envelope found in the input. Gates
+        /// both the encode (output) and decode (input) passes; default is lossy.
+        lossless: bool = false,
         /// When set, the input is extracted from a host document of this
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
@@ -93,6 +98,10 @@ const Help = struct {
             \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|toml|zon] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
+            \\  --lossless: preserve values the target can't represent natively
+            \\    (e.g. a null in TOML, a TOML datetime in JSON) via a $fig
+            \\    envelope, and reconstruct any such envelope in the input.
+            \\    --lossy (the default) emits clean, idiomatic output instead.
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: reads the YAML frontmatter
@@ -114,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     var stdout_buf: [512]u8 = undefined;
     var stderr_buf: [512]u8 = undefined;
     var stdout = Io.File.stdout().writer(io, &stdout_buf);
-    var stderr = Io.File.stdout().writer(io, &stderr_buf);
+    var stderr = Io.File.stderr().writer(io, &stderr_buf);
     var stderr_terminal = std.Io.Terminal{ .writer = &stderr.interface, .mode = stderr_color_mode };
     var stdout_terminal = std.Io.Terminal{ .writer = &stdout.interface, .mode = stdout_color_mode };
 
@@ -208,12 +217,32 @@ pub fn main(init: std.process.Init) !void {
             // YAML→YAML keeps it intact for round-trip; JSON never has it.
             const src_is_yaml = opts.from == .yaml or opts.from == .yml;
             const dst_is_yaml = opts.to == .yaml or opts.to == .yml;
-            const ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
+            const base_ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
                 const mode: fig.Language.YAML.TagMode = if (opts.lax_tags) .lax else .strict;
                 const mat = try init.arena.allocator().create(fig.AST);
                 mat.* = try fig.Language.YAML.materialize(init.arena.allocator(), &doc.ast, mode);
                 break :blk mat;
             } else &doc.ast;
+
+            // Lossless mode: decode any `$fig` envelopes in the input back to
+            // their real node kinds, then re-encode for the target format. Skipped
+            // for YAML→YAML, whose reference layer (anchors/tags) lives in
+            // side-tables the core-AST passes would strip — and which round-trips
+            // losslessly already. The passes operate on a core AST, so any
+            // non-YAML source (or a materialized YAML source) is safe.
+            const ast: *const fig.AST = if (opts.lossless and !(src_is_yaml and dst_is_yaml)) blk: {
+                const target: fig.Lossless.Target = switch (opts.to) {
+                    .json, .jsonc => .json,
+                    .yaml, .yml => .yaml,
+                    .toml => .toml,
+                    .zon => .zon,
+                };
+                const decoded = try init.arena.allocator().create(fig.AST);
+                decoded.* = try fig.Lossless.decode(init.arena.allocator(), base_ast);
+                const encoded = try init.arena.allocator().create(fig.AST);
+                encoded.* = try fig.Lossless.encode(init.arena.allocator(), decoded, target);
+                break :blk encoded;
+            } else base_ast;
 
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
@@ -233,7 +262,22 @@ pub fn main(init: std.process.Init) !void {
                     }
                 },
                 .toml => {
-                    if (opts.path == null) {
+                    // TOML has no null. In lossy mode, rather than the printer
+                    // aborting mid-document on one, strip unrepresentable values
+                    // up front and warn — output stays valid and complete.
+                    // (Lossless mode already wrapped them in `$fig` envelopes.)
+                    if (!opts.lossless) {
+                        const result = try fig.Lossless.lossyStrip(init.arena.allocator(), ast, node_id, .toml);
+                        for (result.dropped) |dropped_path| {
+                            try stderr_terminal.setColor(.red);
+                            try stderr_terminal.writer.print("warning: dropped null value at `{s}` (TOML cannot represent null). Use --lossless to preserve.\n", .{dropped_path});
+                            try stderr_terminal.setColor(.reset);
+                        }
+                        try stderr_terminal.writer.flush();
+                        if (result.ast) |stripped| {
+                            try fig.Language.TOML.print(stdout_terminal.writer, &stripped);
+                        }
+                    } else if (opts.path == null) {
                         try fig.Language.TOML.print(stdout_terminal.writer, ast);
                     } else {
                         try fig.Language.TOML.printNode(stdout_terminal.writer, ast, node_id, 0);
@@ -504,12 +548,17 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         var input_override: ?Format = null;
         var output_override: ?Format = null;
         var lax_tags = false;
+        var lossless = false;
         var positionals: std.ArrayList([]const u8) = .empty;
         defer positionals.deinit(allocator);
 
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--lax-tags")) {
                 lax_tags = true;
+            } else if (std.mem.eql(u8, arg, "--lossless")) {
+                lossless = true;
+            } else if (std.mem.eql(u8, arg, "--lossy")) {
+                lossless = false;
             } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
                 const fmt = args.next() orelse {
                     log.err("Missing format value after {s}\n", .{arg});
@@ -575,6 +624,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .to = output_override orelse input_format,
             .requested_help = requested_help,
             .lax_tags = lax_tags,
+            .lossless = lossless,
             .embed = embed,
         } };
     } else {

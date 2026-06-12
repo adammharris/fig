@@ -7,6 +7,7 @@ pub const Editor = @import("editor.zig").Editor;
 pub const Document = @import("document.zig");
 pub const AST = @import("ast.zig");
 pub const Embed = @import("embed.zig");
+pub const Lossless = @import("lossless.zig");
 
 test {
     _ = @import("json/tokenizer.zig");
@@ -23,6 +24,7 @@ test {
     _ = @import("zon/printer.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
+    _ = @import("lossless.zig");
     _ = @import("c_api.zig");
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");
