@@ -11,7 +11,7 @@ const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, yaml, yml, toml };
+const Format = enum { json, jsonc, yaml, yml, toml, zon };
 
 const CliAction = enum {
     help,
@@ -90,7 +90,7 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|yaml] [--output json|yaml] <file> [path]
+            \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|zon] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
             \\  path format: dot syntax for keys, bracket syntax for indices
@@ -176,6 +176,9 @@ pub fn main(init: std.process.Init) !void {
                 // is assembled from scattered source lines, so a table node has
                 // no single contiguous span for the span-based editor.
                 .toml => return error.TomlEditingUnsupported,
+                // ZON edits take the replacement verbatim (a literal ZON value),
+                // like YAML — the editor splices and reparses it.
+                .zon => try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),
             }
         },
         .get => {
@@ -193,6 +196,7 @@ pub fn main(init: std.process.Init) !void {
                 .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
                 .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
                 .toml => try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input),
+                .zon => try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input),
             };
 
             // Converting YAML to a non-YAML format resolves the reference layer
@@ -227,6 +231,13 @@ pub fn main(init: std.process.Init) !void {
                 // Printing TOML output (tables, dotted keys, arrays-of-tables)
                 // is not implemented yet; TOML is supported as an input only.
                 .toml => return error.TomlOutputUnsupported,
+                .zon => {
+                    if (opts.path == null) {
+                        try fig.Language.ZON.print(stdout_terminal.writer, ast);
+                    } else {
+                        try fig.Language.ZON.printNode(stdout_terminal.writer, ast, node_id, 0);
+                    }
+                },
             }
             try stdout_terminal.writer.flush();
         },
@@ -502,6 +513,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .yaml;
                 } else if (std.mem.eql(u8, fmt, "toml")) {
                     input_override = .toml;
+                } else if (std.mem.eql(u8, fmt, "zon")) {
+                    input_override = .zon;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
@@ -517,6 +530,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .yaml;
                 } else if (std.mem.eql(u8, fmt, "toml")) {
                     output_override = .toml;
+                } else if (std.mem.eql(u8, fmt, "zon")) {
+                    output_override = .zon;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;

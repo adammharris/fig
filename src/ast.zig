@@ -71,12 +71,15 @@ pub const Node = struct {
         boolean: bool,
         string: []const u8,
         number: Number,
-        /// A TOML native date/time scalar. Like `number`, the source text is
-        /// kept verbatim in `raw` (no decoding into components — round-trip and
-        /// span fidelity hinge on the raw bytes); `kind` records which of the
-        /// four RFC-3339-derived shapes it is. Other formats never produce this;
-        /// a non-TOML printer renders it as a string (no datetime type in JSON).
-        datetime: Datetime,
+        /// A leaf scalar a source format gives special lexical meaning that the
+        /// abstract model has no first-class variant for: TOML datetimes, ZON
+        /// enum/char literals, etc. The `kind` tag records which, and `text` is
+        /// the value's intrinsic bytes (kept verbatim, like `number.raw` — the
+        /// payload IS the value, so it lives inline, not in a side-table). Adding
+        /// a new such scalar is a new `ExtKind`, not a new union arm: the outer
+        /// switches stay closed; only the printers (where cross-format rendering
+        /// is inherently type-specific) gain an `ExtKind` case.
+        extended: Extended,
         sequence: ?Id,
         mapping: ?Id,
         keyvalue: struct { key: Id, value: Id },
@@ -93,12 +96,24 @@ pub const Node = struct {
                 return self.kind == other.kind and util.eql(u8, self.raw, other.raw);
             }
         };
-        pub const Datetime = struct {
-            raw: []const u8,
-            shape: Shape,
-            pub const Shape = enum { offset_datetime, local_datetime, local_date, local_time };
-            pub fn eql(self: Datetime, other: Datetime) bool {
-                return self.shape == other.shape and util.eql(u8, self.raw, other.raw);
+        pub const Extended = struct {
+            kind: ExtKind,
+            text: []const u8,
+            /// Which special scalar this is. The first four are RFC-3339-derived
+            /// TOML datetimes (`text` is the raw timestamp). `enum_literal`'s
+            /// `text` is the decoded name without the leading `.`; `char_literal`'s
+            /// `text` is the decimal Unicode codepoint (so non-ZON printers can
+            /// treat it as a number, while the ZON printer re-encodes `'A'`).
+            pub const ExtKind = enum {
+                offset_datetime,
+                local_datetime,
+                local_date,
+                local_time,
+                enum_literal,
+                char_literal,
+            };
+            pub fn eql(self: Extended, other: Extended) bool {
+                return self.kind == other.kind and util.eql(u8, self.text, other.text);
             }
         };
         pub fn eql(self: Kind, other: Kind) bool {
@@ -108,7 +123,7 @@ pub const Node = struct {
                 .boolean => |value| value == other.boolean,
                 .string => |value| util.eql(u8, value, other.string),
                 .number => |value| value.eql(other.number),
-                .datetime => |value| value.eql(other.datetime),
+                .extended => |value| value.eql(other.extended),
                 .sequence => |value| value == other.sequence,
                 .mapping => |value| value == other.mapping,
                 .keyvalue => |value| value.key == other.keyvalue.key and value.value == other.keyvalue.value,
