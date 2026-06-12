@@ -16,6 +16,9 @@ test {
     _ = @import("yaml/parser.zig");
     _ = @import("yaml/printer.zig");
     _ = @import("yaml/materialize.zig");
+    _ = @import("toml/tokenizer.zig");
+    _ = @import("toml/parser.zig");
+    _ = @import("toml/printer.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("c_api.zig");
@@ -24,5 +27,8 @@ test {
     }
     if (build_options.yaml_conformance) {
         _ = @import("yaml/conformance.zig");
+    }
+    if (build_options.toml_conformance) {
+        _ = @import("toml/conformance.zig");
     }
 }

@@ -7,10 +7,12 @@ pub fn build(b: *std.Build) void {
     const resolved_target = target.result;
     const run_conformance = b.option(bool, "json-conformance", "Run JSON conformance tests") orelse false;
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
+    const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
+    options.addOption(bool, "toml_conformance", run_toml_conformance);
 
 
     const mod = b.addModule("fig", .{
@@ -94,6 +96,22 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| check_trees_run.addArgs(args);
     const check_trees_step = b.step("check-yaml-trees", "Structural-diff fig's parse vs the suite tree");
     check_trees_step.dependOn(&check_trees_run.step);
+
+    // Dev tool: vendor the toml-lang/toml-test corpus into testdata/toml/.
+    //   zig build gen-toml-conformance -- <path-to-toml-test> [<version>] [<fig-root>]
+    const gen_toml = b.addExecutable(.{
+        .name = "gen_toml_conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_toml_conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fig", .module = mod }},
+        }),
+    });
+    const gen_toml_run = b.addRunArtifact(gen_toml);
+    if (b.args) |args| gen_toml_run.addArgs(args);
+    const gen_toml_step = b.step("gen-toml-conformance", "Vendor the toml-test corpus");
+    gen_toml_step.dependOn(&gen_toml_run.step);
 
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
