@@ -32,15 +32,17 @@ const activeTag = std.meta.activeTag;
 
 const max_file = 4 * 1024 * 1024;
 
-// Known structural mismatches: fig accepts these but parses them to the wrong
-// shape (the pass/fail scoreboard rates them as passes). Two root causes:
-//   - compact nested sequences flatten: `- - c` -> [c] not [[c]]
-//     (3ALJ, 6BCT, 7ZZ5, A2M4, W42U; AB8U is the multi-line-plain sibling)
-//   - a collection used as a complex `?` key collapses into sibling null entries
-//     (6PBE, KK5P, M2N8, M2N8-1, RZP5, XW4D)
-// All are exotic block constructs absent from typical frontmatter. RATCHET: the
-// run fails if the count rises above this; lower it as fixes land.
-const mismatch_baseline = 12;
+// Known structural mismatch: fig accepts this but parses it to the wrong shape
+// (the pass/fail scoreboard rates it a pass). AB8U: a plain scalar whose
+// continuation line begins with `- ` (`- single multiline\n - sequence entry`
+// folds to one scalar) — the tokenizer treats the indented `- ` as a nested
+// sequence, and disambiguating it from a real nested sequence needs parser-state
+// feedback the tokenizer lacks. Removing the indicator guard that causes it
+// regresses 3 other structural cases + a reject case, so it is left as the single
+// known divergence. (The two compact-nested-sequence and complex-`?`-key clusters
+// that used to live here are now fixed.) RATCHET: the run fails if the count
+// rises above this; lower it as fixes land.
+const mismatch_baseline = 1;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
