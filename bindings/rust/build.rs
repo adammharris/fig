@@ -107,6 +107,18 @@ fn run(command: &mut Command) {
 }
 
 fn zig_target_for_cargo_target(target: &str, host: &str) -> Option<&'static str> {
+    // Windows MSVC must be handled before the `target == host` shortcut: Zig's
+    // native default Windows ABI is GNU-style and emits `__chkstk_ms`, a
+    // compiler-rt stack-probe symbol that Zig does not bundle into a static
+    // lib, so the MSVC linker can't resolve it. Forcing the msvc ABI makes Zig
+    // emit `__chkstk` (provided by the MSVC runtime) and keeps the static lib
+    // ABI-compatible with the windows-msvc Rust binary it links into.
+    match target {
+        "x86_64-pc-windows-msvc" => return Some("x86_64-windows-msvc"),
+        "aarch64-pc-windows-msvc" => return Some("aarch64-windows-msvc"),
+        _ => {}
+    }
+
     if target == host {
         return None;
     }
