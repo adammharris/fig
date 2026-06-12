@@ -189,8 +189,16 @@ pub fn extractStream(allocator: Allocator, source: []const u8) !Stream {
                 // document *at* this line — the marker stays in the slice so
                 // inline content (`--- foo`) is preserved and the parser eats
                 // the marker token.
-                try pushSegment(allocator, source, &docs, seg_start, line, seg_explicit);
-                seg_start = line;
+                //
+                // Directives (`%YAML`/`%TAG`) preceding the `---` belong to the
+                // document it introduces. If the pending segment is just those
+                // directives (and trivia), don't close it here — let the explicit
+                // document include them, so the parser sees `%YAML\n---\n…` as one
+                // document and validates the directive against its marker.
+                if (!segmentIsDirectives(source[seg_start..line])) {
+                    try pushSegment(allocator, source, &docs, seg_start, line, seg_explicit);
+                    seg_start = line;
+                }
                 seg_explicit = true;
             },
             .end => {
@@ -255,6 +263,29 @@ fn markerKind(source: []const u8, at: usize) MarkerKind {
     if (std.mem.startsWith(u8, line, "--- ") or std.mem.startsWith(u8, line, "---\t")) return .start;
     if (std.mem.eql(u8, std.mem.trimEnd(u8, line, " \t"), "...")) return .end;
     return .none;
+}
+
+/// True if every content line of `slice` (ignoring blanks and comments) is a
+/// column-0 directive (`%…`), and there is at least one. Such a pre-`---`
+/// segment is a directives prefix that belongs to the following document, not a
+/// document of its own.
+fn segmentIsDirectives(slice: []const u8) bool {
+    var any = false;
+    var i: usize = 0;
+    while (i < slice.len) {
+        const eol = lineEnd(slice, i);
+        const line = std.mem.trimEnd(u8, slice[i..eol], "\r\n");
+        i = eol;
+        if (line.len == 0) continue;
+        if (line[0] == '%') {
+            any = true; // a directive sits at column 0
+            continue;
+        }
+        const body = std.mem.trim(u8, line, " \t");
+        if (body.len == 0 or body[0] == '#') continue; // blank or comment
+        return false; // some other content — not a pure directives prefix
+    }
+    return any;
 }
 
 /// True if `slice` has any line that is neither blank nor a comment.
@@ -350,6 +381,42 @@ test "extractStream: two explicit documents in a stream (JHB9)" {
     try testing.expect(stream.documents[1].explicit);
     try testing.expectEqualSlices(u8, "Mark McGwire", (try stream.documents[0].document.ast.getValByPath(&.{.{ .index = 0 }})).kind.string);
     try testing.expectEqualSlices(u8, "St Louis Cardinals", (try stream.documents[1].document.ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+}
+
+test "extractStream: directives fold into the following document (6ZKB-shaped)" {
+    // Each `%…` prefix belongs to the `---` it introduces, not a document of its
+    // own: `Document` is doc 1, the empty `---` is doc 2, and `%YAML 1.2\n---\n…`
+    // is doc 3.
+    const src =
+        \\Document
+        \\---
+        \\# Empty
+        \\...
+        \\%YAML 1.2
+        \\---
+        \\matches %: 20
+        \\
+    ;
+    const stream = try extractStream(testing.allocator, src);
+    defer stream.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 3), stream.documents.len);
+    try testing.expectEqualSlices(u8, "Document", rootKind(stream.documents[0].document).string);
+    try testing.expect(rootKind(stream.documents[1].document) == .null_);
+    try testing.expectEqualSlices(u8, "20", (try stream.documents[2].document.ast.getValByPath(&.{.{ .key = "matches %" }})).kind.number.raw);
+}
+
+test "extractStream: a tag handle scoped to the first document fails later use (QLJ7)" {
+    // `!prefix!` is declared only for the first document; documents 2 and 3 use
+    // it undeclared, so the splitter must reject the stream.
+    const src =
+        \\%TAG !prefix! tag:example.com,2011:
+        \\--- !prefix!A
+        \\a: b
+        \\--- !prefix!B
+        \\c: d
+        \\
+    ;
+    try testing.expectError(error.UndefinedTagHandle, extractStream(testing.allocator, src));
 }
 
 test "extractStream: two document start markers yields two null docs (6XDY)" {

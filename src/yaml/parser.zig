@@ -62,6 +62,12 @@ container_tag: ?PendingTag = null,
 container_anchor: ?PendingAnchor = null,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
+// Named tag handles (`!e!`, `!prefix!`) declared by `%TAG` directives in this
+// document. A named handle used by a tag must be declared (the `!` and `!!`
+// default handles are always available and not listed). Per-document by
+// construction: a stream is parsed one document at a time, each with a fresh
+// Parser, so a handle declared for one document is not visible to the next.
+tag_handles: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
 index: usize = 0,
 force_new_container: bool = false,
@@ -76,6 +82,14 @@ doc_ended: bool = false,
 // there (`--- a: b`, `--- - x` are invalid — only a scalar or flow node fits on
 // the marker line); cleared at the first newline.
 on_doc_start_line: bool = false,
+// True once a directive (`%YAML`/`%TAG`/reserved) has been seen for the current
+// document but its `---` directives-end marker has not yet appeared. The marker
+// is mandatory, so anything other than another directive or the `---` is an
+// error (`%YAML 1.2` alone, or followed by `...`).
+directives_pending: bool = false,
+// True once a `%YAML` directive has been seen for the current document, to
+// reject a duplicate one (at most one per document).
+yaml_directive_seen: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
@@ -83,7 +97,7 @@ source: []const u8 = "",
 const PendingTag = struct { text: []const u8, span: Span };
 const PendingAnchor = struct { name: []const u8, span: Span };
 
-const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty, UndefinedAlias };
+const ParseError = error{ UnexpectedToken, EmptyDocument, UnclosedString, InvalidUnicodeEscape, MultipleDocuments, DuplicateProperty, UndefinedAlias, InvalidDirective, UndefinedTagHandle };
 const ParserError = ParseError || std.mem.Allocator.Error;
 
 /// Primary entry point
@@ -126,6 +140,13 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         if (self.value_only_indents > 0) switch (self.peek().kind) {
             .newline, .dedent, .end_of_file => {},
             else => return ParseError.UnexpectedToken,
+        };
+        // A directive must be followed by a `---` directives-end marker. While one
+        // is pending, only more directives, blank lines, or that marker are valid;
+        // content, a `...` end, or EOF means the marker is missing.
+        if (self.directives_pending) switch (self.peek().kind) {
+            .directive, .newline, .doc_start => {},
+            else => return ParseError.InvalidDirective,
         };
         switch (self.peek().kind) {
             .indent => {
@@ -174,7 +195,20 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 if (self.doc_started or self.nodes.items.len > 0) return ParseError.MultipleDocuments;
                 self.doc_started = true;
                 self.on_doc_start_line = true;
+                // The `---` ends any directives prefix and resolves it.
+                self.directives_pending = false;
                 _ = self.advance();
+            },
+            .directive => {
+                // Directives may only introduce a document: before its `---`, with
+                // no content yet. A directive after content (`foo\n%YAML`) or after
+                // the `---`/content of this single document is invalid.
+                if (self.doc_started or self.doc_ended or self.root != null or
+                    self.nodes.items.len > 0 or self.container_stack.items.len > 0)
+                    return ParseError.InvalidDirective;
+                const tok = self.advance();
+                try self.parseDirective(tok.source(self.source));
+                self.directives_pending = true;
             },
             .doc_end => {
                 self.doc_ended = true;
@@ -376,6 +410,75 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     };
 }
 
+/// Validate a directive line (`line` is the token text, starting with `%`).
+/// `%YAML` carries exactly one `major.minor` version and at most one may appear
+/// per document; `%TAG` carries a handle and a prefix; any other name is a
+/// reserved directive, accepted and ignored. fig does not act on directives —
+/// tags are kept verbatim for round-tripping — so this only checks their syntax.
+fn parseDirective(self: *Parser, line: []const u8) ParserError!void {
+    std.debug.assert(line.len > 0 and line[0] == '%');
+    var i: usize = 1;
+    const name_start = i;
+    while (i < line.len and !isDirectiveSpace(line[i])) i += 1;
+    const name = line[name_start..i];
+    if (name.len == 0) return ParseError.InvalidDirective; // `%` with no name
+
+    if (std.mem.eql(u8, name, "YAML")) {
+        // At most one `%YAML` per document.
+        if (self.yaml_directive_seen) return ParseError.InvalidDirective;
+        self.yaml_directive_seen = true;
+        i = skipDirectiveSpace(line, i);
+        const ver_start = i;
+        while (i < line.len and !isDirectiveSpace(line[i])) i += 1;
+        if (!isYamlVersion(line[ver_start..i])) return ParseError.InvalidDirective;
+        try requireDirectiveEnd(line, i);
+    } else if (std.mem.eql(u8, name, "TAG")) {
+        i = skipDirectiveSpace(line, i);
+        const handle_start = i;
+        while (i < line.len and !isDirectiveSpace(line[i])) i += 1;
+        const handle = line[handle_start..i];
+        if (handle.len == 0) return ParseError.InvalidDirective; // missing handle
+        i = skipDirectiveSpace(line, i);
+        const prefix_start = i;
+        while (i < line.len and !isDirectiveSpace(line[i])) i += 1;
+        if (i == prefix_start) return ParseError.InvalidDirective; // missing prefix
+        try requireDirectiveEnd(line, i);
+        // Record a named handle (`!e!`) so tags may use it. The `!`/`!!` default
+        // handles need no declaration; recording them is harmless.
+        try self.tag_handles.append(self.allocator, handle);
+    }
+    // else: a reserved directive — accepted and ignored (params unrestricted).
+}
+
+fn isDirectiveSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\r';
+}
+
+fn skipDirectiveSpace(line: []const u8, i: usize) usize {
+    var j = i;
+    while (j < line.len and isDirectiveSpace(line[j])) j += 1;
+    return j;
+}
+
+/// A `%YAML` version is `major.minor`, both non-empty digit runs.
+fn isYamlVersion(s: []const u8) bool {
+    const dot = std.mem.indexOfScalar(u8, s, '.') orelse return false;
+    const major = s[0..dot];
+    const minor = s[dot + 1 ..];
+    if (major.len == 0 or minor.len == 0) return false;
+    for (major) |c| if (!std.ascii.isDigit(c)) return false;
+    for (minor) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// After a directive's parameters only blanks and an optional `#` comment may
+/// follow (a comment must be whitespace-separated, which the parameter scan,
+/// stopping at the first space, already guarantees).
+fn requireDirectiveEnd(line: []const u8, i: usize) ParseError!void {
+    const j = skipDirectiveSpace(line, i);
+    if (j < line.len and line[j] != '#') return ParseError.InvalidDirective;
+}
+
 pub fn deinit(self: *Parser) void {
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
@@ -389,6 +492,7 @@ pub fn deinit(self: *Parser) void {
         self.allocator.free(string);
     }
     self.owned_strings.deinit(self.allocator);
+    self.tag_handles.deinit(self.allocator);
 }
 
 fn parseSequenceEntry(self: *Parser) ParserError!void {
@@ -1661,7 +1765,26 @@ fn stashAnchor(self: *Parser, name: []const u8, span: Span) ParserError!void {
     self.pending_anchor = .{ .name = name, .span = span };
 }
 
+/// A tag using a *named* handle (`!handle!suffix`) is valid only if that handle
+/// was declared by a `%TAG` directive in this document. The `!` (primary) and
+/// `!!` (secondary) default handles, local tags (`!suffix`), and verbatim tags
+/// (`!<uri>`) need no declaration. Scoping is per-document because each document
+/// in a stream is parsed by a fresh Parser (see `tag_handles`).
+fn validateTagHandle(self: *const Parser, text: []const u8) ParseError!void {
+    if (text.len < 2) return; // `!` non-specific tag
+    if (text[1] == '<' or text[1] == '!') return; // verbatim, or secondary `!!`
+    // A named handle has a second `!` closing it (`!e!foo` → handle `!e!`). No
+    // second `!` means a local tag (`!suffix`), which uses the primary handle.
+    const close = std.mem.indexOfScalarPos(u8, text, 1, '!') orelse return;
+    const handle = text[0 .. close + 1];
+    for (self.tag_handles.items) |declared| {
+        if (std.mem.eql(u8, declared, handle)) return;
+    }
+    return ParseError.UndefinedTagHandle;
+}
+
 fn stashTag(self: *Parser, text: []const u8, span: Span) ParserError!void {
+    try self.validateTagHandle(text);
     if (self.pending_tag) |prev| {
         if (self.container_tag != null) return ParseError.DuplicateProperty;
         self.container_tag = prev;
@@ -1761,6 +1884,57 @@ test "yaml tag: empty value is a tagged null" {
 
 test "yaml tag: two tags on one node is rejected" {
     try testParserError("!!str !!int x\n", error.DuplicateProperty);
+}
+
+test "yaml directive: %YAML before document is consumed" {
+    const doc = try Parser.parse(testing.allocator, "%YAML 1.2\n---\nfoo\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "foo", doc.ast.nodes[doc.ast.root].kind.string);
+}
+
+test "yaml directive: %TAG declares a handle used by a tag" {
+    const doc = try Parser.parse(testing.allocator, "%TAG !e! tag:example.com,2000:app/\n---\n!e!foo bar\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const root = doc.ast.nodes[doc.ast.root];
+    try testing.expectEqualSlices(u8, "bar", root.kind.string);
+    try testing.expectEqualSlices(u8, "!e!foo", doc.ast.node_tags[root.id].?);
+}
+
+test "yaml directive: a reserved directive is ignored" {
+    const doc = try Parser.parse(testing.allocator, "%FOO bar baz # ignored\n---\n\"x\"\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "x", doc.ast.nodes[doc.ast.root].kind.string);
+}
+
+test "yaml directive: %YAML without a following marker is rejected" {
+    try testParserError("%YAML 1.2\n", error.InvalidDirective);
+}
+
+test "yaml directive: a directive followed by `...` is rejected" {
+    try testParserError("%YAML 1.2\n...\n", error.InvalidDirective);
+}
+
+test "yaml directive: duplicate %YAML is rejected" {
+    try testParserError("%YAML 1.2\n%YAML 1.2\n---\n", error.InvalidDirective);
+}
+
+test "yaml directive: malformed %YAML version is rejected" {
+    try testParserError("%YAML 1.2 foo\n---\n", error.InvalidDirective);
+}
+
+test "yaml directive: a directive after content is rejected" {
+    try testParserError("---\nkey: value\n%YAML 1.2\n---\n", error.InvalidDirective);
+}
+
+test "yaml directive: an undeclared named tag handle is rejected" {
+    try testParserError("--- !prefix!A\na: b\n", error.UndefinedTagHandle);
+}
+
+test "yaml directive: a multiline plain scalar may absorb a %-line (XLQ9)" {
+    // `%YAML 1.2` here is a plain-scalar continuation, not a directive.
+    const doc = try Parser.parse(testing.allocator, "---\nscalar\n%YAML 1.2\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "scalar %YAML 1.2", doc.ast.nodes[doc.ast.root].kind.string);
 }
 
 test "yaml tag: flow tagged-null value" {
@@ -1903,6 +2077,16 @@ test "yaml plain scalar: trailing comment on a continuation line" {
     const doc = try Parser.parse(testing.allocator, "b: plain\n value  # comment\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "plain value", (try doc.ast.getValByPath(&.{.{ .key = "b" }})).kind.string);
+}
+
+test "yaml: a property-only line at a different column than its node" {
+    // M5C3 shape: a tag on its own line (col 3) above the block header it
+    // decorates (col 2). The property line is not a structural indent level.
+    const doc = try Parser.parse(testing.allocator, "folded:\n   !foo\n  >1\n value\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const v = try doc.ast.getValByPath(&.{.{ .key = "folded" }});
+    try testing.expect(v.kind == .string);
+    try testing.expectEqualSlices(u8, "!foo", doc.ast.node_tags[v.id].?);
 }
 
 test "yaml block scalar: next-line header with explicit indent over the owner column" {

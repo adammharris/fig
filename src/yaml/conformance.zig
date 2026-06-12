@@ -26,11 +26,14 @@ const max_fixture_size = 1024 * 1024;
 
 // Baseline scores. These are a ratchet: raise them as coverage improves; never
 // lower them without a deliberate reason. A run below baseline fails the test.
-const accept_baseline = 270;
-const reject_baseline = 84;
+const accept_baseline = 289;
+const reject_baseline = 93;
 // Multi-document streams parsed via Embed.extractStream (the single-document
 // parser refuses a stream; the splitter feeds it one document at a time).
-const stream_baseline = 13;
+const stream_baseline = 19;
+// Multi-document streams that must FAIL: Embed.extractStream must error on each
+// (e.g. a tag handle defined only in the first document, used in a later one).
+const reject_stream_baseline = 1;
 
 const Score = struct {
     correct: usize = 0,
@@ -40,7 +43,8 @@ const Score = struct {
 test "yaml conformance: scoreboard" {
     const accept = try scoreDir("testdata/yaml/accept", .should_pass);
     const reject = try scoreDir("testdata/yaml/reject", .should_fail);
-    const stream = try scoreStreamDir("testdata/yaml/stream");
+    const stream = try scoreStreamDir("testdata/yaml/stream", .should_pass);
+    const reject_stream = try scoreStreamDir("testdata/yaml/reject-stream", .should_fail);
 
     std.debug.print(
         \\
@@ -48,21 +52,25 @@ test "yaml conformance: scoreboard" {
         \\  accept (must parse): {d}/{d}   baseline {d}
         \\  reject (must fail) : {d}/{d}   baseline {d}
         \\  stream (extractStream): {d}/{d}   baseline {d}
+        \\  reject-stream (extractStream must fail): {d}/{d}   baseline {d}
         \\
     , .{
-        accept.correct, accept.total, accept_baseline,
-        reject.correct, reject.total, reject_baseline,
-        stream.correct, stream.total, stream_baseline,
+        accept.correct,        accept.total,        accept_baseline,
+        reject.correct,        reject.total,        reject_baseline,
+        stream.correct,        stream.total,        stream_baseline,
+        reject_stream.correct, reject_stream.total, reject_stream_baseline,
     });
 
     try testing.expect(accept.correct >= accept_baseline);
     try testing.expect(reject.correct >= reject_baseline);
     try testing.expect(stream.correct >= stream_baseline);
+    try testing.expect(reject_stream.correct >= reject_stream_baseline);
 }
 
-/// Score the multi-document fixtures: each must split into documents that all
-/// parse (Embed.extractStream errors if any document fails).
-fn scoreStreamDir(dir_path: []const u8) !Score {
+/// Score the multi-document fixtures via Embed.extractStream, which errors if
+/// any document fails. `.should_pass` fixtures must split + parse cleanly;
+/// `.should_fail` fixtures must make the splitter error.
+fn scoreStreamDir(dir_path: []const u8, expected: Expected) !Score {
     var threaded = std.Io.Threaded.init(testing.allocator, .{});
     defer threaded.deinit();
     const io = threaded.io();
@@ -82,8 +90,10 @@ fn scoreStreamDir(dir_path: []const u8) !Score {
         score.total += 1;
         if (Embed.extractStream(testing.allocator, input)) |stream| {
             stream.deinit(testing.allocator);
-            score.correct += 1;
-        } else |_| {}
+            if (expected == .should_pass) score.correct += 1;
+        } else |_| {
+            if (expected == .should_fail) score.correct += 1;
+        }
     }
     return score;
 }

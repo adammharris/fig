@@ -15,9 +15,9 @@
 //!     testdata/yaml/reject/<id>.yaml   (must fail to parse)
 //!     testdata/yaml/stream/<id>.yaml   (purely multi-document; must split +
 //!                                       parse via Embed.extractStream)
-//! Multi-item files become <id>-1.yaml, <id>-2.yaml, ... Out-of-scope tests
-//! (anchors, aliases, tags, directives, and multi-document streams that also
-//! use those features) are excluded and listed in testdata/yaml/skiplist.txt.
+//! Multi-item files become <id>-1.yaml, <id>-2.yaml, ... The only out-of-scope
+//! tests now are *failing* multi-document streams (a passing one is handled by
+//! Embed.extractStream); they are listed in testdata/yaml/skiplist.txt.
 //!
 //! Usage: zig build gen-yaml-conformance -- <path-to-yaml-test-suite> [<fig-root>]
 
@@ -28,13 +28,6 @@ const Io = std.Io;
 const activeTag = std.meta.activeTag;
 
 const max_file = 4 * 1024 * 1024;
-
-// Suite tags for features fig does not yet support. Tags and anchors/aliases are
-// now parsed (tags attach as side-tables; aliases are real nodes resolved via the
-// anchor table), so only directives remain out of scope.
-const oos_tags = [_][]const u8{
-    "directive", // %YAML / %TAG directives
-};
 
 const Skip = struct { id: []const u8, reasons: []const u8 };
 
@@ -61,7 +54,9 @@ pub fn main(init: std.process.Init) !void {
     const reject_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "reject" });
     // Multi-document streams: parsed via the Embed.extractStream splitter (the
     // single-document parser refuses a stream), so they get their own category.
+    // A failing stream lands in reject-stream (extractStream must error on it).
     const stream_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "stream" });
+    const reject_stream_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml", "reject-stream" });
     const yaml_path = try std.fs.path.join(arena, &.{ fig_root, "testdata", "yaml" });
 
     const cwd = std.Io.Dir.cwd();
@@ -74,6 +69,9 @@ pub fn main(init: std.process.Init) !void {
     try cwd.createDirPath(io, stream_path);
     var stream_dir = try cwd.openDir(io, stream_path, .{ .iterate = true });
     defer stream_dir.close(io);
+    try cwd.createDirPath(io, reject_stream_path);
+    var reject_stream_dir = try cwd.openDir(io, reject_stream_path, .{ .iterate = true });
+    defer reject_stream_dir.close(io);
     var yaml_dir = try cwd.openDir(io, yaml_path, .{});
     defer yaml_dir.close(io);
 
@@ -82,6 +80,7 @@ pub fn main(init: std.process.Init) !void {
     try clearFixtures(io, accept_dir);
     try clearFixtures(io, reject_dir);
     try clearFixtures(io, stream_dir);
+    try clearFixtures(io, reject_stream_dir);
 
     // Collect and sort the source file names for deterministic output.
     var names: std.ArrayList([]const u8) = .empty;
@@ -96,6 +95,7 @@ pub fn main(init: std.process.Init) !void {
     var n_accept: usize = 0;
     var n_reject: usize = 0;
     var n_stream: usize = 0;
+    var n_reject_stream: usize = 0;
     var n_noyaml: usize = 0;
     var skips: std.ArrayList(Skip) = .empty;
 
@@ -121,15 +121,18 @@ pub fn main(init: std.process.Init) !void {
             const item = ast.nodes[id];
             first_child = item.next_sibling;
 
-            // `yaml`/`tags`/`tree` inherit item 0's value when absent; `fail`
-            // does not (a later case that omits it is a valid case).
+            // `yaml`/`tree` inherit item 0's value when absent; `fail` does not
+            // (a later case that omits it is a valid case).
             const yaml = fieldString(ast, item, "yaml") orelse fieldString(ast, first, "yaml") orelse {
                 n_noyaml += 1;
                 continue;
             };
-            const tags = fieldString(ast, item, "tags") orelse fieldString(ast, first, "tags") orelse "";
             const tree = fieldString(ast, item, "tree") orelse fieldString(ast, first, "tree") orelse "";
             const fail = fieldBool(ast, item, "fail");
+            // `skip: true` marks a case the suite authors deem unreliable (valid by
+            // the grammar but not usefully so, likely to be made invalid later) and
+            // ask runners to exclude. It inherits from item 0 like tags/tree.
+            if (fieldBool(ast, item, "skip") or fieldBool(ast, first, "skip")) continue;
 
             const test_id = if (i == 0)
                 base
@@ -137,15 +140,21 @@ pub fn main(init: std.process.Init) !void {
                 try std.fmt.allocPrint(arena, "{s}-{d}", .{ base, i });
             const data = try decode(arena, yaml);
 
-            const reasons = try outOfScopeReasons(arena, tags, tree, data);
+            const reasons = try outOfScopeReasons(arena, tree);
             const file = try std.fmt.allocPrint(arena, "{s}.yaml", .{test_id});
             if (reasons.len > 0) {
-                // A *purely* multi-document stream (no anchors/tags/directives) is
-                // in scope via the Embed.extractStream splitter. A failing one
-                // would need the splitter to reject — keep those skiplisted.
-                if (!fail and reasons.len == 1 and std.mem.eql(u8, reasons[0], "multi-document")) {
-                    try stream_dir.writeFile(io, .{ .sub_path = file, .data = data });
-                    n_stream += 1;
+                // A multi-document stream is handled by the Embed.extractStream
+                // splitter: a passing one must split + parse (stream/), a failing
+                // one must make the splitter error (reject-stream/). Any other
+                // out-of-scope reason is skiplisted.
+                if (reasons.len == 1 and std.mem.eql(u8, reasons[0], "multi-document")) {
+                    if (fail) {
+                        try reject_stream_dir.writeFile(io, .{ .sub_path = file, .data = data });
+                        n_reject_stream += 1;
+                    } else {
+                        try stream_dir.writeFile(io, .{ .sub_path = file, .data = data });
+                        n_stream += 1;
+                    }
                 } else {
                     try skips.append(arena, .{
                         .id = test_id,
@@ -169,8 +178,8 @@ pub fn main(init: std.process.Init) !void {
     try writeSkiplist(io, yaml_dir, arena, skips.items);
 
     std.debug.print(
-        "accept: {d}  reject: {d}  stream: {d}  out-of-scope(skipped): {d}  no-yaml-field: {d}\n",
-        .{ n_accept, n_reject, n_stream, skips.items.len, n_noyaml },
+        "accept: {d}  reject: {d}  stream: {d}  reject-stream: {d}  out-of-scope(skipped): {d}  no-yaml-field: {d}\n",
+        .{ n_accept, n_reject, n_stream, n_reject_stream, skips.items.len, n_noyaml },
     );
 }
 
@@ -239,46 +248,15 @@ fn fieldBool(ast: *const AST, map: AST.Node, key: []const u8) bool {
     return false;
 }
 
-/// Out-of-scope reasons for a test (empty == in scope), sorted and deduplicated.
-fn outOfScopeReasons(arena: std.mem.Allocator, tags: []const u8, tree: []const u8, data: []const u8) ![]const []const u8 {
+/// Out-of-scope reasons for a test (empty == in scope). The only remaining
+/// out-of-scope feature is a multi-document stream that *also fails*: a passing
+/// stream is handled by Embed.extractStream, but a failing one would need the
+/// splitter to reject it (see the call site). Detected structurally from the
+/// event tree (two or more `+DOC`).
+fn outOfScopeReasons(arena: std.mem.Allocator, tree: []const u8) ![]const []const u8 {
     var reasons: std.ArrayList([]const u8) = .empty;
-    const add = struct {
-        fn f(list: *std.ArrayList([]const u8), a: std.mem.Allocator, reason: []const u8) !void {
-            for (list.items) |existing| if (std.mem.eql(u8, existing, reason)) return;
-            try list.append(a, reason);
-        }
-    }.f;
-
-    var tag_it = std.mem.tokenizeScalar(u8, tags, ' ');
-    while (tag_it.next()) |tag| {
-        for (oos_tags) |oos| {
-            if (std.mem.eql(u8, tag, oos)) try add(&reasons, arena, oos);
-        }
-    }
-    if (std.mem.count(u8, tree, "+DOC") >= 2) try add(&reasons, arena, "multi-document");
-    if (hasDirective(data)) try add(&reasons, arena, "directive");
-
-    std.mem.sort([]const u8, reasons.items, {}, lessThanStr);
+    if (std.mem.count(u8, tree, "+DOC") >= 2) try reasons.append(arena, "multi-document");
     return reasons.items;
-}
-
-/// True if any line of `data` is a `%YAML`/`%TAG` directive.
-fn hasDirective(data: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        if (directiveKeyword(line, "%YAML") or directiveKeyword(line, "%TAG")) return true;
-    }
-    return false;
-}
-
-fn directiveKeyword(line: []const u8, kw: []const u8) bool {
-    if (!std.mem.startsWith(u8, line, kw)) return false;
-    if (line.len == kw.len) return true;
-    return !isWordChar(line[kw.len]); // a `\b` word boundary after the keyword
-}
-
-fn isWordChar(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
 /// Decode the yaml-test-suite whitespace placeholders into real bytes.
