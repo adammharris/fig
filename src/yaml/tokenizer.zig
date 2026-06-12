@@ -31,6 +31,7 @@ pub const Kind = enum {
     alias, // `*name` whole node (a reference to an anchored node)
     doc_start, // `---` document start marker
     doc_end, // `...` document end marker
+    directive, // `%YAML`/`%TAG`/reserved directive line (whole line, sans newline)
     end_of_file,
 
     pub fn len(self: Kind) ?usize {
@@ -84,10 +85,15 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
     errdefer self.tokens.deinit(self.allocator);
     try self.tokens.ensureTotalCapacity(self.allocator, self.source.len + 1);
 
+    // A line whose only content is node properties (`&a`/`!tag`) does not bracket
+    // structure: the node it decorates sits on a following line, possibly at a
+    // different column. Such an indent level is marked `prop_only` so a dedent
+    // into it lets the node take that shallower column instead of erroring.
+    const Level = struct { indent: usize, prop_only: bool };
     var current_indent: usize = 0;
-    var indent_stack: std.ArrayList(usize) = .empty;
+    var indent_stack: std.ArrayList(Level) = .empty;
     defer indent_stack.deinit(self.allocator);
-    try indent_stack.append(self.allocator, 0);
+    try indent_stack.append(self.allocator, .{ .indent = 0, .prop_only = false });
 
     // YAML is whitespace-sensitive, so we parse line-by-line.
     while (try self.getLine()) |line| {
@@ -142,14 +148,24 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
         }
 
         const indent = line.content_start - line.start;
+        const prop_only = self.lineIsPropertyOnly(line);
         if (indent > current_indent) {
-            try indent_stack.append(self.allocator, indent);
+            try indent_stack.append(self.allocator, .{ .indent = indent, .prop_only = prop_only });
             try self.addToken(.init(.indent, .init(line.start, line.content_start)));
             current_indent = indent;
         } else if (indent < current_indent) {
             while (indent < current_indent) {
-                _ = indent_stack.pop();
-                current_indent = indent_stack.getLast();
+                const popped = indent_stack.pop().?;
+                current_indent = indent_stack.getLast().indent;
+                // Dedenting out of a property-only level into a column still
+                // deeper than the level below means the property's node lives at
+                // that shallower column (`folded:\n   !foo\n  >1`): replace the
+                // level rather than requiring an exact match, and emit no dedent.
+                if (popped.prop_only and indent > current_indent) {
+                    try indent_stack.append(self.allocator, .{ .indent = indent, .prop_only = prop_only });
+                    current_indent = indent;
+                    break;
+                }
                 try self.addToken(.fixed(.dedent, line.content_start));
             }
             if (indent != current_indent) return TokenizeError.InvalidIndent;
@@ -180,6 +196,19 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
                 }
                 continue;
             }
+        }
+
+        // A directive line (`%YAML`/`%TAG`/reserved) sits at column 0. `%` is an
+        // indicator that cannot begin a plain scalar, and a genuine plain-scalar
+        // continuation starting with `%` is consumed by `handlePlain` before it
+        // reaches here, so a column-0 `%` line is always a directive. The parser
+        // validates it and enforces that it precedes a `---` document.
+        if (indent == 0 and self.source[line.content_start] == '%') {
+            try self.addToken(.init(.directive, .init(line.content_start, line.end)));
+            if (line.newline_end > line.end) {
+                try self.addToken(.init(.newline, .init(line.end, line.newline_end)));
+            }
+            continue;
         }
 
         // A tab in the indentation of a block mapping key or sequence entry is
@@ -1030,6 +1059,34 @@ fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
 
 /// True when only a document-start marker and trivia have been emitted so far —
 /// i.e. the next node is the document root, which has no indentation floor.
+/// True when a line's only content is node properties (`&anchor`/`!tag`),
+/// optionally followed by a comment — e.g. a tag sitting on its own line above
+/// the block scalar it decorates. Such a line does not establish structure.
+fn lineIsPropertyOnly(self: *const Tokenizer, line: Line) bool {
+    if (self.flow_depth > 0) return false;
+    var i = line.content_start;
+    var saw_property = false;
+    while (i < line.end) {
+        switch (self.source[i]) {
+            ' ', '\t' => i += 1,
+            '#' => return saw_property, // a trailing comment after properties
+            '&' => {
+                const end = anchorNameEnd(self.source, i + 1, line.end);
+                if (end == i + 1) return false; // empty name → not a property
+                i = end;
+                saw_property = true;
+            },
+            '!' => {
+                const end = tagEnd(self.source, i, line.end, false) orelse return false;
+                i = end;
+                saw_property = true;
+            },
+            else => return false, // any other content
+        }
+    }
+    return saw_property;
+}
+
 /// Column (0-based) of `pos` on its source line.
 fn columnOf(self: *const Tokenizer, pos: usize) usize {
     var i = pos;
@@ -1065,8 +1122,9 @@ fn precededOnlyByTrivia(self: *const Tokenizer) bool {
     for (self.tokens.items) |t| switch (t.kind) {
         // A `.tag`/`.anchor` is a node property, not structural content: a root
         // node keeps its root position when prefixed by one, so a tagged/anchored
-        // multi-line root scalar (`!!str\nd\ne`) still gathers its lines.
-        .doc_start, .newline, .whitespace, .comment, .tag, .anchor => {},
+        // multi-line root scalar (`!!str\nd\ne`) still gathers its lines. A
+        // `.directive` is document prefix (`%YAML 1.2\n--- >`), likewise not content.
+        .doc_start, .newline, .whitespace, .comment, .tag, .anchor, .directive => {},
         else => return false,
     };
     return true;
@@ -1529,6 +1587,19 @@ test "yaml document markers" {
             tok(.doc_end, 14, 17),
             tok(.newline, 17, 18),
             tok(.end_of_file, 18, 18),
+        },
+    );
+}
+
+test "yaml directive line is a single directive token" {
+    try testTokenizer(
+        "%YAML 1.2\n---\n",
+        &.{
+            tok(.directive, 0, 9),
+            tok(.newline, 9, 10),
+            tok(.doc_start, 10, 13),
+            tok(.newline, 13, 14),
+            tok(.end_of_file, 14, 14),
         },
     );
 }
