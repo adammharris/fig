@@ -197,10 +197,14 @@ pub export fn fig_node_kind(doc: ?*const FigDocument, node: FigNodeId) FigNodeKi
             .integer => .int,
             .float => .float,
         },
-        // C has no datetime type; surface a TOML datetime as a string scalar
-        // (fig_node_string returns its raw text). A dedicated ABI kind is
-        // deferred until TOML reaches the CLI/bindings (Phase 5/6).
-        .datetime => .string,
+        // C has no type for these. Datetimes and enum literals surface as string
+        // scalars (fig_node_string returns the text); a char literal surfaces as
+        // an int (fig_node_number returns its codepoint). Dedicated ABI kinds are
+        // deferred until these formats reach the bindings.
+        .extended => |ext| switch (ext.kind) {
+            .char_literal => .int,
+            else => .string,
+        },
         .sequence => .sequence,
         .mapping => .mapping,
         .keyvalue => .keyvalue,
@@ -282,6 +286,15 @@ pub export fn fig_node_number(
             l.* = num.raw.len;
             return true;
         },
+        // A char literal reads out as its decimal codepoint (see fig_node_kind).
+        .extended => |ext| switch (ext.kind) {
+            .char_literal => {
+                p.* = ext.text.ptr;
+                l.* = ext.text.len;
+                return true;
+            },
+            else => return false,
+        },
         else => return false,
     }
 }
@@ -301,11 +314,15 @@ pub export fn fig_node_string(
             l.* = s.len;
             return true;
         },
-        // A datetime reads out as its raw RFC-3339 text (see fig_node_kind).
-        .datetime => |dt| {
-            p.* = dt.raw.ptr;
-            l.* = dt.raw.len;
-            return true;
+        // Datetimes and enum literals read out as their text (see fig_node_kind);
+        // a char literal is a number, handled by fig_node_number instead.
+        .extended => |ext| switch (ext.kind) {
+            .char_literal => return false,
+            else => {
+                p.* = ext.text.ptr;
+                l.* = ext.text.len;
+                return true;
+            },
         },
         else => return false,
     }

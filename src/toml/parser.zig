@@ -410,7 +410,7 @@ fn parseValue(self: *Parser) ParserError!AST.Node.Id {
             _ = self.advance();
             const raw = self.tokenText(tok);
             const shape = try self.classifyDatetime(raw);
-            return self.addNode(.{ .datetime = .{ .raw = raw, .shape = shape } }, tok.span);
+            return self.addNode(.{ .extended = .{ .text = raw, .kind = shape } }, tok.span);
         },
         .boolean => {
             _ = self.advance();
@@ -798,7 +798,9 @@ fn intern(self: *Parser, s: []const u8) ParserError![]const u8 {
 
 // ── Datetime validation / classification ────────────────────────────────────
 
-const Shape = AST.Node.Kind.Datetime.Shape;
+// The datetime subset of ExtKind; `classifyDatetime` only ever returns these
+// four. (TOML never produces the enum/char-literal ExtKinds — those are ZON.)
+const Shape = AST.Node.Kind.Extended.ExtKind;
 
 fn classifyDatetime(self: *Parser, raw: []const u8) ParserError!Shape {
     // Time-only: HH:MM...
@@ -912,7 +914,7 @@ test "parses scalar key/value pairs" {
     const pi = try ast.getValByPath(&.{.{ .key = "pi" }});
     try testing.expect(pi.kind.number.kind == .float);
     const when = try ast.getValByPath(&.{.{ .key = "when" }});
-    try testing.expect(when.kind.datetime.shape == .offset_datetime);
+    try testing.expect(when.kind.extended.kind == .offset_datetime);
 }
 
 test "datetime shapes" {
@@ -930,7 +932,7 @@ test "datetime shapes" {
         var doc = try parse(testing.allocator, src, .TOML_1_0);
         defer doc.deinit(testing.allocator);
         const d = try doc.ast.getValByPath(&.{.{ .key = "d" }});
-        try testing.expectEqual(c.shape, d.kind.datetime.shape);
+        try testing.expectEqual(c.shape, d.kind.extended.kind);
     }
 }
 
@@ -1049,7 +1051,7 @@ test "TOML 1.1 features: optional seconds, \\e/\\x escapes, inline-table newline
     defer doc.deinit(testing.allocator);
     const ast = &doc.ast;
     const t = try ast.getValByPath(&.{.{ .key = "t" }});
-    try testing.expect(t.kind.datetime.shape == .local_time);
+    try testing.expect(t.kind.extended.kind == .local_time);
     const esc = try ast.getValByPath(&.{.{ .key = "esc" }});
     try testing.expectEqualStrings("\x1bA", esc.kind.string);
     const b = try ast.getValByPath(&.{ .{ .key = "tbl" }, .{ .key = "b" } });

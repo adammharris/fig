@@ -71,9 +71,9 @@ const Materializer = struct {
                 defer self.leave();
                 return self.copy(self.src.nodes[target]);
             },
-            // `.datetime` never appears in a YAML AST, but the switch must be
+            // `.extended` never appears in a YAML AST, but the switch must be
             // exhaustive; treat it as a plain scalar for completeness.
-            .null_, .boolean, .number, .datetime, .string => return self.emit(try self.applyScalarTag(node)),
+            .null_, .boolean, .number, .extended, .string => return self.emit(try self.applyScalarTag(node)),
             .sequence => |first| {
                 try self.checkCollectionTag(node, .seq);
                 const id = try self.emit(.{ .sequence = null });

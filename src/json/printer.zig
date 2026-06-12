@@ -21,8 +21,13 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
         .null_ => try writer.writeAll("null"),
         .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
         .number => |value| try writer.writeAll(value.raw),
-        // JSON has no datetime type; emit the raw RFC-3339 text as a string.
-        .datetime => |value| try writeJsonString(writer, value.raw),
+        // JSON has none of these types. Datetimes and enum literals render as
+        // strings (the timestamp / the bare name); a char literal renders as its
+        // codepoint number.
+        .extended => |value| switch (value.kind) {
+            .char_literal => try writer.writeAll(value.text),
+            else => try writeJsonString(writer, value.text),
+        },
         .string => |value| try writeJsonString(writer, value),
         .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
         .mapping => |first_child| try printMapping(writer, ast, first_child, depth),

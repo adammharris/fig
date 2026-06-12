@@ -225,10 +225,10 @@ fn matchLeaf(ta: *const AST, t_id: AST.Node.Id, leaf: Leaf) bool {
         .bool => node == .boolean and std.mem.eql(u8, if (node.boolean) "true" else "false", leaf.value),
         .integer => node == .number and node.number.kind == .integer and intEqual(node.number.raw, leaf.value),
         .float => node == .number and node.number.kind == .float and floatEqual(node.number.raw, leaf.value),
-        .datetime => node == .datetime and node.datetime.shape == .offset_datetime and datetimeEqual(node.datetime.raw, leaf.value),
-        .@"datetime-local" => node == .datetime and node.datetime.shape == .local_datetime and datetimeEqual(node.datetime.raw, leaf.value),
-        .@"date-local" => node == .datetime and node.datetime.shape == .local_date and datetimeEqual(node.datetime.raw, leaf.value),
-        .@"time-local" => node == .datetime and node.datetime.shape == .local_time and datetimeEqual(node.datetime.raw, leaf.value),
+        .datetime => node == .extended and node.extended.kind == .offset_datetime and datetimeEqual(node.extended.text, leaf.value),
+        .@"datetime-local" => node == .extended and node.extended.kind == .local_datetime and datetimeEqual(node.extended.text, leaf.value),
+        .@"date-local" => node == .extended and node.extended.kind == .local_date and datetimeEqual(node.extended.text, leaf.value),
+        .@"time-local" => node == .extended and node.extended.kind == .local_time and datetimeEqual(node.extended.text, leaf.value),
     };
 }
 

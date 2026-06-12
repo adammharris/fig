@@ -21,10 +21,14 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
             try writer.writeAll(value.raw);
             try writer.writeByte('\n');
         },
-        .datetime => |value| {
-            // YAML's core schema has no timestamp type (that was YAML 1.1);
-            // emit the raw text as a plain scalar.
-            try writer.writeAll(value.raw);
+        .extended => |value| {
+            // YAML's core schema has none of these types (timestamps were YAML
+            // 1.1). Enum literals become string scalars (may need quoting);
+            // datetimes and char codepoints emit verbatim as plain scalars.
+            switch (value.kind) {
+                .enum_literal => try printScalar(writer, value.text),
+                else => try writer.writeAll(value.text),
+            }
             try writer.writeByte('\n');
         },
         .string => |value| {
@@ -144,7 +148,10 @@ fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writ
         .null_ => try writer.writeAll("null"),
         .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
         .number => |value| try writer.writeAll(value.raw),
-        .datetime => |value| try writer.writeAll(value.raw),
+        .extended => |value| switch (value.kind) {
+            .enum_literal => try printScalar(writer, value.text),
+            else => try writer.writeAll(value.text),
+        },
         .string => |value| try printScalar(writer, value),
         .sequence => |child| if (child == null) try writer.writeAll("[]") else try writer.writeAll("[...]"),
         .mapping => |child| if (child == null) try writer.writeAll("{}") else try writer.writeAll("{...}"),

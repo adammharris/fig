@@ -19,6 +19,8 @@ test {
     _ = @import("toml/tokenizer.zig");
     _ = @import("toml/parser.zig");
     _ = @import("toml/printer.zig");
+    _ = @import("zon/parser.zig");
+    _ = @import("zon/printer.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("c_api.zig");
