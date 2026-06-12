@@ -197,6 +197,10 @@ pub export fn fig_node_kind(doc: ?*const FigDocument, node: FigNodeId) FigNodeKi
             .integer => .int,
             .float => .float,
         },
+        // C has no datetime type; surface a TOML datetime as a string scalar
+        // (fig_node_string returns its raw text). A dedicated ABI kind is
+        // deferred until TOML reaches the CLI/bindings (Phase 5/6).
+        .datetime => .string,
         .sequence => .sequence,
         .mapping => .mapping,
         .keyvalue => .keyvalue,
@@ -295,6 +299,12 @@ pub export fn fig_node_string(
         .string => |s| {
             p.* = s.ptr;
             l.* = s.len;
+            return true;
+        },
+        // A datetime reads out as its raw RFC-3339 text (see fig_node_kind).
+        .datetime => |dt| {
+            p.* = dt.raw.ptr;
+            l.* = dt.raw.len;
             return true;
         },
         else => return false,

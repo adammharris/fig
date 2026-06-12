@@ -2976,7 +2976,7 @@ fn shape(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
 
 fn shapeNode(alloc: std.mem.Allocator, ast: *const AST, node: AST.Node, out: *std.ArrayList(u8)) !void {
     switch (node.kind) {
-        .null_, .boolean, .string, .number, .alias => try shapePush(alloc, out, "S"),
+        .null_, .boolean, .string, .number, .datetime, .alias => try shapePush(alloc, out, "S"),
         .sequence => |first| {
             try shapePush(alloc, out, "[");
             var child = first;

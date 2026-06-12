@@ -11,7 +11,7 @@ const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, yaml, yml };
+const Format = enum { json, jsonc, yaml, yml, toml };
 
 const CliAction = enum {
     help,
@@ -172,6 +172,10 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => {
                     try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key);
                 },
+                // In-place TOML editing is not implemented yet: a logical table
+                // is assembled from scattered source lines, so a table node has
+                // no single contiguous span for the span-based editor.
+                .toml => return error.TomlEditingUnsupported,
             }
         },
         .get => {
@@ -188,6 +192,7 @@ pub fn main(init: std.process.Init) !void {
             else switch (opts.from) {
                 .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
                 .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
+                .toml => try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input),
             };
 
             // Converting YAML to a non-YAML format resolves the reference layer
@@ -219,6 +224,9 @@ pub fn main(init: std.process.Init) !void {
                         try fig.Language.YAML.printNode(stdout_terminal.writer, ast, node_id, 0);
                     }
                 },
+                // Printing TOML output (tables, dotted keys, arrays-of-tables)
+                // is not implemented yet; TOML is supported as an input only.
+                .toml => return error.TomlOutputUnsupported,
             }
             try stdout_terminal.writer.flush();
         },
@@ -492,6 +500,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .json;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
                     input_override = .yaml;
+                } else if (std.mem.eql(u8, fmt, "toml")) {
+                    input_override = .toml;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
@@ -505,6 +515,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .json;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
                     output_override = .yaml;
+                } else if (std.mem.eql(u8, fmt, "toml")) {
+                    output_override = .toml;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
