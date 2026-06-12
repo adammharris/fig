@@ -16,8 +16,8 @@ It is currently in early alpha. Most features are not implemented yet.
 ## Progress
 
 - [x] Design token, parser, document architecture
-- [ ] Design cross-config interface (public Zig API)
-- [ ] Embedded config (i.e. markdown frontmatter)
+- [x] Design cross-config interface (public Zig API)
+- [x] Embedded config (i.e. markdown frontmatter)
 - [x] Command-line interface
 - [x] C ABI
 - [ ] Quality check
@@ -34,9 +34,6 @@ Other planned features:
 - Edit in place + sorting, both in files and in other plain text files
 - Conversion between different config formats
 
-Out of scope:
-- Many advanced config language features, like anchors and multi-documents
-
 ## Fine print
 
 **Contibutions**
@@ -52,6 +49,7 @@ I started writing this library by hand (no AI) for my own education, and for use
 - Portions of `src/yaml/tokenizer.zig`. (GPT-5.5-medium, [commit 776ca93](https://github.com/adammharris/fig/commit/776ca93de564e146fd31bacdf64448ab8ee1643c))
 - Most of `src/yaml/parser.zig`. (GPT-5.5-medium, [commit a6dceb2](https://github.com/adammharris/fig/commit/a6dceb2a654524ab27f276d27603ff7411344155), [commit 963bfb3](https://github.com/adammharris/fig/commit/963bfb34c95d07ee2efceb0dceb398fb6e986205))
 - The Rust bindings (GPT-5.5-medium, [commit fbf4c82](https://github.com/adammharris/fig/commit/fbf4c82eeb5a73937db28745b1ba72037ade0e64)).
+- YAML conformance + C ABI + Rust bindings work by Claude Opus 4.8, pending more thorough review, but working and well-tested to far
 
 This code was carefully reviewed and edited according to my taste before being accepted.
 
