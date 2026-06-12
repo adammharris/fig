@@ -46,8 +46,9 @@ fn main() {
     }
 
     // Apple's `ld` rejects Zig's static archive ("not 8-byte aligned"); repack
-    // it with the system tools so it links.
-    if cargo_target.contains("apple-darwin") {
+    // it with the system tools so it links. Applies to every Apple target
+    // (macOS and iOS device/simulator), all of which link with ld64.
+    if cargo_target.contains("apple") {
         repack_archive_for_apple_ld(&prefix.join("lib").join("libfig.a"));
     }
 
@@ -135,6 +136,9 @@ fn zig_target_for_cargo_target(target: &str, host: &str) -> Option<&'static str>
     match target {
         "aarch64-apple-darwin" => Some("aarch64-macos"),
         "x86_64-apple-darwin" => Some("x86_64-macos"),
+        "aarch64-apple-ios" => Some("aarch64-ios"),
+        "aarch64-apple-ios-sim" => Some("aarch64-ios-simulator"),
+        "x86_64-apple-ios" => Some("x86_64-ios-simulator"),
         "aarch64-pc-windows-gnu" => Some("aarch64-windows-gnu"),
         "x86_64-pc-windows-gnu" => Some("x86_64-windows-gnu"),
         "i686-pc-windows-gnu" => Some("x86-windows-gnu"),
