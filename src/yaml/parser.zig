@@ -37,6 +37,10 @@ const OpenContainer = struct {
     // `?`) is being parsed: the next child container that closes into this
     // mapping is the key, not a value.
     building_explicit_key: bool = false,
+    // Source column of the `?` indicator while `building_explicit_key`. A dedent
+    // that lands BELOW this column ends the explicit entry with a null value and
+    // closes this mapping; one landing AT it leaves room for a `:` value line.
+    explicit_key_col: usize = 0,
 };
 
 nodes: std.ArrayList(AST.Node) = .empty,
@@ -172,16 +176,29 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 } else {
                     try self.closePendingEmptyValue();
                     const dedent = self.advance();
+                    const dedent_col = self.columnOf(dedent.span.start);
                     // Close the container at this indent. An indentless sequence
                     // shares its enclosing mapping's column and opened no indent
                     // of its own, so the one dedent matching that column must
                     // also close the mapping (and any further such nesting).
                     while (true) {
-                        const close_parent_too = self.container_stack.items.len > 0 and
+                        var close_parent_too = self.container_stack.items.len > 0 and
                             self.currentContainer().shares_parent_indent;
+                        // A complex explicit key with no `:` value (`? - a` then a
+                        // dedent to a shallower sibling): the key container opened
+                        // mid-line, so this dedent must also close the explicit
+                        // mapping with a null value — but only when it lands BELOW
+                        // the `?` column. Landing AT it leaves room for a `:` value
+                        // line (`? - a\n  - b\n: c`), so the mapping stays open.
+                        if (!close_parent_too and self.container_stack.items.len >= 2) {
+                            const parent = self.container_stack.items[self.container_stack.items.len - 2];
+                            if (parent.building_explicit_key and dedent_col < parent.explicit_key_col)
+                                close_parent_too = true;
+                        }
                         const id = try self.closeContainer(dedent.span.end);
                         try self.finishValue(id);
                         if (!close_parent_too) break;
+                        try self.closePendingEmptyValue();
                     }
                 }
             },
@@ -236,6 +253,17 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                 // same line as its `:` must be closed first; that makes it the
                 // pending key (via finishValue's building_explicit_key path).
                 try self.closeOpenComplexKey();
+                // A deferred explicit key (`?` alone on its line) whose `:` arrives
+                // with no key content: the key is empty (null). closeOpenComplexKey
+                // already resolved the case where key content WAS supplied, leaving
+                // building_explicit_key set only when none was.
+                if (self.container_stack.items.len > 0 and self.currentContainer().building_explicit_key) {
+                    const null_key = try self.addNode(.null_, .init(self.peek().span.start, self.peek().span.start));
+                    const m = self.currentContainer();
+                    m.building_explicit_key = false;
+                    m.pending_key = null_key;
+                    m.explicit_awaiting_value = true;
+                }
                 if (self.container_stack.items.len > 0 and self.currentContainer().explicit_awaiting_value) {
                     // A standalone `:` supplying the value for an explicit key.
                     const colon = self.advance();
@@ -556,7 +584,18 @@ fn parseSequenceEntry(self: *Parser) ParserError!void {
             self.containerById(mapping_id).continues_sequence_item = true;
             try self.parseEmptyKeyEntry();
         },
-        .dash => try self.parseSequenceEntry(),
+        .dash => {
+            // A compact nested sequence (`- - c`): the inner dash opens a
+            // sequence nested inside this one, rather than continuing it. Open it
+            // as a child container marked to absorb the following line's indent
+            // (`continues_sequence_item`, as the compact-value and complex-key
+            // paths do), then parse its first entry. Without the explicit open,
+            // `ensureContainer` would return this same sequence and the entries
+            // would flatten (`- - c` → [c] instead of [[c]]).
+            const inner_id = try self.openContainer(.sequence, self.peek().span.start);
+            self.containerById(inner_id).continues_sequence_item = true;
+            try self.parseSequenceEntry();
+        },
         else => return ParseError.UnexpectedToken,
     }
 }
@@ -680,6 +719,18 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
 
     self.skipTriviaNoNewline();
     try self.consumePendingProperties(); // `? !!str key`
+    // `?` alone on its line, with no property decorating the key: the key is
+    // supplied by following lines (an indentless or indented block collection,
+    // `?\n- a\n- b`), not empty. Defer like a complex key — the following content
+    // closes into this mapping as its key (building_explicit_key), and a `:` that
+    // arrives with no key content resolves to a null key (see the `.colon`
+    // main-loop handler). A pending property (`? &a\n`) instead decorates an
+    // empty key node here and now, so it falls through to the null-key arm.
+    if (self.peek().kind == .newline and self.pending_anchor == null and self.pending_tag == null) {
+        self.containerById(mapping_id).building_explicit_key = true;
+        self.containerById(mapping_id).explicit_key_col = self.columnOf(marker.span.start);
+        return;
+    }
     const key_id = switch (self.peek().kind) {
         .scalar => key: {
             if (self.isMappingStart()) {
@@ -694,6 +745,7 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
                 // finishValue (via building_explicit_key) record it as the
                 // pending key when it closes at the dedent before `:`.
                 self.containerById(mapping_id).building_explicit_key = true;
+                self.containerById(mapping_id).explicit_key_col = self.columnOf(marker.span.start);
                 const key_map_id = try self.openContainer(.mapping, self.peek().span.start);
                 self.containerById(key_map_id).continues_sequence_item = true;
                 try self.parseMappingEntry();
@@ -701,7 +753,26 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
             }
             break :key try self.parseScalar();
         },
-        .flow_seq_start, .flow_map_start => try self.parseFlowNode(),
+        .flow_seq_start, .flow_map_start => flow: {
+            const node_id = try self.parseFlowNode();
+            self.skipTriviaNoNewline();
+            if (self.peek().kind == .colon) {
+                // A complex key that is itself a flow-keyed block mapping
+                // (`? []: x`): open a key mapping with the flow node as its first
+                // key, mirroring the block-mapping key path.
+                self.containerById(mapping_id).building_explicit_key = true;
+                self.containerById(mapping_id).explicit_key_col = self.columnOf(marker.span.start);
+                const key_map_id = try self.openContainer(.mapping, self.node_spans.items[node_id].start);
+                self.containerById(key_map_id).continues_sequence_item = true;
+                const colon = self.advance();
+                const km = self.containerById(key_map_id);
+                km.pending_key = node_id;
+                km.pending_value_span = colon.span.end;
+                try self.parseMappingValue(false);
+                return;
+            }
+            break :flow node_id;
+        },
         .block_header => try self.parseBlockScalar(),
         .alias => try self.parseAlias(), // `? *a`
         .dash => {
@@ -711,13 +782,26 @@ fn parseExplicitKey(self: *Parser) ParserError!void {
             // the `:` itself closes it — it becomes the pending key (see
             // finishValue), not a value.
             self.containerById(mapping_id).building_explicit_key = true;
+            self.containerById(mapping_id).explicit_key_col = self.columnOf(marker.span.start);
             const seq_id = try self.openContainer(.sequence, self.peek().span.start);
             self.containerById(seq_id).continues_sequence_item = true;
             try self.parseSequenceEntry();
             return;
         },
-        // `?` directly before its `:` (or end of entry) is an empty (null) key.
-        .colon, .newline, .dedent, .end_of_file => try self.addNode(.null_, .init(marker.span.end, marker.span.end)),
+        .colon => {
+            // A complex key that is itself an empty-key block mapping (`? : x`):
+            // the `:`-led entry on the `?` line is a one-entry mapping serving as
+            // the key, mirroring the block-mapping key path (`? a: b`).
+            self.containerById(mapping_id).building_explicit_key = true;
+            self.containerById(mapping_id).explicit_key_col = self.columnOf(marker.span.start);
+            const key_map_id = try self.openContainer(.mapping, self.peek().span.start);
+            self.containerById(key_map_id).continues_sequence_item = true;
+            try self.parseEmptyKeyEntry();
+            return;
+        },
+        // `?` alone on its line with a decorating property (`? &a\n`), or `?` at
+        // end of entry, is a null key.
+        .newline, .dedent, .end_of_file => try self.addNode(.null_, .init(marker.span.end, marker.span.end)),
         else => return ParseError.UnexpectedToken,
     };
 
@@ -913,7 +997,11 @@ fn decodeBlockScalar(self: *Parser, header: []const u8, parent_indent: usize, bo
 fn currentContainerIndent(self: *const Parser) usize {
     if (self.container_stack.items.len == 0) return 0;
     const id = self.container_stack.items[self.container_stack.items.len - 1].id;
-    const pos = self.node_spans.items[id].start;
+    return self.columnOf(self.node_spans.items[id].start);
+}
+
+/// The source column (offset from the start of its line) of byte position `pos`.
+fn columnOf(self: *const Parser, pos: usize) usize {
     var start = pos;
     while (start > 0 and self.source[start - 1] != '\n') start -= 1;
     return pos - start;
@@ -1350,13 +1438,16 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
 }
 
 fn closeSequenceItemContinuation(self: *Parser) ParserError!void {
-    if (self.container_stack.items.len == 0) return;
-    if (!self.currentContainer().continues_sequence_item) return;
-
-    self.currentContainer().continues_sequence_item = false;
-    try self.closePendingEmptyValue();
-    const id = try self.closeContainer(self.node_spans.items[self.currentContainer().id].end);
-    try self.finishValue(id);
+    // Close every stacked same-line continuation container, not just one:
+    // compact nested sequences (`- - - x`) leave several sequences open with no
+    // dedent between them, and a shallower sibling on the next line must close
+    // all of them at once (`- - - []` then `- - - {}` are siblings, not nested).
+    while (self.container_stack.items.len > 0 and self.currentContainer().continues_sequence_item) {
+        self.currentContainer().continues_sequence_item = false;
+        try self.closePendingEmptyValue();
+        const id = try self.closeContainer(self.node_spans.items[self.currentContainer().id].end);
+        try self.finishValue(id);
+    }
 }
 
 /// If a complex explicit key's container (a block sequence opened after `?`) is
@@ -2868,6 +2959,71 @@ test "yaml rejects tab before a block sequence indicator" {
     // A tab separating a `?`/`:` from a `-` would indent the block with a tab.
     try testParserError("?\t-\n", error.TabIndent);
     try testParserError("? -\n:\t-\n", error.TabIndent);
+}
+
+/// Test helper: render a parse's structure-only shape (`[`/`]` sequence,
+/// `{`/`}` mapping, `S` scalar/alias leaf), the same normalization
+/// tools/check_yaml_trees.zig diffs against the yaml-test-suite event tree. Used
+/// to lock the *shape* of constructs the pass/fail scoreboard can't see.
+fn shape(alloc: std.mem.Allocator, src: []const u8) ![]u8 {
+    var doc = try Parser.parse(alloc, src, .v1_2_2);
+    defer doc.deinit(alloc);
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(alloc);
+    try shapeNode(alloc, &doc.ast, doc.ast.nodes[doc.ast.root], &out);
+    return out.toOwnedSlice(alloc);
+}
+
+fn shapeNode(alloc: std.mem.Allocator, ast: *const AST, node: AST.Node, out: *std.ArrayList(u8)) !void {
+    switch (node.kind) {
+        .null_, .boolean, .string, .number, .alias => try shapePush(alloc, out, "S"),
+        .sequence => |first| {
+            try shapePush(alloc, out, "[");
+            var child = first;
+            while (child) |cid| : (child = ast.nodes[cid].next_sibling) try shapeNode(alloc, ast, ast.nodes[cid], out);
+            try shapePush(alloc, out, "]");
+        },
+        .mapping => |first| {
+            try shapePush(alloc, out, "{");
+            var child = first;
+            while (child) |cid| : (child = ast.nodes[cid].next_sibling) {
+                const kv = ast.nodes[cid].kind.keyvalue;
+                try shapeNode(alloc, ast, ast.nodes[kv.key], out);
+                try shapeNode(alloc, ast, ast.nodes[kv.value], out);
+            }
+            try shapePush(alloc, out, "}");
+        },
+        .keyvalue => unreachable,
+    }
+}
+
+fn shapePush(alloc: std.mem.Allocator, out: *std.ArrayList(u8), tok: []const u8) !void {
+    if (out.items.len > 0) try out.append(alloc, ' ');
+    try out.appendSlice(alloc, tok);
+}
+
+fn expectShape(src: []const u8, want: []const u8) !void {
+    const got = try shape(testing.allocator, src);
+    defer testing.allocator.free(got);
+    try testing.expectEqualSlices(u8, want, got);
+}
+
+test "yaml compact nested sequences keep their nesting" {
+    // `- - x` nests rather than flattening to [x]; a following entry at the outer
+    // column is a sibling, and three dashes nest three deep.
+    try expectShape("- - s1\n  - s2\n- s3\n", "[ [ S S ] S ]");
+    try expectShape("- - - x\n- - - y\n", "[ [ [ S ] ] [ [ S ] ] ]");
+}
+
+test "yaml complex explicit keys take collections as the key" {
+    // Explicit key that is a block sequence, with a null value (closes on the
+    // dedent to a sibling) and with a `:` value at the `?` column.
+    try expectShape("c1:\n  ? - a\nc2:\n  ? - a\n  : b\n", "{ S { [ S ] S } S { [ S ] S } }");
+    // `?` alone on its line: an indentless sequence is the key, another the value.
+    try expectShape("?\n- a\n- b\n:\n- c\n- d\n", "{ [ S S ] [ S S ] }");
+    // An inline empty-key mapping, and a flow-keyed mapping, serve as the key.
+    try expectShape("- ? : x\n", "[ { { S S } S } ]");
+    try expectShape("? []: x\n", "{ { [ ] S } S }");
 }
 
 test "yaml merge key is an ordinary string key" {
