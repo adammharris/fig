@@ -78,6 +78,23 @@ pub fn build(b: *std.Build) void {
     const gen_yaml_step = b.step("gen-yaml-conformance", "Regenerate the YAML conformance corpus");
     gen_yaml_step.dependOn(&gen_yaml_run.step);
 
+    // Dev tool: STRUCTURAL conformance — compare the shape of fig's parse against
+    // the suite's canonical `tree:` event stream (the pass/fail scoreboard can't
+    // see a wrong-shape accept). zig build check-yaml-trees -- <suite> [<fig-root>]
+    const check_trees = b.addExecutable(.{
+        .name = "check_yaml_trees",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_yaml_trees.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fig", .module = mod }},
+        }),
+    });
+    const check_trees_run = b.addRunArtifact(check_trees);
+    if (b.args) |args| check_trees_run.addArgs(args);
+    const check_trees_step = b.step("check-yaml-trees", "Structural-diff fig's parse vs the suite tree");
+    check_trees_step.dependOn(&check_trees_run.step);
+
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
         orelse &.{};
