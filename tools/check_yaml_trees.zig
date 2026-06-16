@@ -192,7 +192,7 @@ fn emitFigStructure(arena: std.mem.Allocator, ast: *const AST) ![]const u8 {
 
 fn emitNode(arena: std.mem.Allocator, ast: *const AST, node: AST.Node, out: *std.ArrayList(u8)) !void {
     switch (node.kind) {
-        .null_, .boolean, .string, .number, .alias => try push(arena, out, "S"),
+        .null_, .boolean, .string, .number, .alias, .extended => try push(arena, out, "S"),
         .sequence => |first| {
             try push(arena, out, "[");
             var child = first;

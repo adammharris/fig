@@ -177,13 +177,23 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                     try self.closePendingEmptyValue();
                     const dedent = self.advance();
                     const dedent_col = self.columnOf(dedent.span.start);
-                    // Close the container at this indent. An indentless sequence
-                    // shares its enclosing mapping's column and opened no indent
-                    // of its own, so the one dedent matching that column must
-                    // also close the mapping (and any further such nesting).
+                    // Close the container at this indent. Two flags mean a
+                    // container shares its parent's indent level and opened no
+                    // indent of its own, so the single dedent matching that level
+                    // must also close the parent (and any further such nesting):
+                    //   - `shares_parent_indent`: an indentless block sequence
+                    //     shares its enclosing mapping's column (`k:\n  s:\n  - 1`).
+                    //   - `continues_sequence_item`: an item container opened on a
+                    //     dash line (`- k: v` → a mapping; `- - x` → a sequence)
+                    //     shares its enclosing sequence's dash level, since the
+                    //     content after the `-` pushes no indent of its own. Without
+                    //     this the enclosing sequence is closed lazily against the
+                    //     wrong level and every following key lands one level too
+                    //     deep (a top-level field then reads as "dropped").
                     while (true) {
                         var close_parent_too = self.container_stack.items.len > 0 and
-                            self.currentContainer().shares_parent_indent;
+                            (self.currentContainer().shares_parent_indent or
+                                self.currentContainer().continues_sequence_item);
                         // A complex explicit key with no `:` value (`? - a` then a
                         // dedent to a shallower sibling): the key container opened
                         // mid-line, so this dedent must also close the explicit
@@ -3013,6 +3023,24 @@ test "yaml compact nested sequences keep their nesting" {
     // column is a sibling, and three dashes nest three deep.
     try expectShape("- - s1\n  - s2\n- s3\n", "[ [ S S ] S ]");
     try expectShape("- - - x\n- - - y\n", "[ [ [ S ] ] [ [ S ] ] ]");
+}
+
+test "yaml key after a nested block sequence is a sibling, not absorbed" {
+    // A block sequence of mappings (`- k: v`) stacks two containers (the
+    // sequence and each item mapping) but occupies a single tokenizer indent
+    // level, so the dedent out of it must close both. Otherwise a following key
+    // at the parent's column lands one level too deep — which a struct
+    // deserializer reads as the top-level field being silently dropped.
+    // Indentless sequence value:
+    try expectShape("a:\n  items:\n  - k: 1\n  - k: 2\nb: 2\n", "{ S { S [ { S S } { S S } ] } S S }");
+    // Indented sequence value (the dash level is its own tokenizer indent):
+    try expectShape("a:\n  items:\n    - k: 1\n    - k: 2\nb: 2\n", "{ S { S [ { S S } { S S } ] } S S }");
+    // Two levels deep: the key closes back across both, and a top-level key too.
+    try expectShape("root:\n  a:\n    items:\n    - k: 1\n  b: 2\ntop: 9\n", "{ S { S { S [ { S S } ] } S S } S S }");
+    // Sequence-of-scalars (single container level) still works as before.
+    try expectShape("a:\n  items:\n  - 1\n  - 2\nb: 2\n", "{ S { S [ S S ] } S S }");
+    // Top-level indentless sequence of mappings, then a sibling key.
+    try expectShape("aud:\n- name: x\n  pub: true\nm: true\n", "{ S [ { S S S S } ] S S }");
 }
 
 test "yaml complex explicit keys take collections as the key" {
