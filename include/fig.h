@@ -18,10 +18,15 @@ typedef enum FigStatus {
     FIG_STATUS_INTERNAL_ERROR = 255,
 } FigStatus;
 
+// Not every function accepts every member. The parse/edit entry points support
+// JSON/JSONC/YAML (others return FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize
+// additionally accepts TOML/ZON and treats JSONC as JSON.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
     FIG_FORMAT_YAML = 3,
+    FIG_FORMAT_TOML = 4,
+    FIG_FORMAT_ZON = 5,
 } FigFormat;
 
 typedef struct FigDocument FigDocument;
@@ -219,6 +224,67 @@ FigStatus fig_fm_reorder_items(FigFrontmatter *fm, const FigPathSegment *path, s
 // Render the full host file with edited frontmatter. Borrowed bytes, valid
 // until the next call or fig_fm_destroy.
 FigStatus fig_fm_render(FigFrontmatter *fm, const uint8_t **out_ptr, size_t *out_len);
+
+// ============================================================================
+// Value construction + serialization
+//
+// The build/serialize counterpart to the read-side traversal API. Construct a
+// fresh value tree node-by-node, then render it to any supported format. A
+// built value owns no source, so every input byte is copied — caller buffers
+// need not outlive the calls.
+//
+// Construction is bottom-up: build child nodes first, then the container from
+// their ids. Each builder call returns the new node's id via *out_id. A node id
+// must be placed in exactly one container (a node carries a single sibling
+// link). Ids handed to fig_value_seq/fig_value_map must name already-created
+// nodes, else FIG_STATUS_INVALID_ARGUMENT.
+// ============================================================================
+
+typedef struct FigValue FigValue;
+
+// A key: value entry for fig_value_map; both name nodes created earlier.
+typedef struct FigKeyValue {
+    FigNodeId key;
+    FigNodeId value;
+} FigKeyValue;
+
+// Format-specific scalar kinds (TOML datetimes, ZON enum/char literals).
+typedef enum FigExtKind {
+    FIG_EXT_OFFSET_DATETIME = 0,
+    FIG_EXT_LOCAL_DATETIME  = 1,
+    FIG_EXT_LOCAL_DATE      = 2,
+    FIG_EXT_LOCAL_TIME      = 3,
+    FIG_EXT_ENUM_LITERAL    = 4,
+    FIG_EXT_CHAR_LITERAL    = 5,
+} FigExtKind;
+
+FigStatus fig_value_create(FigValue **out_value);
+void fig_value_destroy(FigValue *value);
+
+// Scalars. Each writes the new node's id to *out_id.
+FigStatus fig_value_null(FigValue *value, FigNodeId *out_id);
+FigStatus fig_value_bool(FigValue *value, bool b, FigNodeId *out_id);
+FigStatus fig_value_int(FigValue *value, int64_t n, FigNodeId *out_id);
+FigStatus fig_value_uint(FigValue *value, uint64_t n, FigNodeId *out_id);
+// A numeric scalar from already-formatted text; is_float records its kind. The
+// float entry point (the canonical float-text policy is the caller's for now)
+// and the escape hatch for integers outside the int64/uint64 range.
+FigStatus fig_value_number(FigValue *value, const uint8_t *raw, size_t raw_len,
+                           bool is_float, FigNodeId *out_id);
+FigStatus fig_value_string(FigValue *value, const uint8_t *ptr, size_t len, FigNodeId *out_id);
+FigStatus fig_value_extended(FigValue *value, int kind, const uint8_t *text, size_t text_len,
+                             FigNodeId *out_id);
+
+// Containers, built from already-created child ids.
+FigStatus fig_value_seq(FigValue *value, const FigNodeId *items, size_t items_len, FigNodeId *out_id);
+FigStatus fig_value_map(FigValue *value, const FigKeyValue *entries, size_t entries_len, FigNodeId *out_id);
+
+// Render the subtree rooted at `root` in `format`. Output bytes are borrowed
+// from the value and valid until the next fig_value_serialize or
+// fig_value_destroy. A value the target cannot represent (e.g. a null in TOML)
+// returns FIG_STATUS_UNSUPPORTED_FORMAT.
+FigStatus fig_value_serialize(FigValue *value, FigNodeId root, int format,
+                              const uint8_t **out_ptr, size_t *out_len);
 
 #ifdef __cplusplus
 }

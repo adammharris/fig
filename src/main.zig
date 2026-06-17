@@ -246,7 +246,7 @@ pub fn main(init: std.process.Init) !void {
 
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
-            const target: fig.AST.Format = switch (opts.to) {
+            const target: fig.AST.SerializeFormat = switch (opts.to) {
                 .json, .jsonc => .json,
                 .yaml, .yml => .yaml,
                 .toml => .toml,

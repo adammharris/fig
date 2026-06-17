@@ -44,11 +44,16 @@ pub const FigStatus = enum(c_int) {
     internal_error = 255,
 };
 
-/// Translation of fig.Language.Type to C ABI.
+/// Translation of fig.Language.Type to C ABI. Not every function accepts every
+/// member: the parse/edit entry points support `json`/`jsonc`/`yaml` (others
+/// return `unsupported_format`), while the serializer (`fig_value_serialize`)
+/// additionally accepts `toml`/`zon` and treats `jsonc` as `json`.
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
     yaml = 3,
+    toml = 4,
+    zon = 5,
 };
 
 /// A handle to a `fig` document. (See `DocumentHandle` and `handle.*` declaration in `fig_parse`)
@@ -117,6 +122,8 @@ pub export fn fig_parse(
                 return parseFailureStatus(err);
             };
         },
+        // Filtered out by the format switch above; parsing these is not yet wired.
+        .toml, .zon => unreachable,
     };
 
     handle.* = .{
@@ -463,6 +470,8 @@ pub export fn fig_editor_create(
         .yaml => .{ .yaml = .{ .allocator = allocator } },
         .json => .{ .json = .{ .allocator = allocator } },
         .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
+        // Filtered out by the format switch above; editing these is not yet wired.
+        .toml, .zon => unreachable,
     };
 
     switch (handle.inner) {
@@ -992,6 +1001,235 @@ pub export fn fig_fm_render(
     return .ok;
 }
 
+// ==============================
+// VALUE CONSTRUCTION + SERIALIZE
+// ==============================
+//
+// The build/serialize counterpart to the read-side traversal API: construct a
+// fresh value tree node-by-node (the mirror of `AST.Builder`), then render it to
+// any supported format. Construction is bottom-up — build children, then the
+// container from their ids — and every `fig_value_*` builder call returns the new
+// node's id through `out_id`. A built value owns no source, so all input bytes
+// are copied; the rendered output is borrowed (valid until the next
+// `fig_value_serialize` or `fig_value_destroy`), so callers copy it out.
+
+pub const FigValue = opaque {};
+
+/// A `key: value` entry for `fig_value_map`; both are ids returned by earlier
+/// `fig_value_*` calls. Mirrors `AST.Builder.Entry`.
+pub const FigKeyValue = extern struct {
+    key: FigNodeId,
+    value: FigNodeId,
+};
+
+/// The format-specific scalar kinds, mirroring `AST.Node.Kind.Extended.ExtKind`.
+pub const FigExtKind = enum(c_int) {
+    offset_datetime = 0,
+    local_datetime = 1,
+    local_date = 2,
+    local_time = 3,
+    enum_literal = 4,
+    char_literal = 5,
+};
+
+const ValueHandle = struct {
+    allocator: std.mem.Allocator,
+    builder: AST.Builder,
+    /// Reused across `fig_value_serialize` calls; holds the bytes the most recent
+    /// call returned (cleared and refilled each time).
+    rendered: std.Io.Writer.Allocating,
+};
+
+fn valueFrom(value: ?*FigValue) ?*ValueHandle {
+    const p = value orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
+    return switch (kind) {
+        @intFromEnum(FigExtKind.offset_datetime) => .offset_datetime,
+        @intFromEnum(FigExtKind.local_datetime) => .local_datetime,
+        @intFromEnum(FigExtKind.local_date) => .local_date,
+        @intFromEnum(FigExtKind.local_time) => .local_time,
+        @intFromEnum(FigExtKind.enum_literal) => .enum_literal,
+        @intFromEnum(FigExtKind.char_literal) => .char_literal,
+        else => null,
+    };
+}
+
+fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
+    return switch (format) {
+        @intFromEnum(FigFormat.json), @intFromEnum(FigFormat.jsonc) => .json,
+        @intFromEnum(FigFormat.yaml) => .yaml,
+        @intFromEnum(FigFormat.toml) => .toml,
+        @intFromEnum(FigFormat.zon) => .zon,
+        else => null,
+    };
+}
+
+/// Translate the canonical serialize error set onto `FigStatus`. Exhaustive over
+/// `AST.SerializeError`: a representability failure (alias/null/non-string key in
+/// a format that cannot hold it) maps to `unsupported_format`; the writer's only
+/// other failure is allocation, surfaced as `WriteFailed`.
+fn serializeStatus(err: AST.SerializeError) FigStatus {
+    return switch (err) {
+        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey => .unsupported_format,
+        error.WriteFailed => .out_of_memory,
+    };
+}
+
+/// Write the id produced by a builder call to `out_id`, mapping allocation
+/// failure to a status. Builder construction can only fail on OOM.
+fn emitNode(out_id: ?*FigNodeId, result: std.mem.Allocator.Error!AST.Node.Id) FigStatus {
+    const out = out_id orelse return .invalid_argument;
+    const id = result catch return .out_of_memory;
+    out.* = id;
+    return .ok;
+}
+
+pub export fn fig_value_create(out_value: ?*?*FigValue) FigStatus {
+    const out = out_value orelse return .invalid_argument;
+    out.* = null;
+    const allocator = activeAllocator();
+    const handle = allocator.create(ValueHandle) catch return .out_of_memory;
+    handle.* = .{
+        .allocator = allocator,
+        .builder = AST.Builder.init(allocator),
+        .rendered = std.Io.Writer.Allocating.init(allocator),
+    };
+    out.* = @ptrCast(handle);
+    return .ok;
+}
+
+pub export fn fig_value_destroy(value: ?*FigValue) void {
+    const handle = valueFrom(value) orelse return;
+    const allocator = handle.allocator;
+    handle.builder.deinit();
+    handle.rendered.deinit();
+    allocator.destroy(handle);
+}
+
+pub export fn fig_value_null(value: ?*FigValue, out_id: ?*FigNodeId) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addNull());
+}
+
+pub export fn fig_value_bool(value: ?*FigValue, b: bool, out_id: ?*FigNodeId) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addBool(b));
+}
+
+pub export fn fig_value_int(value: ?*FigValue, n: i64, out_id: ?*FigNodeId) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addInt(n));
+}
+
+pub export fn fig_value_uint(value: ?*FigValue, n: u64, out_id: ?*FigNodeId) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addUint(n));
+}
+
+/// Add a numeric scalar from already-formatted text. `is_float` records the
+/// `number.kind`. This is the float entry point (the canonical float-text policy
+/// is the caller's for now — see `AST.Builder.addNumberRaw`) and the escape hatch
+/// for integers outside the i64/u64 range.
+pub export fn fig_value_number(
+    value: ?*FigValue,
+    raw_ptr: ?[*]const u8,
+    raw_len: usize,
+    is_float: bool,
+    out_id: ?*FigNodeId,
+) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    const raw = sliceOf(raw_ptr, raw_len) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addNumberRaw(raw, is_float));
+}
+
+pub export fn fig_value_string(
+    value: ?*FigValue,
+    ptr: ?[*]const u8,
+    len: usize,
+    out_id: ?*FigNodeId,
+) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    const s = sliceOf(ptr, len) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addString(s));
+}
+
+pub export fn fig_value_extended(
+    value: ?*FigValue,
+    kind: c_int,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+    out_id: ?*FigNodeId,
+) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    const ext_kind = extKindOf(kind) orelse return .invalid_argument;
+    const text = sliceOf(text_ptr, text_len) orelse return .invalid_argument;
+    return emitNode(out_id, handle.builder.addExtended(ext_kind, text));
+}
+
+pub export fn fig_value_seq(
+    value: ?*FigValue,
+    items_ptr: ?[*]const FigNodeId,
+    items_len: usize,
+    out_id: ?*FigNodeId,
+) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    // FigNodeId, AST.Node.Id are both u32, so the C array is already the Zig
+    // slice the builder wants — no copy. Every id must name an existing node.
+    const items: []const FigNodeId = if (items_len == 0) &.{} else (items_ptr orelse return .invalid_argument)[0..items_len];
+    const count = handle.builder.nodes.items.len;
+    for (items) |id| if (id >= count) return .invalid_argument;
+    return emitNode(out_id, handle.builder.addSequence(items));
+}
+
+pub export fn fig_value_map(
+    value: ?*FigValue,
+    entries_ptr: ?[*]const FigKeyValue,
+    entries_len: usize,
+    out_id: ?*FigNodeId,
+) FigStatus {
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    if (entries_len == 0) return emitNode(out_id, handle.builder.addMapping(&.{}));
+    const c_entries = (entries_ptr orelse return .invalid_argument)[0..entries_len];
+    const count = handle.builder.nodes.items.len;
+    // FigKeyValue is extern, Builder.Entry is not, so decode rather than cast.
+    const entries = handle.allocator.alloc(AST.Builder.Entry, entries_len) catch return .out_of_memory;
+    defer handle.allocator.free(entries);
+    for (c_entries, entries) |c, *e| {
+        if (c.key >= count or c.value >= count) return .invalid_argument;
+        e.* = .{ .key = c.key, .value = c.value };
+    }
+    return emitNode(out_id, handle.builder.addMapping(entries));
+}
+
+/// Render the value subtree rooted at `root` in `format`. Output bytes are
+/// borrowed from the handle and valid until the next `fig_value_serialize` or
+/// `fig_value_destroy`.
+pub export fn fig_value_serialize(
+    value: ?*FigValue,
+    root: FigNodeId,
+    format: c_int,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const p = out_ptr orelse return .invalid_argument;
+    const l = out_len orelse return .invalid_argument;
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    const fmt = serializeFormatOf(format) orelse return .unsupported_format;
+    if (root >= handle.builder.nodes.items.len) return .invalid_argument;
+
+    handle.rendered.clearRetainingCapacity();
+    const ast = handle.builder.view(root); // borrows the builder; never deinit'd
+    ast.serialize(&handle.rendered.writer, fmt) catch |err| return serializeStatus(err);
+
+    const bytes = handle.rendered.written();
+    p.* = bytes.ptr;
+    l.* = bytes.len;
+    return .ok;
+}
+
 test "traversal over a parsed mapping" {
     const src = "title: Hello\ncount: 42\ntags:\n- a\n- b\n";
 
@@ -1165,4 +1403,73 @@ test "embed c abi locates region" {
     var region: FigRegion = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &region));
     try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
+}
+
+test "value c abi builds and serializes to multiple formats" {
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    // Build { "name": "fig", "nums": [1, 2] } bottom-up.
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "fig", 3, &id));
+    const v_name = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 1, &id));
+    const n1 = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 2, &id));
+    const n2 = id;
+    const items = [_]FigNodeId{ n1, n2 };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_seq(out_value, &items, items.len, &id));
+    const v_nums = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "name", 4, &id));
+    const k_name = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "nums", 4, &id));
+    const k_nums = id;
+    const entries = [_]FigKeyValue{ .{ .key = k_name, .value = v_name }, .{ .key = k_nums, .value = v_nums } };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_map(out_value, &entries, entries.len, &id));
+    const root = id;
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.json), &ptr, &len));
+    try std.testing.expectEqualStrings("{\n  \"name\": \"fig\",\n  \"nums\": [\n    1,\n    2\n  ]\n}\n", ptr[0..len]);
+
+    // Same value, different format — the borrowed bytes are refreshed in place.
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.yaml), &ptr, &len));
+    try std.testing.expectEqualStrings("name: fig\nnums:\n  - 1\n  - 2\n", ptr[0..len]);
+}
+
+test "value c abi maps an unrepresentable value to unsupported_format" {
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    // { "k": null } — TOML has no null, so serializing to TOML must fail cleanly.
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_null(out_value, &id));
+    const v_null = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "k", 1, &id));
+    const k = id;
+    const entries = [_]FigKeyValue{.{ .key = k, .value = v_null }};
+    try std.testing.expectEqual(FigStatus.ok, fig_value_map(out_value, &entries, entries.len, &id));
+    const root = id;
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.toml), &ptr, &len));
+    // The same value serializes fine to a format that has null.
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.json), &ptr, &len));
+    try std.testing.expectEqualStrings("{\n  \"k\": null\n}\n", ptr[0..len]);
+}
+
+test "value c abi rejects an out-of-range child id" {
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 1, &id));
+    // id 99 was never created.
+    const items = [_]FigNodeId{ id, 99 };
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_value_seq(out_value, &items, items.len, &id));
 }

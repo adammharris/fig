@@ -306,6 +306,20 @@ pub const Builder = struct {
         };
     }
 
+    /// A non-owning `AST` over the builder's current nodes, rooted at `root`.
+    /// The returned AST *borrows* the builder's storage: it is valid only while
+    /// the builder lives and stays unmodified, and must NOT be `deinit`ed (the
+    /// builder owns the memory). Use it to serialize or inspect an in-progress
+    /// build without consuming it; use `finish` when you want an owned AST.
+    pub fn view(self: *const Builder, root: Node.Id) AST {
+        return .{
+            .allocator = self.allocator,
+            .owned_strings = self.owned_strings.items,
+            .root = root,
+            .nodes = self.nodes.items,
+        };
+    }
+
     // ── internals ───────────────────────────────────────────────────────────
 
     fn append(self: *Builder, kind: Node.Kind) Allocator.Error!Node.Id {
