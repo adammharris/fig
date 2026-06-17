@@ -225,7 +225,7 @@ fn number(self: *Tokenizer) TokenizeError!Token {
                 self.index += 1;
             }
         },
-        else => return TokenizeError.UnexpectedToken
+        else => return TokenizeError.UnexpectedToken,
     }
 
     // Check for decimal
@@ -306,10 +306,7 @@ fn tok(kind: Token.Kind, start: usize, end: usize) Token {
 }
 
 fn testTokenizer(input: []const u8, expected: []const Token) !void {
-    var tokenizer: Tokenizer = .{
-        .allocator = testing.allocator,
-        .str = input
-    };
+    var tokenizer: Tokenizer = .{ .allocator = testing.allocator, .str = input };
     const tokens = try tokenizer.tokenize();
     defer testing.allocator.free(tokens);
     //errdefer log.err("expected: {any}", .{expected});
@@ -486,9 +483,7 @@ test "strict JSON numbers reject invalid forms" {
 }
 
 test "JSONC comments" {
-    try testTokenizer(
-        "[// hi\n1]"
-    , &.{
+    try testTokenizer("[// hi\n1]", &.{
         tok(.open_bracket, 0, 1),
         tok(.comment, 1, 6),
         tok(.whitespace, 6, 7),
@@ -499,7 +494,7 @@ test "JSONC comments" {
 
     try testTokenizerError("/", .JSONC, error.UnexpectedSlash);
     //multiline test
-    try testTokenizer("/* hi */", &.{tok(.comment, 0, 8), tok(.end_of_file, 8, 8)});
+    try testTokenizer("/* hi */", &.{ tok(.comment, 0, 8), tok(.end_of_file, 8, 8) });
     // multiline inline test
     try testTokenizer("{\"hello\":/* hi */\"world\"}",
         &.{

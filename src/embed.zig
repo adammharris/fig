@@ -24,7 +24,7 @@ const Archetype = struct {
 fn archetypeOf(t: Type) Archetype {
     return switch (t) {
         .FrontmatterYaml => .{
-            .open  = .{ .tokens = &.{"---"},        .match = .whole_line },
+            .open = .{ .tokens = &.{"---"}, .match = .whole_line },
             .close = .{ .tokens = &.{ "---", "..." }, .match = .whole_line },
             .location = .start,
             .inner = .yaml,
@@ -314,9 +314,7 @@ fn locate(source: []const u8, a: Archetype) Error!Region {
     var line = open.end;
     while (line < source.len) {
         if (matchDelim(source, line, a.close)) |close|
-            return .{ .open_fence = open,
-                      .content = Span.init(open.end, close.start),
-                      .close_fence = close };
+            return .{ .open_fence = open, .content = Span.init(open.end, close.start), .close_fence = close };
         line = lineEnd(source, line);
     }
     return Error.Unterminated;

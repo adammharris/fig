@@ -463,7 +463,7 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
     return .{ .format = format, .embed = null };
 }
 
-const ArgError = error { UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     const log = std.log.scoped(.parseConfig);
