@@ -15,6 +15,10 @@ const JsonLang = @import("json/json.zig").Language;
 const YamlParser = @import("yaml/parser.zig");
 const YamlType = @import("yaml/yaml.zig").Type;
 const YamlLang = @import("yaml/yaml.zig").Language;
+const TomlParser = @import("toml/parser.zig");
+const TomlType = @import("toml/toml.zig").Type;
+const ZonParser = @import("zon/parser.zig");
+const ZonType = @import("zon/zon.zig").Type;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
 /// `std_options` wins). The default `std.log` handler writes to stderr via
@@ -45,9 +49,10 @@ pub const FigStatus = enum(c_int) {
 };
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
-/// member: the parse/edit entry points support `json`/`jsonc`/`yaml` (others
-/// return `unsupported_format`), while the serializer (`fig_value_serialize`)
-/// additionally accepts `toml`/`zon` and treats `jsonc` as `json`.
+/// member: `fig_parse` accepts all five; the editor (`fig_editor_*`) supports
+/// `json`/`jsonc`/`yaml` only (others return `unsupported_format`); the
+/// serializer (`fig_value_serialize`) accepts `json`/`yaml`/`toml`/`zon` and
+/// treats `jsonc` as `json`.
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
@@ -89,6 +94,8 @@ pub export fn fig_parse(
         @intFromEnum(FigFormat.json) => .json,
         @intFromEnum(FigFormat.jsonc) => .jsonc,
         @intFromEnum(FigFormat.yaml) => .yaml,
+        @intFromEnum(FigFormat.toml) => .toml,
+        @intFromEnum(FigFormat.zon) => .zon,
         else => return .unsupported_format,
     };
 
@@ -122,8 +129,20 @@ pub export fn fig_parse(
                 return parseFailureStatus(err);
             };
         },
-        // Filtered out by the format switch above; parsing these is not yet wired.
-        .toml, .zon => unreachable,
+        .toml => blk: {
+            break :blk TomlParser.parse(allocator, source, TomlType.TOML_1_1) catch |err| {
+                allocator.free(source);
+                allocator.destroy(handle);
+                return parseFailureStatus(err);
+            };
+        },
+        .zon => blk: {
+            break :blk ZonParser.parse(allocator, source, ZonType.ZON) catch |err| {
+                allocator.free(source);
+                allocator.destroy(handle);
+                return parseFailureStatus(err);
+            };
+        },
     };
 
     handle.* = .{
@@ -1312,6 +1331,28 @@ test "traversal over a parsed mapping" {
     const tags_val = fig_keyvalue_value(doc, third);
     try std.testing.expectEqual(FigNodeKind.sequence, fig_node_kind(doc, tags_val));
     try std.testing.expectEqual(@as(usize, 2), fig_node_child_count(doc, tags_val));
+}
+
+test "parse c abi reads toml and zon" {
+    // TOML
+    {
+        var out_doc: ?*FigDocument = null;
+        const src = "name = \"fig\"\ncount = 42\n";
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.toml), &out_doc));
+        defer fig_document_destroy(out_doc);
+        const root = fig_document_root(out_doc);
+        try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, root));
+        try std.testing.expectEqual(@as(usize, 2), fig_node_child_count(out_doc, root));
+    }
+    // ZON
+    {
+        var out_doc: ?*FigDocument = null;
+        const src = ".{ .name = \"fig\", .count = 42 }";
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.zon), &out_doc));
+        defer fig_document_destroy(out_doc);
+        const root = fig_document_root(out_doc);
+        try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, root));
+    }
 }
 
 fn keySeg(s: []const u8) FigPathSegment {

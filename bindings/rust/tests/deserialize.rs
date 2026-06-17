@@ -7,6 +7,34 @@ fn map(pairs: Vec<(&str, Value)>) -> Value {
 }
 
 #[test]
+fn from_slice_deserializes_every_format() {
+    use fig::Format;
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct S {
+        name: String,
+        n: u32,
+        tags: Vec<String>,
+    }
+    let want = S {
+        name: "x".into(),
+        n: 5,
+        tags: vec!["a".into(), "b".into()],
+    };
+
+    let cases: [(&[u8], Format); 4] = [
+        (br#"{"name":"x","n":5,"tags":["a","b"]}"#, Format::Json),
+        (b"name: x\nn: 5\ntags:\n- a\n- b\n", Format::Yaml),
+        (b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n", Format::Toml),
+        (b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }", Format::Zon),
+    ];
+    for (src, format) in cases {
+        let got: S = fig::from_slice(src, format).unwrap();
+        assert_eq!(got, want, "mismatch for {format:?}");
+    }
+}
+
+#[test]
 fn frontmatter_into_struct() {
     #[derive(Deserialize, PartialEq, Debug)]
     struct Frontmatter {

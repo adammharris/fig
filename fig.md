@@ -20,7 +20,7 @@ It is currently in early alpha. Most features are not implemented yet.
 - [x] Embedded config (i.e. markdown frontmatter)
 - [x] Command-line interface
 - [x] C ABI
-- [ ] Serialization
+- [x] Serialization
 - [ ] Standardize/document errors
 - [ ] Convenience lossy deserialization layer: Zig, Rust, Typescript
 - [ ] Pin C ABI surface

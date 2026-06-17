@@ -9,6 +9,9 @@ pub const AST = @import("ast.zig");
 pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
 
+/// Reflection-based deserialization into native Zig types (à la `std.json`).
+pub const deserialize = @import("deserialize.zig");
+
 test {
     _ = @import("json/tokenizer.zig");
     _ = @import("json/parser.zig");
@@ -25,6 +28,7 @@ test {
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
+    _ = @import("deserialize.zig");
     _ = @import("c_api.zig");
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");

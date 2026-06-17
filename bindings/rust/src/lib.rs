@@ -17,7 +17,7 @@ pub use error::Error;
 pub use value::Value;
 
 #[cfg(feature = "serde")]
-pub use de::from_str;
+pub use de::{from_slice, from_str};
 #[cfg(feature = "serde")]
 pub use ser::to_string;
 
