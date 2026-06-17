@@ -158,7 +158,12 @@ pub fn eql(self: AST, b: AST) bool {
 /// The canonical output format families.
 pub const SerializeFormat = enum { json, yaml, toml, zon };
 
-pub const SerializeError = JsonPrinter.Error || TomlPrinter.Error || ZonPrinter.Error;
+/// The canonical set of ways serialization can fail
+pub const SerializeError = Writer.Error || error{
+    UnresolvedAlias, // a YAML `*alias` reached a non-YAML printer (materialize first)
+    NullUnsupported, // a `null` reached a format with no null type (TOML)
+    NonStringKey, // a mapping key was not a string (TOML, ZON)
+};
 
 /// Render the whole AST to `writer` in the given format.
 /// Does not handle aliases, tags, or lossless `$fig` envelopes.

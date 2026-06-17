@@ -20,7 +20,7 @@ const Writer = std.Io.Writer;
 
 /// ZON cannot represent a YAML alias (materialize expands them first) nor a
 /// non-string struct-field key.
-pub const Error = Writer.Error || error{ UnresolvedAlias, UnsupportedKey };
+pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey };
 
 pub fn print(writer: *Writer, ast: *const AST) Error!void {
     try printNode(writer, ast, ast.root, 0);
@@ -85,7 +85,7 @@ fn printMapping(writer: *Writer, ast: *const AST, first_child: ?AST.Node.Id, dep
 fn writeFieldName(writer: *Writer, ast: *const AST, key_id: AST.Node.Id) Error!void {
     const name = switch (ast.nodes[key_id].kind) {
         .string => |s| s,
-        else => return error.UnsupportedKey, // ZON field names must be identifiers
+        else => return error.NonStringKey, // ZON field names must derive from a string key
     };
     try writeDotName(writer, name);
 }
