@@ -2,7 +2,7 @@
 title: fig
 author: adammharris
 created: 2026-05-08
-updated: 2026-05-13T23:34:56-07:00
+updated: 2026-06-17T13:47:09-05:00
 ---
 
 # `fig`
@@ -13,26 +13,22 @@ It intends to support editing frontmatter in markdown files, as well as other ki
 
 It is currently in early alpha. Most features are not implemented yet.
 
-## Progress
+## Progress to 1.0
 
 - [x] Design token, parser, document architecture
 - [x] Design cross-config interface (public Zig API)
 - [x] Embedded config (i.e. markdown frontmatter)
 - [x] Command-line interface
 - [x] C ABI
-- [ ] Quality check
-- [ ] Publish
+- [ ] Serialization
+- [ ] Standardize/document errors
+- [ ] Convenience lossy deserialization layer: Zig, Rust, Typescript
+- [ ] Pin C ABI surface
 
 Other planned features:
-- JSONC, JSON5, YAML (1.2.2), TOML (1.1)
-- Rust bindings + publish as crate
-- Richer parse errors across the C ABI: the parse entry point currently returns
-  only a status code (no message, line, or column). Consumers like Diaryx
-  surface YAML errors to users, so the ABI should be extended to return parse
-  diagnostics (message + source location).
-- Round-trip byte matching
-- Edit in place + sorting, both in files and in other plain text files
-- Conversion between different config formats
+- JSONC, JSON5
+- Publish Rust crate
+- [ ] Publish NPM package
 
 ## Fine print
 
