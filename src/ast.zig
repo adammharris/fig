@@ -8,6 +8,7 @@
 //! (For example, when storing decoded escape codes.)
 
 const AST = @This();
+const std = @import("std");
 const activeTag = @import("std").meta.activeTag;
 const Allocator = @import("std").mem.Allocator;
 const util = @import("util/util.zig");
@@ -184,6 +185,204 @@ pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat,
         .toml => TomlPrinter.printNode(writer, self, id, 0),
         .zon => ZonPrinter.printNode(writer, self, id, 0),
     };
+}
+
+// =======
+// BUILDER
+// =======
+
+/// Programmatic construction of an AST —
+/// the write-path mirror of the read-path navigation helpers below.
+///
+/// Formalizes the node-construction pattern the parsers share
+/// (id = array index, children linked via `next_sibling`, decoded
+/// strings collected for `owned_strings`).p
+///
+/// Construction is bottom-up: add the children, then add the container from
+/// their ids. `finish` freezes the result into an owned `AST`.
+///
+/// Two contracts:
+///   * Every string handed to the builder is *copied* into the AST's
+///     `owned_strings` — a built AST has no `source` to borrow from, so caller
+///     buffers need not outlive the builder.
+///   * Each node id must be placed in exactly one container. A node carries a
+///     single `next_sibling`, so reusing an id in two containers corrupts the
+///     tree (asserted in safe builds via the link helpers' single-owner walk).
+pub const Builder = struct {
+    allocator: Allocator,
+    nodes: std.ArrayList(Node) = .empty,
+    owned_strings: std.ArrayList([]const u8) = .empty,
+
+    pub const Entry = struct { key: Node.Id, value: Node.Id };
+
+    pub fn init(allocator: Allocator) Builder {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Builder) void {
+        for (self.owned_strings.items) |s| self.allocator.free(s);
+        self.owned_strings.deinit(self.allocator);
+        self.nodes.deinit(self.allocator);
+    }
+
+    pub fn addNull(self: *Builder) Allocator.Error!Node.Id {
+        return self.append(.null_);
+    }
+
+    pub fn addBool(self: *Builder, value: bool) Allocator.Error!Node.Id {
+        return self.append(.{ .boolean = value });
+    }
+
+    /// Add a signed integer scalar (rendered as decimal text in `number.raw`).
+    pub fn addInt(self: *Builder, value: i64) Allocator.Error!Node.Id {
+        const raw = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+        return self.append(.{ .number = .{ .raw = try self.own(raw), .kind = .integer } });
+    }
+
+    /// Add an unsigned integer scalar (decimal text). Separate from `addInt` so
+    /// values above `maxInt(i64)` round-trip without overflow.
+    pub fn addUint(self: *Builder, value: u64) Allocator.Error!Node.Id {
+        const raw = try std.fmt.allocPrint(self.allocator, "{d}", .{value});
+        return self.append(.{ .number = .{ .raw = try self.own(raw), .kind = .integer } });
+    }
+
+    /// Add a numeric scalar from already-formatted text (copied). `is_float`
+    /// records which `number.kind` it is. This is the escape hatch for floats
+    /// (whose canonical text policy is the caller's until the binding work pins
+    /// it) and for integers outside the i64/u64 range.
+    pub fn addNumberRaw(self: *Builder, raw: []const u8, is_float: bool) Allocator.Error!Node.Id {
+        return self.append(.{ .number = .{ .raw = try self.dupe(raw), .kind = if (is_float) .float else .integer } });
+    }
+
+    /// Add a string scalar (copied).
+    pub fn addString(self: *Builder, value: []const u8) Allocator.Error!Node.Id {
+        return self.append(.{ .string = try self.dupe(value) });
+    }
+
+    /// Add a format-specific scalar (TOML datetime, ZON enum/char literal).
+    /// See `Node.Kind.Extended`.
+    pub fn addExtended(self: *Builder, kind: Node.Kind.Extended.ExtKind, text: []const u8) Allocator.Error!Node.Id {
+        return self.append(.{ .extended = .{ .kind = kind, .text = try self.dupe(text) } });
+    }
+
+    /// Add a sequence whose elements are the given node ids, in order.
+    /// Empty is allowed (`&.{}`), yielding a node with no children.
+    pub fn addSequence(self: *Builder, items: []const Node.Id) Allocator.Error!Node.Id {
+        self.link(items);
+        return self.append(.{ .sequence = if (items.len == 0) null else items[0] });
+    }
+
+    /// Add a mapping from the given entries, in order. A `keyvalue` node
+    /// is minted for each entry wrappers are linked as siblings.
+    pub fn addMapping(self: *Builder, entries: []const Entry) Allocator.Error!Node.Id {
+        var first: ?Node.Id = null;
+        var prev: ?Node.Id = null;
+        for (entries) |entry| {
+            const kv = try self.append(.{ .keyvalue = .{ .key = entry.key, .value = entry.value } });
+            if (prev) |p| {
+                self.nodes.items[p].next_sibling = kv;
+            } else {
+                first = kv;
+            }
+            prev = kv;
+        }
+        return self.append(.{ .mapping = first });
+    }
+
+    /// Freeze the builder into an owned `AST` rooted at `root`. The builder is
+    /// reset to empty, so a subsequent `deinit` is harmless. The returned AST
+    /// owns its nodes and strings; free it with `ast.deinit()`. It carries no
+    /// YAML reference layer (anchors/tags) — those side-tables stay empty.
+    pub fn finish(self: *Builder, root: Node.Id) Allocator.Error!AST {
+        const nodes = try self.nodes.toOwnedSlice(self.allocator);
+        self.nodes = .empty;
+        const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
+        self.owned_strings = .empty;
+        return .{
+            .allocator = self.allocator,
+            .owned_strings = owned_strings,
+            .root = root,
+            .nodes = nodes,
+        };
+    }
+
+    // ── internals ───────────────────────────────────────────────────────────
+
+    fn append(self: *Builder, kind: Node.Kind) Allocator.Error!Node.Id {
+        const id: Node.Id = @intCast(self.nodes.items.len);
+        try self.nodes.append(self.allocator, .{ .id = id, .kind = kind, .next_sibling = null });
+        return id;
+    }
+
+    /// Take ownership of an already-allocated string so the AST frees it on
+    /// `deinit`. On registration failure the string is freed, not leaked.
+    fn own(self: *Builder, owned: []const u8) Allocator.Error![]const u8 {
+        errdefer self.allocator.free(owned);
+        try self.owned_strings.append(self.allocator, owned);
+        return owned;
+    }
+
+    /// Copy `s` into owned storage.
+    fn dupe(self: *Builder, s: []const u8) Allocator.Error![]const u8 {
+        return self.own(try self.allocator.dupe(u8, s));
+    }
+
+    /// Chain `ids` as siblings (each `next_sibling` points to the next; the last
+    /// is terminated). The ids must already be in `nodes`.
+    fn link(self: *Builder, ids: []const Node.Id) void {
+        if (ids.len == 0) return;
+        for (ids[0 .. ids.len - 1], ids[1..]) |cur, next_id| {
+            self.nodes.items[cur].next_sibling = next_id;
+        }
+        self.nodes.items[ids[ids.len - 1]].next_sibling = null;
+    }
+};
+
+test "Builder constructs an AST that serializes" {
+    const testing = std.testing;
+    var b = Builder.init(testing.allocator);
+    defer b.deinit();
+
+    // Build { "name": "fig", "nums": [1, 2] } bottom-up.
+    const v_name = try b.addString("fig");
+    const n1 = try b.addInt(1);
+    const n2 = try b.addInt(2);
+    const v_nums = try b.addSequence(&.{ n1, n2 });
+    const k_name = try b.addString("name");
+    const k_nums = try b.addString("nums");
+    const root = try b.addMapping(&.{
+        .{ .key = k_name, .value = v_name },
+        .{ .key = k_nums, .value = v_nums },
+    });
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var buf: [256]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try ast.serialize(&w, .json);
+    try testing.expectEqualStrings(
+        \\{
+        \\  "name": "fig",
+        \\  "nums": [
+        \\    1,
+        \\    2
+        \\  ]
+        \\}
+        \\
+    , w.buffered());
+
+    // Same AST, YAML — exercises the empty side-table (anchor/tag) guard path.
+    var ybuf: [256]u8 = undefined;
+    var yw = std.Io.Writer.fixed(&ybuf);
+    try ast.serialize(&yw, .yaml);
+    try testing.expectEqualStrings(
+        \\name: fig
+        \\nums:
+        \\  - 1
+        \\  - 2
+        \\
+    , yw.buffered());
 }
 
 // ==================
