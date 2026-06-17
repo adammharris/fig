@@ -2,12 +2,13 @@ use std::fmt;
 
 use crate::ffi;
 
-/// Errors produced while parsing or deserializing.
+/// Errors produced while parsing, serializing, or deserializing.
 ///
-/// Stands in for `serde_yaml_ng::Error`: it implements [`std::error::Error`]
-/// and [`serde::de::Error`], so it can flow through serde and be reported to
-/// users the same way.
+/// Implements [`std::error::Error`], and (with the `serde` feature)
+/// [`serde::de::Error`]/[`serde::ser::Error`] so it can flow through serde.
 #[derive(Debug)]
+// `Number`/`Message` are only constructed on the serde paths.
+#[cfg_attr(not(feature = "serde"), allow(dead_code))]
 pub enum Error {
     /// A null or otherwise invalid argument reached the C ABI.
     InvalidArgument,
@@ -65,12 +66,14 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+#[cfg(feature = "serde")]
 impl serde::de::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Error::Message(msg.to_string())
     }
 }
 
+#[cfg(feature = "serde")]
 impl serde::ser::Error for Error {
     fn custom<T: fmt::Display>(msg: T) -> Self {
         Error::Message(msg.to_string())

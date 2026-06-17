@@ -1,16 +1,20 @@
 //! Comment-preserving, in-place editing of a YAML/JSON document.
 //!
-//! Unlike [`crate::to_string`], which reserializes a whole value, [`Editor`]
-//! splices only the bytes of the node you change — comments, key order, blank
-//! lines, and quoting style everywhere else are left byte-identical. Values are
-//! serialized with the same [`crate::to_string`] machinery, then spliced in;
-//! the Zig editor re-frames indentation and flow/block context at the site.
+//! Unlike [`crate::Value::serialize`], which reserializes a whole value,
+//! [`Editor`] splices only the bytes of the node you change — comments, key
+//! order, blank lines, and quoting style everywhere else are left byte-
+//! identical. Inserted values are rendered by fig's serializer (via [`Value`]),
+//! then spliced in; the Zig editor re-frames indentation and flow/block context
+//! at the site.
+//!
+//! The value-taking methods come in two forms: [`Editor::replace_value`] &c.
+//! take a [`Value`] directly and are always available; the `serde`-gated
+//! [`Editor::replace`] &c. accept any `Serialize` type for convenience.
 
 use std::ptr::NonNull;
 
-use serde::Serialize;
-
 use crate::error::Error;
+use crate::value::{value_text, Value};
 use crate::{ffi, Format};
 
 /// One step of a path into a document: a mapping key or a sequence index.
@@ -69,17 +73,6 @@ pub(crate) fn to_ffi_keys<S: AsRef<str>>(keys: &[S]) -> Vec<ffi::FigStr> {
         .collect()
 }
 
-/// Serialize a value to the YAML text used as splice input. The trailing
-/// newline `to_string` always appends is removed; the Zig editor owns
-/// indentation and newline framing.
-pub(crate) fn value_text<T: Serialize + ?Sized>(value: &T) -> Result<String, Error> {
-    let mut s = crate::to_string(value)?;
-    if s.ends_with('\n') {
-        s.pop();
-    }
-    Ok(s)
-}
-
 /// An in-place editor over an owned copy of a document's source.
 #[derive(Debug)]
 pub struct Editor {
@@ -91,8 +84,9 @@ impl Editor {
     pub fn open(input: &[u8], format: Format) -> Result<Self, Error> {
         let mut raw = std::ptr::null_mut();
         let ffi_format: ffi::FigFormat = format.into();
-        let status =
-            unsafe { ffi::fig_editor_create(input.as_ptr(), input.len(), ffi_format as i32, &mut raw) };
+        let status = unsafe {
+            ffi::fig_editor_create(input.as_ptr(), input.len(), ffi_format as i32, &mut raw)
+        };
         Error::from_status(status)?;
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
         Ok(Self { raw })
@@ -102,8 +96,10 @@ impl Editor {
         self.raw.as_ptr()
     }
 
-    /// Replace the value at `path` with the serialized form of `value`.
-    pub fn replace<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    // ── value edits (over `Value`) ──────────────────────────────────────────
+
+    /// Replace the value at `path` with `value`.
+    pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let repl = value_text(value)?;
         let p = to_ffi_path(path);
         let status = unsafe {
@@ -112,9 +108,9 @@ impl Editor {
         Error::from_status(status)
     }
 
-    /// Replace the key at `path` with the serialized form of `key`.
+    /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(key)?;
+        let repl = value_text(&Value::Str(key.to_string()))?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -123,13 +119,8 @@ impl Editor {
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
-    pub fn insert<T: Serialize + ?Sized>(
-        &mut self,
-        path: &[Segment],
-        key: &str,
-        value: &T,
-    ) -> Result<(), Error> {
-        let key_text = value_text(key)?;
+    pub fn insert_value(&mut self, path: &[Segment], key: &str, value: &Value) -> Result<(), Error> {
+        let key_text = value_text(&Value::Str(key.to_string()))?;
         let val = value_text(value)?;
         let p = to_ffi_path(path);
         let status = unsafe {
@@ -146,28 +137,75 @@ impl Editor {
         Error::from_status(status)
     }
 
-    /// Delete the mapping entry named by `path`.
-    pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
-        let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_editor_delete_key(self.ptr(), p.as_ptr(), p.len()) };
-        Error::from_status(status)
-    }
-
     /// Append `value` to the sequence at `path`.
-    pub fn append<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let val = value_text(value)?;
         let p = to_ffi_path(path);
-        let status =
-            unsafe { ffi::fig_editor_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        let status = unsafe {
+            ffi::fig_editor_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
+        };
         Error::from_status(status)
     }
 
     /// Prepend `value` to the sequence at `path`.
-    pub fn prepend<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let val = value_text(value)?;
         let p = to_ffi_path(path);
-        let status =
-            unsafe { ffi::fig_editor_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        let status = unsafe {
+            ffi::fig_editor_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
+        };
+        Error::from_status(status)
+    }
+
+    // ── value edits (serde convenience) ─────────────────────────────────────
+
+    /// Replace the value at `path` with the serialized form of `value`.
+    #[cfg(feature = "serde")]
+    pub fn replace<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.replace_value(path, &crate::ser::to_value(value)?)
+    }
+
+    /// Insert `key: value` into the mapping at `path` (empty path = root).
+    #[cfg(feature = "serde")]
+    pub fn insert<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        key: &str,
+        value: &T,
+    ) -> Result<(), Error> {
+        self.insert_value(path, key, &crate::ser::to_value(value)?)
+    }
+
+    /// Append the serialized form of `value` to the sequence at `path`.
+    #[cfg(feature = "serde")]
+    pub fn append<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.append_value(path, &crate::ser::to_value(value)?)
+    }
+
+    /// Prepend the serialized form of `value` to the sequence at `path`.
+    #[cfg(feature = "serde")]
+    pub fn prepend<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.prepend_value(path, &crate::ser::to_value(value)?)
+    }
+
+    // ── structural edits (no value) ─────────────────────────────────────────
+
+    /// Delete the mapping entry named by `path`.
+    pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_editor_delete_key(self.ptr(), p.as_ptr(), p.len()) };
         Error::from_status(status)
     }
 
@@ -185,9 +223,8 @@ impl Editor {
     pub fn move_key(&mut self, src_path: &[Segment], dest_path: &[Segment]) -> Result<(), Error> {
         let s = to_ffi_path(src_path);
         let d = to_ffi_path(dest_path);
-        let status = unsafe {
-            ffi::fig_editor_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len())
-        };
+        let status =
+            unsafe { ffi::fig_editor_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len()) };
         Error::from_status(status)
     }
 
@@ -221,7 +258,13 @@ impl Editor {
     pub fn reorder_items(&mut self, path: &[Segment], indices: &[usize]) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_reorder_items(self.ptr(), p.as_ptr(), p.len(), indices.as_ptr(), indices.len())
+            ffi::fig_editor_reorder_items(
+                self.ptr(),
+                p.as_ptr(),
+                p.len(),
+                indices.as_ptr(),
+                indices.len(),
+            )
         };
         Error::from_status(status)
     }

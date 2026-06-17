@@ -19,13 +19,17 @@ pub enum FigFormat {
     Json = 1,
     Jsonc = 2,
     Yaml = 3,
+    Toml = 4,
+    Zon = 5,
 }
 
 pub enum FigDocument {}
 
 pub type FigNodeId = u32;
 
-/// Sentinel for "no such node", matching `FIG_NODE_NONE` in `fig.h`.
+/// Sentinel for "no such node", matching `FIG_NODE_NONE` in `fig.h`. Only the
+/// serde read path consults it.
+#[cfg(feature = "serde")]
 pub const FIG_NODE_NONE: FigNodeId = 0xFFFF_FFFF;
 
 #[repr(C)]
@@ -53,7 +57,11 @@ unsafe extern "C" {
     ) -> FigStatus;
 
     pub fn fig_document_destroy(doc: *mut FigDocument);
+}
 
+// Read traversal — consumed only by the serde deserializer.
+#[cfg(feature = "serde")]
+unsafe extern "C" {
     pub fn fig_document_root(doc: *const FigDocument) -> FigNodeId;
     pub fn fig_node_kind(doc: *const FigDocument, node: FigNodeId) -> FigNodeKind;
     pub fn fig_node_first_child(doc: *const FigDocument, node: FigNodeId) -> FigNodeId;
@@ -75,6 +83,68 @@ unsafe extern "C" {
         out_ptr: *mut *const u8,
         out_len: *mut usize,
     ) -> bool;
+}
+
+// ---- value construction + serialization ----
+
+pub enum FigValue {}
+
+/// A `key: value` entry for `fig_value_map`. Mirrors `FigKeyValue` in `fig.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FigKeyValue {
+    pub key: FigNodeId,
+    pub value: FigNodeId,
+}
+
+unsafe extern "C" {
+    pub fn fig_value_create(out_value: *mut *mut FigValue) -> FigStatus;
+    pub fn fig_value_destroy(value: *mut FigValue);
+
+    pub fn fig_value_null(value: *mut FigValue, out_id: *mut FigNodeId) -> FigStatus;
+    pub fn fig_value_bool(value: *mut FigValue, b: bool, out_id: *mut FigNodeId) -> FigStatus;
+    pub fn fig_value_int(value: *mut FigValue, n: i64, out_id: *mut FigNodeId) -> FigStatus;
+    pub fn fig_value_uint(value: *mut FigValue, n: u64, out_id: *mut FigNodeId) -> FigStatus;
+    pub fn fig_value_number(
+        value: *mut FigValue,
+        raw: *const u8,
+        raw_len: usize,
+        is_float: bool,
+        out_id: *mut FigNodeId,
+    ) -> FigStatus;
+    pub fn fig_value_string(
+        value: *mut FigValue,
+        ptr: *const u8,
+        len: usize,
+        out_id: *mut FigNodeId,
+    ) -> FigStatus;
+    #[allow(dead_code)]
+    pub fn fig_value_extended(
+        value: *mut FigValue,
+        kind: c_int,
+        text: *const u8,
+        text_len: usize,
+        out_id: *mut FigNodeId,
+    ) -> FigStatus;
+    pub fn fig_value_seq(
+        value: *mut FigValue,
+        items: *const FigNodeId,
+        items_len: usize,
+        out_id: *mut FigNodeId,
+    ) -> FigStatus;
+    pub fn fig_value_map(
+        value: *mut FigValue,
+        entries: *const FigKeyValue,
+        entries_len: usize,
+        out_id: *mut FigNodeId,
+    ) -> FigStatus;
+    pub fn fig_value_serialize(
+        value: *mut FigValue,
+        root: FigNodeId,
+        format: c_int,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
 }
 
 // ---- editing (write path) ----

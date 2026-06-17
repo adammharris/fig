@@ -393,8 +393,8 @@ test "Builder constructs an AST that serializes" {
     try testing.expectEqualStrings(
         \\name: fig
         \\nums:
-        \\  - 1
-        \\  - 2
+        \\- 1
+        \\- 2
         \\
     , yw.buffered());
 }

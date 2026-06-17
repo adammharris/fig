@@ -1,4 +1,10 @@
+use fig::Value;
 use serde::Deserialize;
+
+/// Build a `Value::Map` from `(key, value)` pairs (insertion order preserved).
+fn map(pairs: Vec<(&str, Value)>) -> Value {
+    Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect())
+}
 
 #[test]
 fn frontmatter_into_struct() {
@@ -60,10 +66,16 @@ a:
     - 2
   c: hello
 ";
-    let value: serde_json::Value = fig::from_str(src).unwrap();
+    let value: Value = fig::from_str(src).unwrap();
     assert_eq!(
         value,
-        serde_json::json!({ "a": { "b": [1, 2], "c": "hello" } })
+        map(vec![(
+            "a",
+            map(vec![
+                ("b", Value::Seq(vec![1i64.into(), 2i64.into()])),
+                ("c", "hello".into()),
+            ]),
+        )]),
     );
 }
 
@@ -71,15 +83,23 @@ a:
 /// mapping key — is the key's value, and a following sibling key ends it.
 #[test]
 fn indentless_block_sequence() {
-    let nested: serde_json::Value =
-        fig::from_str("a:\n  b:\n  - 1\n  - 2\n  c: hello\n").unwrap();
+    let nested: Value = fig::from_str("a:\n  b:\n  - 1\n  - 2\n  c: hello\n").unwrap();
     assert_eq!(
         nested,
-        serde_json::json!({ "a": { "b": [1, 2], "c": "hello" } })
+        map(vec![(
+            "a",
+            map(vec![
+                ("b", Value::Seq(vec![1i64.into(), 2i64.into()])),
+                ("c", "hello".into()),
+            ]),
+        )]),
     );
 
-    let root: serde_json::Value = fig::from_str("one:\n- 2\nfour: 5\n").unwrap();
-    assert_eq!(root, serde_json::json!({ "one": [2], "four": 5 }));
+    let root: Value = fig::from_str("one:\n- 2\nfour: 5\n").unwrap();
+    assert_eq!(
+        root,
+        map(vec![("one", Value::Seq(vec![2i64.into()])), ("four", 5i64.into())]),
+    );
 }
 
 #[test]
@@ -133,21 +153,59 @@ fn bool_scalars() {
     assert_eq!(v, vec![true, false]);
 }
 
-/// Differential check: deserializing into a generic value should match
-/// serde_yaml_ng for the kinds of frontmatter Diaryx actually uses.
+/// Parses the kinds of frontmatter Diaryx actually uses into the expected
+/// generic value. (fig is the YAML implementation now, so the expectations are
+/// stated directly rather than diffed against another parser.)
 #[test]
-fn matches_serde_yaml_ng() {
+fn parses_frontmatter_shapes() {
     let cases = [
-        "title: Hello\ncount: 42\ntags:\n- a\n- b\n",
-        "a:\n  b:\n    - 1\n    - 2\n  c: hello\n",
-        "nested:\n  deep:\n    value: 3.14\n",
-        "list:\n- one: 1\n- two: 2\n",
-        "flag: true\nname: example\nempty: ~\n",
+        (
+            "title: Hello\ncount: 42\ntags:\n- a\n- b\n",
+            map(vec![
+                ("title", "Hello".into()),
+                ("count", 42i64.into()),
+                ("tags", Value::Seq(vec!["a".into(), "b".into()])),
+            ]),
+        ),
+        (
+            "a:\n  b:\n    - 1\n    - 2\n  c: hello\n",
+            map(vec![(
+                "a",
+                map(vec![
+                    ("b", Value::Seq(vec![1i64.into(), 2i64.into()])),
+                    ("c", "hello".into()),
+                ]),
+            )]),
+        ),
+        (
+            "nested:\n  deep:\n    value: 3.14\n",
+            map(vec![(
+                "nested",
+                map(vec![("deep", map(vec![("value", 3.14.into())]))]),
+            )]),
+        ),
+        (
+            "list:\n- one: 1\n- two: 2\n",
+            map(vec![(
+                "list",
+                Value::Seq(vec![
+                    map(vec![("one", 1i64.into())]),
+                    map(vec![("two", 2i64.into())]),
+                ]),
+            )]),
+        ),
+        (
+            "flag: true\nname: example\nempty: ~\n",
+            map(vec![
+                ("flag", true.into()),
+                ("name", "example".into()),
+                ("empty", Value::Null),
+            ]),
+        ),
     ];
 
-    for src in cases {
-        let theirs: serde_json::Value = serde_yaml_ng::from_str(src).unwrap();
-        let ours: serde_json::Value = fig::from_str(src).unwrap();
-        assert_eq!(ours, theirs, "mismatch for source:\n{src}");
+    for (src, want) in cases {
+        let ours: Value = fig::from_str(src).unwrap();
+        assert_eq!(ours, want, "mismatch for source:\n{src}");
     }
 }

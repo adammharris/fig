@@ -8,10 +8,15 @@ links = "fig"
 name = "fig"
 path = "src/lib.rs"
 
+[features]
+default = ["serde"]
+# Typed (de)serialization: `to_string`/`from_str`, the editor's `T: Serialize`
+# value methods, and serde impls for `Value`. Without it, the binding still
+# parses, edits, and serializes via the `Value` tree directly.
+serde = ["dep:serde"]
+
 [dependencies]
-serde = "1"
+serde = { version = "1", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_yaml_ng = "0.10"
-serde_json = "1"

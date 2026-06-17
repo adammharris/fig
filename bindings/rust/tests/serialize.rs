@@ -1,43 +1,104 @@
 use serde::{Deserialize, Serialize};
 
-/// fig's emitter should match serde_yaml_ng byte-for-byte for the shapes Diaryx
-/// uses. (Multi-line strings and extreme floats are deliberate divergences,
-/// covered separately below — not here.)
+use fig::{Format, Value};
+
+/// Build a `Value::Map` from `(key, value)` pairs (insertion order preserved).
+fn map(pairs: Vec<(&str, Value)>) -> Value {
+    Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect())
+}
+
+/// Emission now lives in fig's core printer, not the binding, so byte-for-byte
+/// parity with serde_yaml_ng is no longer the contract (core uses `|` block
+/// scalars and its own nested-sequence layout). The contract is round-trip
+/// fidelity, exercised here against fig's own dynamic `Value`:
+/// `from_str(value.serialize()) == value`.
 #[test]
-fn matches_serde_yaml_ng() {
-    use serde_json::json;
+fn generic_values_round_trip() {
     let cases = [
-        json!({ "title": "Hello", "count": 42, "ratio": 1.5, "flag": true, "empty": null }),
-        json!({ "a": { "b": [1, 2], "c": "hello" } }),
-        json!({ "items": [{ "name": "a", "v": 1 }, { "name": "b", "v": 2 }] }),
-        json!({ "seq": [], "map": {} }),
-        json!({ "a": "yes", "b": "123", "c": "a: b", "d": "#hash", "e": "", "h": "null" }),
-        json!([1, 2, 3]),
-        json!("just a string"),
-        json!({ "a": { "b": [] } }),
-        json!({ "m": [[1, 2], [3, 4]] }),
-        json!([[1, 2], [3, 4]]),
-        json!({ "a": [["x"], { "k": "v" }] }),
-        json!({ "created": "2024-01-01", "tags": ["a", "b"], "n": null }),
-        json!({ "quote": "it's", "colon_end": "key:", "spaced": "  pad  " }),
+        map(vec![
+            ("title", "Hello".into()),
+            ("count", 42i64.into()),
+            ("ratio", 1.5.into()),
+            ("flag", true.into()),
+            ("empty", Value::Null),
+        ]),
+        map(vec![(
+            "a",
+            map(vec![
+                ("b", Value::Seq(vec![1i64.into(), 2i64.into()])),
+                ("c", "hello".into()),
+            ]),
+        )]),
+        map(vec![(
+            "items",
+            Value::Seq(vec![
+                map(vec![("name", "a".into()), ("v", 1i64.into())]),
+                map(vec![("name", "b".into()), ("v", 2i64.into())]),
+            ]),
+        )]),
+        map(vec![("seq", Value::Seq(vec![])), ("map", Value::Map(vec![]))]),
+        map(vec![
+            ("a", "yes".into()),
+            ("b", "123".into()),
+            ("c", "a: b".into()),
+            ("d", "#hash".into()),
+            ("e", "".into()),
+            ("h", "null".into()),
+        ]),
+        Value::Seq(vec![1i64.into(), 2i64.into(), 3i64.into()]),
+        "just a string".into(),
+        map(vec![("a", map(vec![("b", Value::Seq(vec![]))]))]),
+        map(vec![(
+            "m",
+            Value::Seq(vec![
+                Value::Seq(vec![1i64.into(), 2i64.into()]),
+                Value::Seq(vec![3i64.into(), 4i64.into()]),
+            ]),
+        )]),
+        map(vec![
+            ("created", "2024-01-01".into()),
+            ("tags", Value::Seq(vec!["a".into(), "b".into()])),
+            ("n", Value::Null),
+        ]),
+        map(vec![
+            ("quote", "it's".into()),
+            ("colon_end", "key:".into()),
+            ("spaced", "  pad  ".into()),
+        ]),
     ];
     for case in cases {
-        let ours = fig::to_string(&case).unwrap();
-        let theirs = serde_yaml_ng::to_string(&case).unwrap();
-        assert_eq!(ours, theirs, "mismatch for {case}");
+        let yaml = case.serialize(Format::Yaml).unwrap();
+        let back: Value = fig::from_str(&yaml).unwrap();
+        assert_eq!(back, case, "round-trip mismatch (yaml:\n{yaml})");
     }
 }
 
+/// A representative snapshot, so accidental format churn stays visible. fig
+/// emits indentless block sequences (matching serde_yaml_ng) and single-quotes
+/// only what must be quoted.
 #[test]
-fn serializes_typed_config() {
-    #[derive(Serialize)]
+fn snapshot_of_a_diaryx_shape() {
+    let value = map(vec![
+        ("title", "My Entry: A Tale".into()),
+        ("tags", Value::Seq(vec!["a".into(), "b".into()])),
+        ("draft", false.into()),
+    ]);
+    assert_eq!(
+        value.serialize(Format::Yaml).unwrap(),
+        "title: 'My Entry: A Tale'\ntags:\n- a\n- b\ndraft: false\n",
+    );
+}
+
+#[test]
+fn typed_config_round_trips() {
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
     #[serde(rename_all = "snake_case")]
-    #[allow(dead_code)]
     enum AccessState {
+        #[allow(dead_code)]
         Public,
         AccessControl,
     }
-    #[derive(Serialize)]
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
     struct Config {
         namespace_id: String,
         state: AccessState,
@@ -51,9 +112,9 @@ fn serializes_typed_config() {
         audiences: vec!["friends".to_string(), "family".to_string()],
         subdomain: None,
     };
-    let ours = fig::to_string(&cfg).unwrap();
-    let theirs = serde_yaml_ng::to_string(&cfg).unwrap();
-    assert_eq!(ours, theirs);
+    let yaml = fig::to_string(&cfg).unwrap();
+    let back: Config = fig::from_str(&yaml).unwrap();
+    assert_eq!(cfg, back);
 }
 
 /// The whole point: `from_str(to_string(x)) == x`. Exercises both halves of the

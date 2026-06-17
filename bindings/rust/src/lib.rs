@@ -1,25 +1,38 @@
-mod de;
 mod editor;
 mod error;
 mod ffi;
 mod frontmatter;
+mod value;
+
+#[cfg(feature = "serde")]
+mod de;
+#[cfg(feature = "serde")]
 mod ser;
 
 use std::ptr::NonNull;
 
-pub use de::from_str;
 pub use editor::{Editor, Segment};
 pub use error::Error;
 pub use frontmatter::Frontmatter;
+pub use value::Value;
+
+#[cfg(feature = "serde")]
+pub use de::from_str;
+#[cfg(feature = "serde")]
 pub use ser::to_string;
 
+#[cfg(feature = "serde")]
 use ffi::{FigNodeId, FigNodeKind, FIG_NODE_NONE};
 
+/// A config format. Parsing and editing support `Json`/`Jsonc`/`Yaml`;
+/// [`Value::serialize`] additionally supports `Toml`/`Zon`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     Json,
     Jsonc,
     Yaml,
+    Toml,
+    Zon,
 }
 
 impl From<Format> for ffi::FigFormat {
@@ -28,6 +41,8 @@ impl From<Format> for ffi::FigFormat {
             Format::Json => ffi::FigFormat::Json,
             Format::Jsonc => ffi::FigFormat::Jsonc,
             Format::Yaml => ffi::FigFormat::Yaml,
+            Format::Toml => ffi::FigFormat::Toml,
+            Format::Zon => ffi::FigFormat::Zon,
         }
     }
 }
@@ -50,7 +65,12 @@ impl Document {
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
         Ok(Self { raw })
     }
+}
 
+/// Read-path traversal over the parsed node graph. Consumed by the serde
+/// deserializer; gated with it until a public node API lands.
+#[cfg(feature = "serde")]
+impl Document {
     fn ptr(&self) -> *const ffi::FigDocument {
         self.raw.as_ptr()
     }
@@ -138,6 +158,7 @@ impl Drop for Document {
     }
 }
 
+#[cfg(feature = "serde")]
 fn normalize(id: FigNodeId) -> Option<FigNodeId> {
     if id == FIG_NODE_NONE {
         None

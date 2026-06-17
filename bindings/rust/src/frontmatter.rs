@@ -3,16 +3,17 @@
 //! [`Frontmatter`] opens a markdown document, locates its `---…---` YAML
 //! frontmatter, and edits only that block — the fences and the markdown body
 //! are left byte-identical, and within the frontmatter only the changed node's
-//! bytes move (comments, key order, and formatting are preserved). This is the
-//! Diaryx-facing write path: reads stay on [`crate::from_str`].
+//! bytes move (comments, key order, and formatting are preserved).
+//!
+//! Value-taking methods mirror [`crate::Editor`]: `*_value` take a [`Value`]
+//! and are always available; the `serde`-gated forms accept any `Serialize`.
 
 use std::ptr::NonNull;
 
-use serde::Serialize;
-
-use crate::editor::{borrow_str, to_ffi_keys, to_ffi_path, value_text, Segment};
+use crate::editor::{borrow_str, to_ffi_keys, to_ffi_path, Segment};
 use crate::error::Error;
 use crate::ffi;
+use crate::value::{value_text, Value};
 
 /// An editor over the YAML frontmatter of a markdown document.
 #[derive(Debug)]
@@ -35,8 +36,10 @@ impl Frontmatter {
         self.raw.as_ptr()
     }
 
-    /// Replace the value at `path` with the serialized form of `value`.
-    pub fn replace<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    // ── value edits (over `Value`) ──────────────────────────────────────────
+
+    /// Replace the value at `path` with `value`.
+    pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let repl = value_text(value)?;
         let p = to_ffi_path(path);
         let status = unsafe {
@@ -45,9 +48,9 @@ impl Frontmatter {
         Error::from_status(status)
     }
 
-    /// Replace the key at `path` with the serialized form of `key`.
+    /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(key)?;
+        let repl = value_text(&Value::Str(key.to_string()))?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_fm_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -56,13 +59,8 @@ impl Frontmatter {
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
-    pub fn insert<T: Serialize + ?Sized>(
-        &mut self,
-        path: &[Segment],
-        key: &str,
-        value: &T,
-    ) -> Result<(), Error> {
-        let key_text = value_text(key)?;
+    pub fn insert_value(&mut self, path: &[Segment], key: &str, value: &Value) -> Result<(), Error> {
+        let key_text = value_text(&Value::Str(key.to_string()))?;
         let val = value_text(value)?;
         let p = to_ffi_path(path);
         let status = unsafe {
@@ -79,15 +77,8 @@ impl Frontmatter {
         Error::from_status(status)
     }
 
-    /// Delete the mapping entry named by `path`.
-    pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
-        let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_fm_delete_key(self.ptr(), p.as_ptr(), p.len()) };
-        Error::from_status(status)
-    }
-
     /// Append `value` to the sequence at `path`.
-    pub fn append<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let val = value_text(value)?;
         let p = to_ffi_path(path);
         let status =
@@ -96,11 +87,63 @@ impl Frontmatter {
     }
 
     /// Prepend `value` to the sequence at `path`.
-    pub fn prepend<T: Serialize + ?Sized>(&mut self, path: &[Segment], value: &T) -> Result<(), Error> {
+    pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let val = value_text(value)?;
         let p = to_ffi_path(path);
         let status =
             unsafe { ffi::fig_fm_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        Error::from_status(status)
+    }
+
+    // ── value edits (serde convenience) ─────────────────────────────────────
+
+    /// Replace the value at `path` with the serialized form of `value`.
+    #[cfg(feature = "serde")]
+    pub fn replace<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.replace_value(path, &crate::ser::to_value(value)?)
+    }
+
+    /// Insert `key: value` into the mapping at `path` (empty path = root).
+    #[cfg(feature = "serde")]
+    pub fn insert<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        key: &str,
+        value: &T,
+    ) -> Result<(), Error> {
+        self.insert_value(path, key, &crate::ser::to_value(value)?)
+    }
+
+    /// Append the serialized form of `value` to the sequence at `path`.
+    #[cfg(feature = "serde")]
+    pub fn append<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.append_value(path, &crate::ser::to_value(value)?)
+    }
+
+    /// Prepend the serialized form of `value` to the sequence at `path`.
+    #[cfg(feature = "serde")]
+    pub fn prepend<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.prepend_value(path, &crate::ser::to_value(value)?)
+    }
+
+    // ── structural edits (no value) ─────────────────────────────────────────
+
+    /// Delete the mapping entry named by `path`.
+    pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_fm_delete_key(self.ptr(), p.as_ptr(), p.len()) };
         Error::from_status(status)
     }
 
@@ -140,8 +183,7 @@ impl Frontmatter {
     /// its separators. No-op when `from == to`.
     pub fn move_item(&mut self, path: &[Segment], from: usize, to: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status =
-            unsafe { ffi::fig_fm_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
+        let status = unsafe { ffi::fig_fm_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
         Error::from_status(status)
     }
 

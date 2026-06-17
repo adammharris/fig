@@ -1436,7 +1436,7 @@ test "value c abi builds and serializes to multiple formats" {
 
     // Same value, different format — the borrowed bytes are refreshed in place.
     try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.yaml), &ptr, &len));
-    try std.testing.expectEqualStrings("name: fig\nnums:\n  - 1\n  - 2\n", ptr[0..len]);
+    try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
 }
 
 test "value c abi maps an unrepresentable value to unsupported_format" {
