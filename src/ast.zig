@@ -11,6 +11,12 @@ const AST = @This();
 const activeTag = @import("std").meta.activeTag;
 const Allocator = @import("std").mem.Allocator;
 const util = @import("util/util.zig");
+const Writer = @import("std").Io.Writer;
+
+const JsonPrinter = @import("json/printer.zig");
+const YamlPrinter = @import("yaml/printer.zig");
+const TomlPrinter = @import("toml/printer.zig");
+const ZonPrinter = @import("zon/printer.zig");
 
 pub fn deinit(self: *AST) void {
     for (self.owned_strings) |string| {
@@ -143,6 +149,36 @@ pub const Node = struct {
 /// Function to tell if two documents are equal abstractly (does not compare source text).
 pub fn eql(self: AST, b: AST) bool {
     return self.root == b.root and util.eql(Node, self.nodes, b.nodes);
+}
+
+// =============
+// SERIALIZATION
+// =============
+
+/// The canonical output format families.
+pub const SerializeFormat = enum { json, yaml, toml, zon };
+
+pub const SerializeError = JsonPrinter.Error || TomlPrinter.Error || ZonPrinter.Error;
+
+/// Render the whole AST to `writer` in the given format.
+/// Does not handle aliases, tags, or lossless `$fig` envelopes.
+pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) SerializeError!void {
+    return switch (format) {
+        .json => JsonPrinter.print(writer, self),
+        .yaml => YamlPrinter.print(writer, self),
+        .toml => TomlPrinter.print(writer, self),
+        .zon => ZonPrinter.print(writer, self),
+    };
+}
+
+/// Render the subtree rooted at `id` to `writer`.
+pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id) SerializeError!void {
+    return switch (format) {
+        .json => JsonPrinter.printNode(writer, self, id, 0),
+        .yaml => YamlPrinter.printNode(writer, self, id, 0),
+        .toml => TomlPrinter.printNode(writer, self, id, 0),
+        .zon => ZonPrinter.printNode(writer, self, id, 0),
+    };
 }
 
 // ==================

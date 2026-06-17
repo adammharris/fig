@@ -246,50 +246,33 @@ pub fn main(init: std.process.Init) !void {
 
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
-            switch (opts.to) {
-                .json, .jsonc => {
-                    if (opts.path == null) {
-                        try fig.Language.JSON.print(stdout_terminal.writer, ast);
-                    } else {
-                        try fig.Language.JSON.printNode(stdout_terminal.writer, ast, node_id, 0);
-                    }
-                },
-                .yaml, .yml => {
-                    if (opts.path == null) {
-                        try fig.Language.YAML.print(stdout_terminal.writer, ast);
-                    } else {
-                        try fig.Language.YAML.printNode(stdout_terminal.writer, ast, node_id, 0);
-                    }
-                },
-                .toml => {
-                    // TOML has no null. In lossy mode, rather than the printer
-                    // aborting mid-document on one, strip unrepresentable values
-                    // up front and warn — output stays valid and complete.
-                    // (Lossless mode already wrapped them in `$fig` envelopes.)
-                    if (!opts.lossless) {
-                        const result = try fig.Lossless.lossyStrip(init.arena.allocator(), ast, node_id, .toml);
-                        for (result.dropped) |dropped_path| {
-                            try stderr_terminal.setColor(.red);
-                            try stderr_terminal.writer.print("warning: dropped null value at `{s}` (TOML cannot represent null). Use --lossless to preserve.\n", .{dropped_path});
-                            try stderr_terminal.setColor(.reset);
-                        }
-                        try stderr_terminal.writer.flush();
-                        if (result.ast) |stripped| {
-                            try fig.Language.TOML.print(stdout_terminal.writer, &stripped);
-                        }
-                    } else if (opts.path == null) {
-                        try fig.Language.TOML.print(stdout_terminal.writer, ast);
-                    } else {
-                        try fig.Language.TOML.printNode(stdout_terminal.writer, ast, node_id, 0);
-                    }
-                },
-                .zon => {
-                    if (opts.path == null) {
-                        try fig.Language.ZON.print(stdout_terminal.writer, ast);
-                    } else {
-                        try fig.Language.ZON.printNode(stdout_terminal.writer, ast, node_id, 0);
-                    }
-                },
+            const target: fig.AST.Format = switch (opts.to) {
+                .json, .jsonc => .json,
+                .yaml, .yml => .yaml,
+                .toml => .toml,
+                .zon => .zon,
+            };
+
+            if (target == .toml and !opts.lossless) {
+                // TOML has no null. In lossy mode, rather than the printer
+                // aborting mid-document on one, strip unrepresentable values up
+                // front and warn — output stays valid and complete. (Lossless
+                // mode already wrapped them in `$fig` envelopes.) `lossyStrip`
+                // re-roots at `node_id`, so the result serializes whole.
+                const result = try fig.Lossless.lossyStrip(init.arena.allocator(), ast, node_id, .toml);
+                for (result.dropped) |dropped_path| {
+                    try stderr_terminal.setColor(.red);
+                    try stderr_terminal.writer.print("warning: dropped null value at `{s}` (TOML cannot represent null). Use --lossless to preserve.\n", .{dropped_path});
+                    try stderr_terminal.setColor(.reset);
+                }
+                try stderr_terminal.writer.flush();
+                if (result.ast) |stripped| {
+                    try stripped.serialize(stdout_terminal.writer, .toml);
+                }
+            } else if (opts.path == null) {
+                try ast.serialize(stdout_terminal.writer, target);
+            } else {
+                try ast.serializeNode(stdout_terminal.writer, target, node_id);
             }
             try stdout_terminal.writer.flush();
         },
