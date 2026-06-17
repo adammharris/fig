@@ -2,7 +2,7 @@
 //! node's bytes and leave comments, key order, fences, and the markdown body
 //! intact.
 
-use fig::{Editor, Format, Frontmatter, Segment};
+use fig::{Editor, Embed, Format, Segment};
 
 #[test]
 fn editor_insert_appends_after_last_entry() {
@@ -53,7 +53,7 @@ prose goes here
 
 #[test]
 fn frontmatter_preserves_comments_fences_and_body() {
-    let mut fm = Frontmatter::open(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
     fm.replace(&[Segment::Key("title")], &"Hi there").unwrap();
     fm.append(&[Segment::Key("tags")], &"c").unwrap();
     fm.insert(&[], "author", &"me").unwrap();
@@ -77,7 +77,7 @@ prose goes here
 
 #[test]
 fn frontmatter_edit_touches_only_target_bytes() {
-    let mut fm = Frontmatter::open(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
     fm.replace(&[Segment::Key("title")], &"Hello world").unwrap();
     let rendered = fm.render().unwrap();
     // Everything except the title line is byte-identical to the original.
@@ -87,16 +87,28 @@ fn frontmatter_edit_touches_only_target_bytes() {
 
 #[test]
 fn frontmatter_open_without_frontmatter_is_not_found() {
-    let err = Frontmatter::open(b"# just markdown\n").unwrap_err();
+    let err = Embed::frontmatter(b"# just markdown\n").unwrap_err();
     assert!(matches!(err, fig::Error::NotFound));
 }
 
 #[test]
 fn frontmatter_delete_then_read_back() {
-    let mut fm = Frontmatter::open(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
     fm.delete(&[Segment::Key("title")]).unwrap();
     let rendered = fm.render().unwrap().to_string();
     assert!(!rendered.contains("title:"));
     assert!(rendered.contains("# keep this comment"));
     assert!(rendered.contains("prose goes here"));
+}
+
+#[test]
+fn json_frontmatter_edits_in_json() {
+    // The same selector opens `;;;` JSON frontmatter; values serialize as JSON.
+    let md = ";;;\n{\"title\": \"Hi\", \"draft\": true}\n;;;\n# Body\n";
+    let mut em = fig::Embed::open(md.as_bytes(), fig::EmbedType::FrontmatterJson).unwrap();
+    em.replace(&[Segment::Key("title")], &"Hello").unwrap();
+    assert_eq!(
+        em.render().unwrap(),
+        ";;;\n{\"title\": \"Hello\", \"draft\": true}\n;;;\n# Body\n",
+    );
 }

@@ -341,10 +341,10 @@ pub export fn fig_node_string(
 //
 // The write path mirrors the read path: an opaque handle owns the source +
 // parse, and edits splice bytes in place (preserving comments/formatting) then
-// reparse. `fig_editor_*` works on a whole document; `fig_fm_*` is a thin
-// frontmatter-aware layer that edits the YAML between markdown `---` fences and
-// re-assembles the host file. Path segments cross the boundary as an array of
-// `FigPathSegment` (key string | sequence index), mirroring `AST.PathSegment`.
+// reparse. `fig_editor_*` works on a whole document; `fig_embed_*` is a thin
+// embed-aware layer that edits the config inside a host file (e.g. markdown
+// frontmatter) and re-assembles it. Path segments cross the boundary as an array
+// of `FigPathSegment` (key string | sequence index), mirroring `AST.PathSegment`.
 
 /// One step of a path: `kind == 0` selects mapping key `key_ptr[0..key_len]`;
 /// `kind == 1` selects sequence element `index`.
@@ -748,105 +748,137 @@ pub export fn fig_embed_extract(
 }
 
 // ====================
-// FRONTMATTER (COMBINED)
+// EMBED (COMBINED EDITOR)
 // ====================
 //
-// Holds an owned copy of the host markdown plus a YAML editor over the
-// frontmatter content. Edits delegate to the editor; `fig_fm_render`
-// re-splices the edited content between the (untouched) fences + body.
+// A located embed (markdown frontmatter, JSON frontmatter, endmatter) opened as
+// an editor: holds an owned copy of the host file plus an editor over the
+// embed's *content* in that embed's inner format (YAML or JSON, fixed by the
+// archetype). Edits delegate to the editor; `fig_embed_render` re-splices the
+// edited content between the (untouched) fences + surrounding host text.
+// This generalizes the former YAML-frontmatter-only combined editor.
 
-pub const FigFrontmatter = opaque {};
+pub const FigEmbed = opaque {};
 
-const FrontmatterHandle = struct {
+const EmbedHandle = struct {
     allocator: std.mem.Allocator,
-    markdown: []u8,
+    host: []u8,
     content: Span,
-    editor: Editor(YamlLang),
+    editor: union(enum) {
+        yaml: Editor(YamlLang),
+        json: Editor(JsonLang),
+    },
     rendered: std.ArrayList(u8) = .empty,
+
+    fn deinit(self: *EmbedHandle) void {
+        switch (self.editor) {
+            inline else => |*e| e.deinit(),
+        }
+        self.rendered.deinit(self.allocator);
+        self.allocator.free(self.host);
+    }
 };
 
-fn fmFrom(fm: ?*FigFrontmatter) ?*FrontmatterHandle {
-    const p = fm orelse return null;
+fn embedFrom(em: ?*FigEmbed) ?*EmbedHandle {
+    const p = em orelse return null;
     return @ptrCast(@alignCast(p));
 }
 
-pub export fn fig_fm_open(
+/// The inner editor language an embed archetype carries (`---` ⇒ YAML, `;;;` ⇒
+/// JSON), mirroring `Embed`'s archetype table.
+fn embedInner(t: Embed.Type) enum { yaml, json } {
+    return switch (t) {
+        .FrontmatterYaml, .EndmatterYaml => .yaml,
+        .FrontmatterJson => .json,
+    };
+}
+
+pub export fn fig_embed_open(
     input_ptr: ?[*]const u8,
     input_len: usize,
-    out_fm: ?*?*FigFrontmatter,
+    embed_type: c_int,
+    out_embed: ?*?*FigEmbed,
 ) FigStatus {
-    const out = out_fm orelse return .invalid_argument;
+    const out = out_embed orelse return .invalid_argument;
     out.* = null;
     const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
+    const t = embedTypeOf(embed_type) orelse return .invalid_argument;
 
-    const region = Embed.locateRegion(input, .FrontmatterYaml) catch |err| return switch (err) {
+    const region = Embed.locateRegion(input, t) catch |err| return switch (err) {
         error.NotFound => .not_found,
         else => .parse_error,
     };
 
     const allocator = activeAllocator();
-    const markdown = allocator.dupe(u8, input) catch return .out_of_memory;
-    const handle = allocator.create(FrontmatterHandle) catch {
-        allocator.free(markdown);
+    const host = allocator.dupe(u8, input) catch return .out_of_memory;
+    const handle = allocator.create(EmbedHandle) catch {
+        allocator.free(host);
         return .out_of_memory;
     };
     handle.* = .{
         .allocator = allocator,
-        .markdown = markdown,
+        .host = host,
         .content = region.content,
-        .editor = .{ .allocator = allocator },
+        .editor = switch (embedInner(t)) {
+            .yaml => .{ .yaml = .{ .allocator = allocator } },
+            .json => .{ .json = .{ .allocator = allocator } },
+        },
     };
-    handle.editor.init(markdown[region.content.start..region.content.end]) catch |err| {
-        allocator.free(markdown);
-        allocator.destroy(handle);
-        return editStatus(err);
-    };
+    const content = host[region.content.start..region.content.end];
+    switch (handle.editor) {
+        inline else => |*e| e.init(content) catch |err| {
+            e.deinit();
+            allocator.free(host);
+            allocator.destroy(handle);
+            return editStatus(err);
+        },
+    }
 
     out.* = @ptrCast(handle);
     return .ok;
 }
 
-pub export fn fig_fm_destroy(fm: ?*FigFrontmatter) void {
-    const handle = fmFrom(fm) orelse return;
+pub export fn fig_embed_destroy(em: ?*FigEmbed) void {
+    const handle = embedFrom(em) orelse return;
     const allocator = handle.allocator;
-    handle.editor.deinit();
-    handle.rendered.deinit(allocator);
-    allocator.free(handle.markdown);
+    handle.deinit();
     allocator.destroy(handle);
 }
 
-pub export fn fig_fm_replace_val(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_replace_val(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     repl_ptr: ?[*]const u8,
     repl_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     const repl = sliceOf(repl_ptr, repl_len) orelse return .invalid_argument;
-    handle.editor.replaceValAtPath(path, repl) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.replaceValAtPath(path, repl)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_replace_key(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_replace_key(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     repl_ptr: ?[*]const u8,
     repl_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     const repl = sliceOf(repl_ptr, repl_len) orelse return .invalid_argument;
-    handle.editor.replaceKeyAtPath(path, repl) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.replaceKeyAtPath(path, repl)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_insert_key(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_insert_key(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     key_ptr: ?[*]const u8,
@@ -854,147 +886,159 @@ pub export fn fig_fm_insert_key(
     val_ptr: ?[*]const u8,
     val_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     const key = sliceOf(key_ptr, key_len) orelse return .invalid_argument;
     const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
-    handle.editor.insertKey(path, key, val) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.insertKey(path, key, val)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_delete_key(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_delete_key(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
-    handle.editor.deleteKey(path) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.deleteKey(path)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_append_seq(
-    fm: ?*FigFrontmatter,
-    path_ptr: ?[*]const FigPathSegment,
-    path_len: usize,
-    val_ptr: ?[*]const u8,
-    val_len: usize,
-) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
-    var buf: [max_path_len]AST.PathSegment = undefined;
-    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
-    const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
-    handle.editor.appendToSeq(path, val) catch |err| return editStatus(err);
-    return .ok;
-}
-
-pub export fn fig_fm_prepend_seq(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_append_seq(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     val_ptr: ?[*]const u8,
     val_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
-    handle.editor.prependToSeq(path, val) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.appendToSeq(path, val)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_remove_seq_item(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_prepend_seq(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    val_ptr: ?[*]const u8,
+    val_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.prependToSeq(path, val)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_embed_remove_seq_item(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     index: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
-    handle.editor.removeSeqItem(path, index) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.removeSeqItem(path, index)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_move_key(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_move_key(
+    em: ?*FigEmbed,
     src_ptr: ?[*]const FigPathSegment,
     src_len: usize,
     dest_ptr: ?[*]const FigPathSegment,
     dest_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var src_buf: [max_path_len]AST.PathSegment = undefined;
     var dest_buf: [max_path_len]AST.PathSegment = undefined;
     const src = decodePath(src_ptr, src_len, &src_buf) orelse return .invalid_argument;
     const dest = decodePath(dest_ptr, dest_len, &dest_buf) orelse return .invalid_argument;
-    handle.editor.moveKey(src, dest) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.moveKey(src, dest)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_reorder_keys(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_reorder_keys(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     keys_ptr: ?[*]const FigStr,
     keys_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var path_buf: [max_path_len]AST.PathSegment = undefined;
     var keys_buf: [max_keys_len][]const u8 = undefined;
     const path = decodePath(path_ptr, path_len, &path_buf) orelse return .invalid_argument;
     const keys = decodeKeys(keys_ptr, keys_len, &keys_buf) orelse return .invalid_argument;
-    handle.editor.reorderKeys(path, keys) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.reorderKeys(path, keys)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_move_item(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_move_item(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     from: usize,
     to: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
-    handle.editor.moveItem(path, from, to) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.moveItem(path, from, to)) .ok else |err| editStatus(err),
+    };
 }
 
-pub export fn fig_fm_reorder_items(
-    fm: ?*FigFrontmatter,
+pub export fn fig_embed_reorder_items(
+    em: ?*FigEmbed,
     path_ptr: ?[*]const FigPathSegment,
     path_len: usize,
     indices_ptr: ?[*]const usize,
     indices_len: usize,
 ) FigStatus {
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
     var buf: [max_path_len]AST.PathSegment = undefined;
     const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
     const indices = decodeIndices(indices_ptr, indices_len) orelse return .invalid_argument;
-    handle.editor.reorderItems(path, indices) catch |err| return editStatus(err);
-    return .ok;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.reorderItems(path, indices)) .ok else |err| editStatus(err),
+    };
 }
 
-/// Render the full host file with the edited frontmatter spliced back between
-/// the original fences. Borrowed bytes, valid until the next call or destroy.
-pub export fn fig_fm_render(
-    fm: ?*FigFrontmatter,
+/// Render the full host file with the edited embed spliced back between the
+/// original fences. Borrowed bytes, valid until the next call or destroy.
+pub export fn fig_embed_render(
+    em: ?*FigEmbed,
     out_ptr: ?*[*c]const u8,
     out_len: ?*usize,
 ) FigStatus {
     const p = out_ptr orelse return .invalid_argument;
     const l = out_len orelse return .invalid_argument;
-    const handle = fmFrom(fm) orelse return .invalid_argument;
+    const handle = embedFrom(em) orelse return .invalid_argument;
 
+    const src = switch (handle.editor) {
+        inline else => |*e| e.source.items,
+    };
     handle.rendered.clearRetainingCapacity();
-    const md = handle.markdown;
-    handle.rendered.appendSlice(handle.allocator, md[0..handle.content.start]) catch return .out_of_memory;
-    handle.rendered.appendSlice(handle.allocator, handle.editor.source.items) catch return .out_of_memory;
-    handle.rendered.appendSlice(handle.allocator, md[handle.content.end..]) catch return .out_of_memory;
+    const host = handle.host;
+    handle.rendered.appendSlice(handle.allocator, host[0..handle.content.start]) catch return .out_of_memory;
+    handle.rendered.appendSlice(handle.allocator, src) catch return .out_of_memory;
+    handle.rendered.appendSlice(handle.allocator, host[handle.content.end..]) catch return .out_of_memory;
 
     p.* = handle.rendered.items.ptr;
     l.* = handle.rendered.items.len;
@@ -1308,21 +1352,21 @@ test "editor c abi accepts empty input as an empty document" {
 
 test "frontmatter c abi preserves fences and body" {
     const md = "---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n";
-    var out_fm: ?*FigFrontmatter = null;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
-    defer fig_fm_destroy(out_fm);
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
 
     const author = "author";
     const me = "me";
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_insert_key(out_fm, null, 0, author.ptr, author.len, me.ptr, me.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_insert_key(out_fm, null, 0, author.ptr, author.len, me.ptr, me.len));
 
     const tags = [_]FigPathSegment{keySeg("tags")};
     const y = "y";
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_append_seq(out_fm, &tags, 1, y.ptr, y.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_append_seq(out_fm, &tags, 1, y.ptr, y.len));
 
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings(
         "---\ntitle: Hi\n# keep\ntags:\n- x\n- y\nauthor: me\n---\n# Body\ntext\n",
         ptr[0..len],
@@ -1335,16 +1379,16 @@ fn figStr(s: []const u8) FigStr {
 
 test "frontmatter c abi reorder keys preserves comments, fences, body" {
     const md = "---\ntitle: Hi\n# keep\ntags:\n- x\nauthor: me\n---\n# Body\ntext\n";
-    var out_fm: ?*FigFrontmatter = null;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
-    defer fig_fm_destroy(out_fm);
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
 
     const keys = [_]FigStr{ figStr("author"), figStr("title") };
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_reorder_keys(out_fm, null, 0, &keys, keys.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_reorder_keys(out_fm, null, 0, &keys, keys.len));
 
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings(
         "---\nauthor: me\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n",
         ptr[0..len],
@@ -1353,48 +1397,48 @@ test "frontmatter c abi reorder keys preserves comments, fences, body" {
 
 test "frontmatter c abi move key preserves fences and body" {
     const md = "---\na: 1\nb: 2\nc: 3\n---\nbody\n";
-    var out_fm: ?*FigFrontmatter = null;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
-    defer fig_fm_destroy(out_fm);
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
 
     const src = [_]FigPathSegment{keySeg("c")};
     const dest = [_]FigPathSegment{keySeg("a")};
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_move_key(out_fm, &src, 1, &dest, 1));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_move_key(out_fm, &src, 1, &dest, 1));
 
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings("---\nc: 3\na: 1\nb: 2\n---\nbody\n", ptr[0..len]);
 }
 
 test "frontmatter c abi reorder items in a block sequence value" {
     const md = "---\ntags:\n- x\n- y\n- z\n---\nbody\n";
-    var out_fm: ?*FigFrontmatter = null;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
-    defer fig_fm_destroy(out_fm);
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
 
     const path = [_]FigPathSegment{keySeg("tags")};
     const indices = [_]usize{ 2, 0 };
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_reorder_items(out_fm, &path, 1, &indices, indices.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_reorder_items(out_fm, &path, 1, &indices, indices.len));
 
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings("---\ntags:\n- z\n- x\n- y\n---\nbody\n", ptr[0..len]);
 }
 
 test "frontmatter c abi move item in a flow sequence value" {
     const md = "---\ntags: [x, y, z]\n---\nbody\n";
-    var out_fm: ?*FigFrontmatter = null;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_open(md.ptr, md.len, &out_fm));
-    defer fig_fm_destroy(out_fm);
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
 
     const path = [_]FigPathSegment{keySeg("tags")};
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_move_item(out_fm, &path, 1, 2, 0));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_move_item(out_fm, &path, 1, 2, 0));
 
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_fm_render(out_fm, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings("---\ntags: [z, x, y]\n---\nbody\n", ptr[0..len]);
 }
 
@@ -1403,6 +1447,23 @@ test "embed c abi locates region" {
     var region: FigRegion = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &region));
     try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
+}
+
+test "embed c abi edits json frontmatter (`;;;` fences, JSON inner editor)" {
+    const md = ";;;\n{\"title\": \"Hi\", \"draft\": true}\n;;;\n# Body\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_json), &out_fm));
+    defer fig_embed_destroy(out_fm);
+
+    // The replacement crosses the ABI already serialized — JSON value text here.
+    const title = [_]FigPathSegment{keySeg("title")};
+    const hello = "\"Hello\"";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_val(out_fm, &title, 1, hello.ptr, hello.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings(";;;\n{\"title\": \"Hello\", \"draft\": true}\n;;;\n# Body\n", ptr[0..len]);
 }
 
 test "value c abi builds and serializes to multiple formats" {

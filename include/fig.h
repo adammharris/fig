@@ -188,42 +188,44 @@ FigStatus fig_embed_extract(const uint8_t *input, size_t input_len,
                             int embed_type, FigRegion *out_region);
 
 // ============================================================================
-// Frontmatter editor (combined): edits the YAML between markdown `---` fences
-// and re-assembles the host file, leaving fences and body byte-identical.
+// Embed editor (combined): opens the config inside a host file — selected by
+// FigEmbedType — and edits it in its inner format (YAML or JSON), leaving the
+// fences and surrounding host text byte-identical. fig_embed_open picks the
+// inner editor from the archetype; the edit ops mirror fig_editor_*.
 // ============================================================================
 
-typedef struct FigFrontmatter FigFrontmatter;
+typedef struct FigEmbed FigEmbed;
 
-FigStatus fig_fm_open(const uint8_t *markdown, size_t markdown_len, FigFrontmatter **out_fm);
-void fig_fm_destroy(FigFrontmatter *fm);
+FigStatus fig_embed_open(const uint8_t *input, size_t input_len, int embed_type, FigEmbed **out_embed);
+void fig_embed_destroy(FigEmbed *embed);
 
-FigStatus fig_fm_replace_val(FigFrontmatter *fm, const FigPathSegment *path,
-                             size_t path_len, const uint8_t *repl, size_t repl_len);
-FigStatus fig_fm_replace_key(FigFrontmatter *fm, const FigPathSegment *path,
-                             size_t path_len, const uint8_t *repl, size_t repl_len);
-FigStatus fig_fm_insert_key(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                            const uint8_t *key, size_t key_len,
-                            const uint8_t *val, size_t val_len);
-FigStatus fig_fm_delete_key(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len);
-FigStatus fig_fm_append_seq(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                            const uint8_t *val, size_t val_len);
-FigStatus fig_fm_prepend_seq(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                             const uint8_t *val, size_t val_len);
-FigStatus fig_fm_remove_seq_item(FigFrontmatter *fm, const FigPathSegment *path,
-                                 size_t path_len, size_t index);
-FigStatus fig_fm_move_key(FigFrontmatter *fm,
-                          const FigPathSegment *src_path, size_t src_path_len,
-                          const FigPathSegment *dest_path, size_t dest_path_len);
-FigStatus fig_fm_reorder_keys(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                              const FigStr *keys, size_t keys_len);
-FigStatus fig_fm_move_item(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                           size_t from, size_t to);
-FigStatus fig_fm_reorder_items(FigFrontmatter *fm, const FigPathSegment *path, size_t path_len,
-                               const size_t *indices, size_t indices_len);
+FigStatus fig_embed_replace_val(FigEmbed *embed, const FigPathSegment *path,
+                                size_t path_len, const uint8_t *repl, size_t repl_len);
+FigStatus fig_embed_replace_key(FigEmbed *embed, const FigPathSegment *path,
+                                size_t path_len, const uint8_t *repl, size_t repl_len);
+FigStatus fig_embed_insert_key(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                               const uint8_t *key, size_t key_len,
+                               const uint8_t *val, size_t val_len);
+FigStatus fig_embed_delete_key(FigEmbed *embed, const FigPathSegment *path, size_t path_len);
+FigStatus fig_embed_append_seq(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                               const uint8_t *val, size_t val_len);
+FigStatus fig_embed_prepend_seq(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                                const uint8_t *val, size_t val_len);
+FigStatus fig_embed_remove_seq_item(FigEmbed *embed, const FigPathSegment *path,
+                                    size_t path_len, size_t index);
+FigStatus fig_embed_move_key(FigEmbed *embed,
+                             const FigPathSegment *src_path, size_t src_path_len,
+                             const FigPathSegment *dest_path, size_t dest_path_len);
+FigStatus fig_embed_reorder_keys(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                                 const FigStr *keys, size_t keys_len);
+FigStatus fig_embed_move_item(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                              size_t from, size_t to);
+FigStatus fig_embed_reorder_items(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                                  const size_t *indices, size_t indices_len);
 
-// Render the full host file with edited frontmatter. Borrowed bytes, valid
-// until the next call or fig_fm_destroy.
-FigStatus fig_fm_render(FigFrontmatter *fm, const uint8_t **out_ptr, size_t *out_len);
+// Render the full host file with the edited embed. Borrowed bytes, valid
+// until the next call or fig_embed_destroy.
+FigStatus fig_embed_render(FigEmbed *embed, const uint8_t **out_ptr, size_t *out_len);
 
 // ============================================================================
 // Value construction + serialization

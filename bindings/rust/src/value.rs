@@ -151,10 +151,11 @@ fn build(handle: *mut ffi::FigValue, value: &Value) -> Result<ffi::FigNodeId, Er
     Ok(id)
 }
 
-/// The splice text for an editor value: the value rendered as YAML, minus the
-/// trailing newline the serializer appends (the editor owns newline framing).
-pub(crate) fn value_text(value: &Value) -> Result<String, Error> {
-    let mut s = value.serialize(Format::Yaml)?;
+/// The splice text for an editor value: the value rendered in `format`, minus
+/// the trailing newline the serializer appends (the editor owns newline
+/// framing).
+pub(crate) fn value_text(value: &Value, format: Format) -> Result<String, Error> {
+    let mut s = value.serialize(format)?;
     if s.ends_with('\n') {
         s.pop();
     }

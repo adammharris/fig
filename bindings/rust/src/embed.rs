@@ -1,38 +1,81 @@
-//! Comment-preserving editing of YAML frontmatter inside a markdown file.
+//! Comment-preserving editing of a config embedded in a host file.
 //!
-//! [`Frontmatter`] opens a markdown document, locates its `---…---` YAML
-//! frontmatter, and edits only that block — the fences and the markdown body
-//! are left byte-identical, and within the frontmatter only the changed node's
-//! bytes move (comments, key order, and formatting are preserved).
+//! [`Embed`] opens the config region selected by an [`EmbedType`] — markdown
+//! YAML frontmatter, JSON frontmatter, or YAML endmatter — and edits only that
+//! block in its inner format. The fences and surrounding host text are left
+//! byte-identical, and within the embed only the changed node's bytes move
+//! (comments, key order, and formatting are preserved). This generalizes the
+//! former YAML-frontmatter-only `Frontmatter`.
 //!
-//! Value-taking methods mirror [`crate::Editor`]: `*_value` take a [`Value`]
-//! and are always available; the `serde`-gated forms accept any `Serialize`.
+//! Value-taking methods mirror [`crate::Editor`]: `*_value` take a [`Value`] and
+//! are always available; the `serde`-gated forms accept any `Serialize`.
 
 use std::ptr::NonNull;
 
 use crate::editor::{borrow_str, to_ffi_keys, to_ffi_path, Segment};
 use crate::error::Error;
-use crate::ffi;
 use crate::value::{value_text, Value};
+use crate::{ffi, Format};
 
-/// An editor over the YAML frontmatter of a markdown document.
-#[derive(Debug)]
-pub struct Frontmatter {
-    raw: NonNull<ffi::FigFrontmatter>,
+/// Which embedded config to open. Each fixes both the host delimiters and the
+/// inner format, mirroring fig's `Embed.Type`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbedType {
+    /// `---` … `---` YAML frontmatter at the top of a markdown file.
+    FrontmatterYaml,
+    /// `;;;` … `;;;` JSON frontmatter at the top of a markdown file.
+    FrontmatterJson,
+    /// YAML in a trailing ```` ```endmatter ```` code block.
+    EndmatterYaml,
 }
 
-impl Frontmatter {
-    /// Open the frontmatter of `markdown`. Returns [`Error::NotFound`] if there
-    /// is no `---…---` frontmatter block.
-    pub fn open(markdown: &[u8]) -> Result<Self, Error> {
-        let mut raw = std::ptr::null_mut();
-        let status = unsafe { ffi::fig_fm_open(markdown.as_ptr(), markdown.len(), &mut raw) };
-        Error::from_status(status)?;
-        let raw = NonNull::new(raw).ok_or(Error::Internal)?;
-        Ok(Self { raw })
+impl EmbedType {
+    fn ffi(self) -> ffi::FigEmbedType {
+        match self {
+            EmbedType::FrontmatterYaml => ffi::FigEmbedType::FrontmatterYaml,
+            EmbedType::FrontmatterJson => ffi::FigEmbedType::FrontmatterJson,
+            EmbedType::EndmatterYaml => ffi::FigEmbedType::EndmatterYaml,
+        }
     }
 
-    fn ptr(&self) -> *mut ffi::FigFrontmatter {
+    /// The inner format values are serialized to when spliced in.
+    fn inner_format(self) -> Format {
+        match self {
+            EmbedType::FrontmatterYaml | EmbedType::EndmatterYaml => Format::Yaml,
+            EmbedType::FrontmatterJson => Format::Json,
+        }
+    }
+}
+
+/// An editor over an embedded config region of a host file.
+#[derive(Debug)]
+pub struct Embed {
+    raw: NonNull<ffi::FigEmbed>,
+    inner: Format,
+}
+
+impl Embed {
+    /// Open the embed of `kind` in `host`. Returns [`Error::NotFound`] if no such
+    /// region exists.
+    pub fn open(host: &[u8], kind: EmbedType) -> Result<Self, Error> {
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe {
+            ffi::fig_embed_open(host.as_ptr(), host.len(), kind.ffi() as i32, &mut raw)
+        };
+        Error::from_status(status)?;
+        let raw = NonNull::new(raw).ok_or(Error::Internal)?;
+        Ok(Self {
+            raw,
+            inner: kind.inner_format(),
+        })
+    }
+
+    /// Open the markdown YAML frontmatter of `markdown` — the common case.
+    pub fn frontmatter(markdown: &[u8]) -> Result<Self, Error> {
+        Self::open(markdown, EmbedType::FrontmatterYaml)
+    }
+
+    fn ptr(&self) -> *mut ffi::FigEmbed {
         self.raw.as_ptr()
     }
 
@@ -40,31 +83,31 @@ impl Frontmatter {
 
     /// Replace the value at `path` with `value`.
     pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let repl = value_text(value)?;
+        let repl = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_fm_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+            ffi::fig_embed_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
         };
         Error::from_status(status)
     }
 
     /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(&Value::Str(key.to_string()))?;
+        let repl = value_text(&Value::Str(key.to_string()), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_fm_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+            ffi::fig_embed_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
         };
         Error::from_status(status)
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
     pub fn insert_value(&mut self, path: &[Segment], key: &str, value: &Value) -> Result<(), Error> {
-        let key_text = value_text(&Value::Str(key.to_string()))?;
-        let val = value_text(value)?;
+        let key_text = value_text(&Value::Str(key.to_string()), self.inner)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_fm_insert_key(
+            ffi::fig_embed_insert_key(
                 self.ptr(),
                 p.as_ptr(),
                 p.len(),
@@ -79,19 +122,19 @@ impl Frontmatter {
 
     /// Append `value` to the sequence at `path`.
     pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status =
-            unsafe { ffi::fig_fm_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+            unsafe { ffi::fig_embed_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
         Error::from_status(status)
     }
 
     /// Prepend `value` to the sequence at `path`.
     pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status =
-            unsafe { ffi::fig_fm_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+            unsafe { ffi::fig_embed_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
         Error::from_status(status)
     }
 
@@ -143,14 +186,14 @@ impl Frontmatter {
     /// Delete the mapping entry named by `path`.
     pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_fm_delete_key(self.ptr(), p.as_ptr(), p.len()) };
+        let status = unsafe { ffi::fig_embed_delete_key(self.ptr(), p.as_ptr(), p.len()) };
         Error::from_status(status)
     }
 
     /// Remove the item at `index` from the sequence at `path`.
     pub fn remove_item(&mut self, path: &[Segment], index: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_fm_remove_seq_item(self.ptr(), p.as_ptr(), p.len(), index) };
+        let status = unsafe { ffi::fig_embed_remove_seq_item(self.ptr(), p.as_ptr(), p.len(), index) };
         Error::from_status(status)
     }
 
@@ -161,7 +204,7 @@ impl Frontmatter {
         let s = to_ffi_path(src_path);
         let d = to_ffi_path(dest_path);
         let status =
-            unsafe { ffi::fig_fm_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len()) };
+            unsafe { ffi::fig_embed_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len()) };
         Error::from_status(status)
     }
 
@@ -173,7 +216,7 @@ impl Frontmatter {
         let p = to_ffi_path(path);
         let k = to_ffi_keys(keys);
         let status = unsafe {
-            ffi::fig_fm_reorder_keys(self.ptr(), p.as_ptr(), p.len(), k.as_ptr(), k.len())
+            ffi::fig_embed_reorder_keys(self.ptr(), p.as_ptr(), p.len(), k.as_ptr(), k.len())
         };
         Error::from_status(status)
     }
@@ -183,7 +226,7 @@ impl Frontmatter {
     /// its separators. No-op when `from == to`.
     pub fn move_item(&mut self, path: &[Segment], from: usize, to: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_fm_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
+        let status = unsafe { ffi::fig_embed_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
         Error::from_status(status)
     }
 
@@ -194,26 +237,25 @@ impl Frontmatter {
     pub fn reorder_items(&mut self, path: &[Segment], indices: &[usize]) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_fm_reorder_items(self.ptr(), p.as_ptr(), p.len(), indices.as_ptr(), indices.len())
+            ffi::fig_embed_reorder_items(self.ptr(), p.as_ptr(), p.len(), indices.as_ptr(), indices.len())
         };
         Error::from_status(status)
     }
 
-    /// Render the full markdown document with the edited frontmatter spliced
-    /// back between the (untouched) fences. Borrows handle memory; invalidated
-    /// by the next call or edit. Takes `&mut self` because the render buffer is
-    /// rebuilt in place.
+    /// Render the full host file with the edited embed spliced back between the
+    /// (untouched) fences. Borrows handle memory; invalidated by the next call
+    /// or edit. Takes `&mut self` because the render buffer is rebuilt in place.
     pub fn render(&mut self) -> Result<&str, Error> {
         let mut ptr: *const u8 = std::ptr::null();
         let mut len: usize = 0;
-        let status = unsafe { ffi::fig_fm_render(self.raw.as_ptr(), &mut ptr, &mut len) };
+        let status = unsafe { ffi::fig_embed_render(self.raw.as_ptr(), &mut ptr, &mut len) };
         Error::from_status(status)?;
         borrow_str(ptr, len)
     }
 }
 
-impl Drop for Frontmatter {
+impl Drop for Embed {
     fn drop(&mut self) {
-        unsafe { ffi::fig_fm_destroy(self.raw.as_ptr()) };
+        unsafe { ffi::fig_embed_destroy(self.raw.as_ptr()) };
     }
 }

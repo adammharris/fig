@@ -147,7 +147,7 @@ unsafe extern "C" {
 // ---- editing (write path) ----
 
 pub enum FigEditor {}
-pub enum FigFrontmatter {}
+pub enum FigEmbed {}
 
 /// One step of a path: `kind == 0` selects mapping key `key_ptr[0..key_len]`;
 /// `kind == 1` selects sequence element `index`. Mirrors `FigPathSegment` in
@@ -171,7 +171,7 @@ pub struct FigStr {
 }
 
 // `FigSpan`/`FigRegion`/`fig_embed_extract` mirror the low-level embed C ABI.
-// The Rust-facing consumer is `Frontmatter` (which uses `fig_fm_*`); these are
+// The Rust-facing consumer is `Embed` (which uses `fig_embed_*`); these are
 // declared for parity with the header and for any future low-level wrapper.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -298,29 +298,30 @@ unsafe extern "C" {
         out_region: *mut FigRegion,
     ) -> FigStatus;
 
-    pub fn fig_fm_open(
-        markdown: *const u8,
-        markdown_len: usize,
-        out_fm: *mut *mut FigFrontmatter,
+    pub fn fig_embed_open(
+        input: *const u8,
+        input_len: usize,
+        embed_type: c_int,
+        out_embed: *mut *mut FigEmbed,
     ) -> FigStatus;
-    pub fn fig_fm_destroy(fm: *mut FigFrontmatter);
+    pub fn fig_embed_destroy(fm: *mut FigEmbed);
 
-    pub fn fig_fm_replace_val(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_replace_val(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         repl: *const u8,
         repl_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_replace_key(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_replace_key(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         repl: *const u8,
         repl_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_insert_key(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_insert_key(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         key: *const u8,
@@ -328,61 +329,61 @@ unsafe extern "C" {
         val: *const u8,
         val_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_delete_key(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_delete_key(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_append_seq(
-        fm: *mut FigFrontmatter,
-        path: *const FigPathSegment,
-        path_len: usize,
-        val: *const u8,
-        val_len: usize,
-    ) -> FigStatus;
-    pub fn fig_fm_prepend_seq(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_append_seq(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         val: *const u8,
         val_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_remove_seq_item(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_prepend_seq(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_remove_seq_item(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         index: usize,
     ) -> FigStatus;
-    pub fn fig_fm_move_key(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_move_key(
+        fm: *mut FigEmbed,
         src_path: *const FigPathSegment,
         src_path_len: usize,
         dest_path: *const FigPathSegment,
         dest_path_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_reorder_keys(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_reorder_keys(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         keys: *const FigStr,
         keys_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_move_item(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_move_item(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         from: usize,
         to: usize,
     ) -> FigStatus;
-    pub fn fig_fm_reorder_items(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_reorder_items(
+        fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
         indices: *const usize,
         indices_len: usize,
     ) -> FigStatus;
-    pub fn fig_fm_render(
-        fm: *mut FigFrontmatter,
+    pub fn fig_embed_render(
+        fm: *mut FigEmbed,
         out_ptr: *mut *const u8,
         out_len: *mut usize,
     ) -> FigStatus;

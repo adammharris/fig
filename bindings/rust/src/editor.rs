@@ -100,7 +100,7 @@ impl Editor {
 
     /// Replace the value at `path` with `value`.
     pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let repl = value_text(value)?;
+        let repl = value_text(value, Format::Yaml)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -110,7 +110,7 @@ impl Editor {
 
     /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(&Value::Str(key.to_string()))?;
+        let repl = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -120,8 +120,8 @@ impl Editor {
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
     pub fn insert_value(&mut self, path: &[Segment], key: &str, value: &Value) -> Result<(), Error> {
-        let key_text = value_text(&Value::Str(key.to_string()))?;
-        let val = value_text(value)?;
+        let key_text = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
+        let val = value_text(value, Format::Yaml)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_insert_key(
@@ -139,7 +139,7 @@ impl Editor {
 
     /// Append `value` to the sequence at `path`.
     pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value)?;
+        let val = value_text(value, Format::Yaml)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
@@ -149,7 +149,7 @@ impl Editor {
 
     /// Prepend `value` to the sequence at `path`.
     pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value)?;
+        let val = value_text(value, Format::Yaml)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
