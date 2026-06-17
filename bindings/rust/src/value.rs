@@ -161,6 +161,34 @@ pub(crate) fn value_text(value: &Value) -> Result<String, Error> {
     Ok(s)
 }
 
+/// Parse a numeric scalar's raw text into a `Value`, classifying by `is_float`
+/// (the node's kind). Integers try `i64` then `u64`, falling back to float when
+/// out of range, matching how the serde deserializer widens.
+pub(crate) fn number_from_raw(raw: &str, is_float: bool) -> Result<Value, Error> {
+    if !is_float {
+        if let Ok(i) = raw.parse::<i64>() {
+            return Ok(Value::Int(i));
+        }
+        if let Ok(u) = raw.parse::<u64>() {
+            return Ok(Value::Uint(u));
+        }
+    }
+    parse_yaml_float(raw)
+        .map(Value::Float)
+        .ok_or_else(|| Error::Number(raw.to_owned()))
+}
+
+/// Parse a float, including the YAML special values (`​.inf`/`.nan`) that Rust's
+/// `f64::from_str` rejects.
+pub(crate) fn parse_yaml_float(raw: &str) -> Option<f64> {
+    match raw {
+        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Some(f64::INFINITY),
+        "-.inf" | "-.Inf" | "-.INF" => Some(f64::NEG_INFINITY),
+        ".nan" | ".NaN" | ".NAN" => Some(f64::NAN),
+        _ => raw.parse::<f64>().ok(),
+    }
+}
+
 /// Format a float as the text fig stores in `number.raw`: YAML's `.inf`/`.nan`
 /// for the specials, and a trailing `.0` so an integral value still reads back
 /// as a float. (fig's value API takes float text rather than a `double`, so the
@@ -291,5 +319,23 @@ mod tests {
             v.serialize(Format::Toml),
             Err(Error::UnsupportedFormat)
         ));
+    }
+
+    // The non-serde read path: parse → to_value → serialize round-trips.
+    #[test]
+    fn document_reads_into_value() {
+        use crate::{Document, Format};
+        let doc = Document::parse(b"title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n", Format::Yaml).unwrap();
+        let v = doc.to_value().unwrap();
+        assert_eq!(
+            v,
+            Value::Map(vec![
+                ("title".into(), "Hi".into()),
+                ("nums".into(), Value::Seq(vec![1i64.into(), 2i64.into()])),
+                ("ratio".into(), 1.5.into()),
+            ]),
+        );
+        // round-trips back out through serialize
+        assert_eq!(v.serialize(Format::Yaml).unwrap(), "title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n");
     }
 }

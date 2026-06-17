@@ -21,7 +21,6 @@ pub use de::from_str;
 #[cfg(feature = "serde")]
 pub use ser::to_string;
 
-#[cfg(feature = "serde")]
 use ffi::{FigNodeId, FigNodeKind, FIG_NODE_NONE};
 
 /// A config format. Parsing and editing support `Json`/`Jsonc`/`Yaml`;
@@ -67,10 +66,60 @@ impl Document {
     }
 }
 
-/// Read-path traversal over the parsed node graph. Consumed by the serde
-/// deserializer; gated with it until a public node API lands.
-#[cfg(feature = "serde")]
+/// Read-path traversal over the parsed node graph: the public `to_value`, plus
+/// the lower-level accessors the serde deserializer walks.
 impl Document {
+    /// Read the whole document into an owned [`Value`] tree — the non-serde
+    /// structural read, the mirror of [`Value::serialize`]. An empty document is
+    /// [`Value::Null`].
+    pub fn to_value(&self) -> Result<Value, Error> {
+        match self.root() {
+            None => Ok(Value::Null),
+            Some(id) => self.node_to_value(id),
+        }
+    }
+
+    fn node_to_value(&self, id: FigNodeId) -> Result<Value, Error> {
+        let kind = self.kind(id);
+        match kind {
+            FigNodeKind::Null => Ok(Value::Null),
+            FigNodeKind::Bool => Ok(Value::Bool(self.get_bool(id).ok_or(Error::Internal)?)),
+            FigNodeKind::Int | FigNodeKind::Float => {
+                let raw = self.number_raw(id).ok_or(Error::Internal)??;
+                value::number_from_raw(raw, kind == FigNodeKind::Float)
+            }
+            FigNodeKind::String => Ok(Value::Str(
+                self.get_str(id).ok_or(Error::Internal)??.to_owned(),
+            )),
+            FigNodeKind::Sequence => {
+                let mut items = Vec::with_capacity(self.child_count(id));
+                let mut next = self.first_child(id);
+                while let Some(child) = next {
+                    items.push(self.node_to_value(child)?);
+                    next = self.next_sibling(child);
+                }
+                Ok(Value::Seq(items))
+            }
+            FigNodeKind::Mapping => {
+                let mut entries = Vec::with_capacity(self.child_count(id));
+                let mut next = self.first_child(id);
+                while let Some(kv) = next {
+                    let key = self.kv_key(kv).ok_or(Error::Internal)?;
+                    let value = match self.kv_value(kv) {
+                        Some(vid) => self.node_to_value(vid)?,
+                        None => Value::Null,
+                    };
+                    entries.push((self.node_to_value(key)?, value));
+                    next = self.next_sibling(kv);
+                }
+                Ok(Value::Map(entries))
+            }
+            // A bare keyvalue, an invalid id, or an unresolved alias can't stand
+            // alone as a value.
+            FigNodeKind::Keyvalue | FigNodeKind::Invalid | FigNodeKind::Alias => Err(Error::Internal),
+        }
+    }
+
     fn ptr(&self) -> *const ffi::FigDocument {
         self.raw.as_ptr()
     }
@@ -158,7 +207,6 @@ impl Drop for Document {
     }
 }
 
-#[cfg(feature = "serde")]
 fn normalize(id: FigNodeId) -> Option<FigNodeId> {
     if id == FIG_NODE_NONE {
         None

@@ -54,7 +54,8 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'a> {
             FigNodeKind::Int => visit_int(self.number_raw(id)?, visitor),
             FigNodeKind::Float => {
                 let raw = self.number_raw(id)?;
-                let f = parse_float(raw).ok_or_else(|| Error::Number(raw.to_string()))?;
+                let f = crate::value::parse_yaml_float(raw)
+                    .ok_or_else(|| Error::Number(raw.to_string()))?;
                 visitor.visit_f64(f)
             }
             FigNodeKind::String => visitor.visit_str(self.str_value(id)?),
@@ -146,22 +147,11 @@ fn visit_int<'de, V: Visitor<'de>>(raw: &str, visitor: V) -> Result<V::Value, Er
         visitor.visit_i128(i)
     } else if let Ok(u) = raw.parse::<u128>() {
         visitor.visit_u128(u)
-    } else if let Some(f) = parse_float(raw) {
+    } else if let Some(f) = crate::value::parse_yaml_float(raw) {
         // Out of integer range — fall back to float, matching YAML behavior.
         visitor.visit_f64(f)
     } else {
         Err(Error::Number(raw.to_string()))
-    }
-}
-
-/// Parse a float, including the YAML special values that Rust's `f64::from_str`
-/// rejects.
-fn parse_float(raw: &str) -> Option<f64> {
-    match raw {
-        ".inf" | ".Inf" | ".INF" | "+.inf" | "+.Inf" | "+.INF" => Some(f64::INFINITY),
-        "-.inf" | "-.Inf" | "-.INF" => Some(f64::NEG_INFINITY),
-        ".nan" | ".NaN" | ".NAN" => Some(f64::NAN),
-        _ => raw.parse::<f64>().ok(),
     }
 }
 

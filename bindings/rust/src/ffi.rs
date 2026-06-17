@@ -27,9 +27,7 @@ pub enum FigDocument {}
 
 pub type FigNodeId = u32;
 
-/// Sentinel for "no such node", matching `FIG_NODE_NONE` in `fig.h`. Only the
-/// serde read path consults it.
-#[cfg(feature = "serde")]
+/// Sentinel for "no such node", matching `FIG_NODE_NONE` in `fig.h`.
 pub const FIG_NODE_NONE: FigNodeId = 0xFFFF_FFFF;
 
 #[repr(C)]
@@ -59,8 +57,7 @@ unsafe extern "C" {
     pub fn fig_document_destroy(doc: *mut FigDocument);
 }
 
-// Read traversal — consumed only by the serde deserializer.
-#[cfg(feature = "serde")]
+// Read traversal — consumed by `Document::to_value` and the serde deserializer.
 unsafe extern "C" {
     pub fn fig_document_root(doc: *const FigDocument) -> FigNodeId;
     pub fn fig_node_kind(doc: *const FigDocument, node: FigNodeId) -> FigNodeKind;
