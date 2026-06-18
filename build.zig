@@ -52,6 +52,27 @@ pub fn build(b: *std.Build) void {
     const install_c_lib_step = b.step("install-c-lib", "Install the C ABI static library");
     install_c_lib_step.dependOn(&install_c_lib.step);
 
+    // WebAssembly build for the TypeScript bindings: compile the same C ABI to a
+    // freestanding `reactor` module (no `_start`; `rdynamic` keeps every
+    // exported `fig_*` symbol). `c_api.zig` already selects `wasm_allocator` and
+    // drops logging on wasm, so no libc is needed. `zig build wasm` writes
+    // `fig.wasm` into the install prefix's `bin/`.
+    const wasm_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .freestanding });
+    const wasm = b.addExecutable(.{
+        .name = "fig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = wasm_target,
+            .optimize = .ReleaseSmall,
+            .strip = true,
+        }),
+    });
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+    const install_wasm = b.addInstallArtifact(wasm, .{});
+    const wasm_step = b.step("wasm", "Build the WebAssembly module for the TypeScript bindings");
+    wasm_step.dependOn(&install_wasm.step);
+
     const run_step = b.step("run", "Run the app");
 
     const run_cmd = b.addRunArtifact(exe);

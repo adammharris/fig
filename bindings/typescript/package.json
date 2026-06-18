@@ -1,0 +1,29 @@
+{
+  "name": "@adammharris/fig",
+  "version": "0.0.0",
+  "description": "JSON/JSONC/YAML/TOML/ZON parsing, comment-preserving editing, and serialization (WebAssembly).",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "src", "README.md"],
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "npm run build:wasm && tsc -p tsconfig.json",
+    "test": "node --experimental-transform-types --test 'test/**/*.test.ts'",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  },
+  "license": "SEE LICENSE IN fig.md",
+  "sideEffects": false
+}

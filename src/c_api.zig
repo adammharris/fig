@@ -76,6 +76,35 @@ fn activeAllocator() std.mem.Allocator {
         std.heap.c_allocator;
 }
 
+// ==================
+// RAW MEMORY (for hosts without a shared allocator)
+// ==================
+//
+// A caller that does not share this library's address space — chiefly the
+// WebAssembly bindings — cannot otherwise place input bytes where the API can
+// read them, nor read borrowed output without first copying it into a buffer it
+// owns. These two entry points expose `activeAllocator()` for exactly that: in
+// the wasm build they let JavaScript allocate inside linear memory, write the
+// input, hand the pointer to `fig_parse`/`fig_editor_*`/…, then release it.
+// Buffers obtained here MUST be released with `fig_free`, passing the same
+// length that was requested.
+
+/// Allocate `len` bytes and return a pointer to them, or null on failure / a
+/// zero-length request. Bytes are uninitialized. Release with `fig_free`.
+pub export fn fig_alloc(len: usize) ?[*]u8 {
+    if (len == 0) return null;
+    const mem = activeAllocator().alloc(u8, len) catch return null;
+    return mem.ptr;
+}
+
+/// Release a buffer obtained from `fig_alloc`. `len` must equal the length that
+/// was requested. A null pointer or zero length is a no-op.
+pub export fn fig_free(ptr: ?[*]u8, len: usize) void {
+    const p = ptr orelse return;
+    if (len == 0) return;
+    activeAllocator().free(p[0..len]);
+}
+
 pub export fn fig_parse(
     input_ptr: ?[*]const u8,
     input_len: usize,
