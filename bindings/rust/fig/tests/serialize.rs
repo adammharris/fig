@@ -227,3 +227,24 @@ fn json_compact_vs_pretty() {
         .unwrap();
     assert!(wide.contains("\n    \"name\": \"Ada\""));
 }
+
+#[test]
+fn zon_compact_vs_pretty() {
+    use fig::SerializeOptions;
+    let value = map(vec![
+        ("name", "Ada".into()),
+        ("xs", Value::Seq(vec![1i64.into(), 2i64.into()])),
+    ]);
+
+    let compact = value
+        .serialize_with(Format::Zon, SerializeOptions::compact())
+        .unwrap();
+    assert_eq!(compact, ".{ .name = \"Ada\", .xs = .{ 1, 2 } }\n");
+
+    // Pretty stays the idiomatic four-space `zig fmt` shape.
+    let pretty = value.serialize(Format::Zon).unwrap();
+    assert_eq!(
+        pretty,
+        ".{\n    .name = \"Ada\",\n    .xs = .{\n        1,\n        2,\n    },\n}\n"
+    );
+}

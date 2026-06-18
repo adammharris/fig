@@ -69,14 +69,16 @@ impl From<Format> for ffi::FigFormat {
 /// fig's historical style (pretty-printed, two-space indent), so
 /// [`Value::serialize`] is exactly `serialize_with(format, SerializeOptions::default())`.
 ///
-/// Honored by [`Format::Json`] today; other formats currently ignore these and
-/// render with their built-in style.
+/// `pretty` is honored by [`Format::Json`] (multi-line vs. minified) and
+/// [`Format::Zon`] (`zig fmt` multi-line vs. inline `.{ a, b }`); `indent` by
+/// [`Format::Json`] only. [`Format::Yaml`] and [`Format::Toml`] render with
+/// their own fixed layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializeOptions {
     /// `true`: multi-line, indented output. `false`: compact single-line output
     /// with no insignificant whitespace.
     pub pretty: bool,
-    /// Spaces per indentation level when `pretty` is set.
+    /// Spaces per indentation level when `pretty` is set (JSON only).
     pub indent: u8,
 }
 

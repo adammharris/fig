@@ -22,63 +22,79 @@ const Writer = std.Io.Writer;
 /// non-string struct-field key.
 pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey };
 
-pub fn print(writer: *Writer, ast: *const AST) Error!void {
-    try printNode(writer, ast, ast.root, 0);
+/// Multi-line ZON uses a fixed four-space indent (what `zig fmt` produces), so
+/// `SerializeOptions.indent` is not applied here — only `options.pretty` is
+/// honored (compact single-line vs. multi-line).
+const block_indent = "    ";
+
+writer: *Writer,
+ast: *const AST,
+options: AST.SerializeOptions,
+
+pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    try p.node(ast.root, 0);
     try writer.writeByte('\n');
     try writer.flush();
 }
 
-pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Error!void {
-    const node = ast.nodes[id];
-    switch (node.kind) {
-        .null_ => try writer.writeAll("null"),
-        .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
-        .number => |value| try writer.writeAll(value.raw),
-        .string => |value| try writeString(writer, value),
-        .extended => |ext| try writeExtended(writer, ext),
-        .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
-        .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    try p.node(id, depth);
+}
+
+fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
+    const n = self.ast.nodes[id];
+    switch (n.kind) {
+        .null_ => try self.writer.writeAll("null"),
+        .boolean => |value| try self.writer.writeAll(if (value) "true" else "false"),
+        .number => |value| try self.writer.writeAll(value.raw),
+        .string => |value| try writeString(self.writer, value),
+        .extended => |ext| try writeExtended(self.writer, ext),
+        .sequence => |first_child| try self.container(first_child, depth),
+        .mapping => |first_child| try self.container(first_child, depth),
         .keyvalue => |kv| {
-            try writeFieldName(writer, ast, kv.key);
-            try writer.writeAll(" = ");
-            try printNode(writer, ast, kv.value, depth);
+            try writeFieldName(self.writer, self.ast, kv.key);
+            try self.writer.writeAll(" = ");
+            try self.node(kv.value, depth);
         },
         .alias => return error.UnresolvedAlias,
     }
 }
 
-fn printSequence(writer: *Writer, ast: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
+/// Sequences and structs share ZON's `.{ ... }` literal; each child renders the
+/// same way (a bare value or a `.field = value`, dispatched by `node`), so one
+/// routine serves both. Compact output keeps everything on one line with
+/// `.{ a, b }` spacing; multi-line output is the `zig fmt` shape with a trailing
+/// comma per element.
+fn container(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
     if (first_child == null) {
-        try writer.writeAll(".{}");
+        try self.writer.writeAll(".{}");
         return;
     }
-    try writer.writeAll(".{\n");
-    var current = first_child;
-    while (current) |id| {
-        try writeIndent(writer, depth + 1);
-        try printNode(writer, ast, id, depth + 1);
-        try writer.writeAll(",\n");
-        current = ast.nodes[id].next_sibling;
-    }
-    try writeIndent(writer, depth);
-    try writer.writeByte('}');
-}
 
-fn printMapping(writer: *Writer, ast: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    if (first_child == null) {
-        try writer.writeAll(".{}");
+    if (!self.options.pretty) {
+        try self.writer.writeAll(".{ ");
+        var current = first_child;
+        while (current) |id| {
+            try self.node(id, depth + 1);
+            current = self.ast.nodes[id].next_sibling;
+            if (current != null) try self.writer.writeAll(", ");
+        }
+        try self.writer.writeAll(" }");
         return;
     }
-    try writer.writeAll(".{\n");
+
+    try self.writer.writeAll(".{\n");
     var current = first_child;
     while (current) |id| {
-        try writeIndent(writer, depth + 1);
-        try printNode(writer, ast, id, depth + 1);
-        try writer.writeAll(",\n");
-        current = ast.nodes[id].next_sibling;
+        try writeIndent(self.writer, depth + 1);
+        try self.node(id, depth + 1);
+        try self.writer.writeAll(",\n");
+        current = self.ast.nodes[id].next_sibling;
     }
-    try writeIndent(writer, depth);
-    try writer.writeByte('}');
+    try writeIndent(self.writer, depth);
+    try self.writer.writeByte('}');
 }
 
 /// Emit a struct field name: `.name` if it's a bare identifier, else `.@"..."`.
@@ -162,7 +178,7 @@ fn writeHexEscape(writer: *Writer, char: u8) Writer.Error!void {
 }
 
 fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
-    for (0..depth) |_| try writer.writeAll("    ");
+    for (0..depth) |_| try writer.writeAll(block_indent);
 }
 
 /// A name is a bare ZON identifier when it matches `[A-Za-z_][A-Za-z0-9_]*` and
@@ -183,12 +199,16 @@ fn isBareIdentifier(name: []const u8) bool {
 const Parser = @import("parser.zig");
 
 fn expectPrint(input: []const u8, expected: []const u8) !void {
+    try expectPrintOpts(input, expected, .{});
+}
+
+fn expectPrintOpts(input: []const u8, expected: []const u8, options: AST.SerializeOptions) !void {
     var ast = try Parser.parseAbstract(std.testing.allocator, input, .ZON);
     defer ast.deinit();
 
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try print(&output.writer, &ast);
+    try print(&output.writer, &ast, options);
     try std.testing.expectEqualStrings(expected, output.written());
 }
 
@@ -266,4 +286,24 @@ test "char literals round-trip" {
         \\}
         \\
     );
+}
+
+test "compact struct stays on one line" {
+    try expectPrintOpts(
+        ".{ .name = \"Ada\", .age = 36 }",
+        ".{ .name = \"Ada\", .age = 36 }\n",
+        .{ .pretty = false },
+    );
+}
+
+test "compact nests structs and arrays inline" {
+    try expectPrintOpts(
+        ".{ .xs = .{ 1, 2 }, .ok = true }",
+        ".{ .xs = .{ 1, 2 }, .ok = true }\n",
+        .{ .pretty = false },
+    );
+}
+
+test "compact empty container" {
+    try expectPrintOpts(".{}", ".{}\n", .{ .pretty = false });
 }

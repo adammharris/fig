@@ -99,6 +99,8 @@ test("serialize honors JSON pretty/compact options", () => {
     serialize(value, Format.Json, { indent: 4 }),
     '{\n    "name": "fig",\n    "nums": [\n        1,\n        2\n    ]\n}\n',
   );
+  // ZON honors pretty/compact too (keeping its idiomatic four-space indent).
+  assert.equal(serialize(value, Format.Zon, { pretty: false }), ".{ .name = \"fig\", .nums = .{ 1, 2 } }\n");
 });
 
 test("fromJS / toJS round-trip", () => {

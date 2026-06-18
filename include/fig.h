@@ -301,12 +301,13 @@ FigStatus fig_value_serialize(FigValue *value, FigNodeId root, int format,
                               const uint8_t **out_ptr, size_t *out_len);
 
 // Output style for fig_value_serialize_opts. A NULL options pointer selects the
-// defaults shown here (identical output to fig_value_serialize). Honored by the
-// JSON format today; other formats ignore it and use their built-in style.
+// defaults shown here (identical output to fig_value_serialize). `pretty` is
+// honored by JSON and ZON; `indent` by JSON only. YAML and TOML render with
+// their own fixed layout.
 typedef struct FigSerializeOptions {
   // Nonzero (default): multi-line, indented output. Zero: compact single-line.
   uint8_t pretty;
-  // Spaces per indent level when `pretty` is nonzero. 0 is treated as default 2.
+  // Spaces per indent level when `pretty` is nonzero (JSON only). 0 => default 2.
   uint8_t indent;
 } FigSerializeOptions;
 

@@ -54,6 +54,10 @@ const CliActionOptions = union(CliAction) {
         /// When set, the input is extracted from a host document of this
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
+        /// Output style. `--compact` clears `pretty` for a single-line render;
+        /// `--indent N` sets the JSON indent width. Honored by JSON (pretty +
+        /// indent) and ZON (pretty only); YAML/TOML render with their own layout.
+        serialize: fig.AST.SerializeOptions = .{},
     },
 };
 
@@ -99,6 +103,9 @@ const Help = struct {
             \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|toml|zon] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
+            \\  --compact: single-line output with minimal whitespace (JSON, ZON).
+            \\  --pretty: multi-line, indented output (the default).
+            \\  --indent N: spaces per indent level for pretty JSON (default 2).
             \\  --lossless: preserve values the target can't represent natively
             \\    (e.g. a null in TOML, a TOML datetime in JSON) via a $fig
             \\    envelope, and reconstruct any such envelope in the input.
@@ -290,12 +297,12 @@ pub fn main(init: std.process.Init) !void {
                 }
                 try stderr_terminal.writer.flush();
                 if (result.ast) |stripped| {
-                    try stripped.serialize(stdout_terminal.writer, .toml);
+                    try stripped.serializeWith(stdout_terminal.writer, .toml, opts.serialize);
                 }
             } else if (opts.path == null) {
-                try ast.serialize(stdout_terminal.writer, target);
+                try ast.serializeWith(stdout_terminal.writer, target, opts.serialize);
             } else {
-                try ast.serializeNode(stdout_terminal.writer, target, node_id);
+                try ast.serializeNodeWith(stdout_terminal.writer, target, node_id, opts.serialize);
             }
             try stdout_terminal.writer.flush();
         },
@@ -558,6 +565,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         var output_override: ?Format = null;
         var lax_tags = false;
         var lossless = false;
+        var serialize: fig.AST.SerializeOptions = .{};
         var positionals: std.ArrayList([]const u8) = .empty;
         defer positionals.deinit(allocator);
 
@@ -568,6 +576,19 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 lossless = true;
             } else if (std.mem.eql(u8, arg, "--lossy")) {
                 lossless = false;
+            } else if (std.mem.eql(u8, arg, "--compact")) {
+                serialize.pretty = false;
+            } else if (std.mem.eql(u8, arg, "--pretty")) {
+                serialize.pretty = true;
+            } else if (std.mem.eql(u8, arg, "--indent")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+                serialize.indent = std.fmt.parseInt(u8, n, 10) catch {
+                    log.err("Invalid --indent value: {s}\n", .{n});
+                    return ArgError.MissingGetArgument;
+                };
             } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
                 const fmt = args.next() orelse {
                     log.err("Missing format value after {s}\n", .{arg});
@@ -637,6 +658,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .lax_tags = lax_tags,
             .lossless = lossless,
             .embed = embed,
+            .serialize = serialize,
         } };
     } else {
         log.err("Action not recognized: {s}", .{action_str});

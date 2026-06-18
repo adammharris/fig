@@ -166,13 +166,19 @@ pub const SerializeFormat = enum { json, yaml, toml, zon };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
-/// change for existing callers. Honored by the JSON printer today; other
-/// formats currently ignore these and render with their built-in style.
+/// change for existing callers.
+///
+/// Honored where each setting is meaningful:
+///   * `pretty` — JSON (multi-line vs. minified) and ZON (`zig fmt` multi-line
+///     vs. inline `.{ a, b }`). YAML and TOML ignore it: YAML's compact form is
+///     flow style (not yet emitted) and TOML has no single-line document form.
+///   * `indent` — JSON only. ZON keeps its idiomatic four-space block indent;
+///     YAML/TOML have their own fixed layout.
 pub const SerializeOptions = struct {
     /// `true`: multi-line, indented output. `false`: compact single-line output
     /// with no insignificant whitespace.
     pretty: bool = true,
-    /// Spaces per indentation level when `pretty` is set.
+    /// Spaces per indentation level when `pretty` is set (JSON only).
     indent: u8 = 2,
 };
 
@@ -196,7 +202,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .json => JsonPrinter.print(writer, self, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, self) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, self) else error.FormatDisabled,
-        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, self) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, self, options) else error.FormatDisabled,
     };
 }
 
@@ -211,7 +217,7 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .json => JsonPrinter.printNode(writer, self, id, 0, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
-        .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, self, id, 0, options) else error.FormatDisabled,
     };
 }
 

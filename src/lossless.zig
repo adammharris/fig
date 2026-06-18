@@ -385,8 +385,8 @@ fn convert(
     const decoded = try decode(arena, &ast);
     const encoded = try encode(arena, &decoded, target);
     var out: std.Io.Writer.Allocating = .init(arena);
-    // The JSON printer takes serialization options; the others don't (yet).
-    if (Printer == JsonPrinter) {
+    // The JSON and ZON printers take serialization options; TOML/YAML don't (yet).
+    if (Printer == JsonPrinter or Printer == ZonPrinter) {
         try Printer.print(&out.writer, &encoded, .{});
     } else {
         try Printer.print(&out.writer, &encoded);

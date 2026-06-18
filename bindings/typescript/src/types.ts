@@ -15,13 +15,15 @@ export enum Format {
 
 /** Controls how {@link serialize} renders output. Omitted fields fall back to
  *  fig's historical style (pretty-printed, two-space indent), so passing no
- *  options renders exactly as before. Honored by {@link Format.Json} today;
- *  other formats currently ignore it and use their built-in style. */
+ *  options renders exactly as before. `pretty` is honored by `Format.Json`
+ *  (multi-line vs. minified) and `Format.Zon` (`zig fmt` multi-line vs. inline
+ *  `.{ a, b }`); `indent` by `Format.Json` only. `Format.Yaml`/`Format.Toml`
+ *  render with their own fixed layout. */
 export interface SerializeOptions {
   /** `true` (default): multi-line, indented output. `false`: compact
    *  single-line output with no insignificant whitespace. */
   pretty?: boolean;
-  /** Spaces per indentation level when `pretty`. Defaults to 2. */
+  /** Spaces per indentation level when `pretty` (JSON only). Defaults to 2. */
   indent?: number;
 }
 

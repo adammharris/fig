@@ -1384,13 +1384,14 @@ pub export fn fig_value_map(
 }
 
 /// Controls output style for `fig_value_serialize_opts`. A NULL pointer selects
-/// the defaults below (the same output as `fig_value_serialize`). Honored by the
-/// JSON format today; other formats ignore it and use their built-in style.
+/// the defaults below (the same output as `fig_value_serialize`). `pretty` is
+/// honored by JSON and ZON; `indent` by JSON only. YAML and TOML render with
+/// their own fixed layout.
 pub const FigSerializeOptions = extern struct {
     /// Nonzero (default): multi-line, indented output. Zero: compact single-line.
     pretty: u8 = 1,
-    /// Spaces per indent level when `pretty` is nonzero. 0 is treated as the
-    /// default (2).
+    /// Spaces per indent level when `pretty` is nonzero (JSON only). 0 is treated
+    /// as the default (2).
     indent: u8 = 2,
 };
 
