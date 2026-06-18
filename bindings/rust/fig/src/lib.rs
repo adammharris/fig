@@ -33,7 +33,7 @@ pub use fig_macros::{FromValue, ToValue};
 #[cfg(feature = "serde")]
 pub use de::{from_slice, from_str};
 #[cfg(feature = "serde")]
-pub use ser::to_string;
+pub use ser::{to_string, to_value};
 
 use ffi::{FIG_NODE_NONE, FigNodeId, FigNodeKind};
 

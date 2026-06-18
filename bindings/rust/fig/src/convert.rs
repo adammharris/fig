@@ -183,6 +183,29 @@ impl FromValue for String {
     }
 }
 
+// --- Paths --------------------------------------------------------------------
+// Paths travel as strings (matching serde). `ToValue` is lossy for non-UTF-8
+// paths; `FromValue` accepts any string.
+
+impl ToValue for std::path::Path {
+    fn to_value(&self) -> Value {
+        Value::Str(self.to_string_lossy().into_owned())
+    }
+}
+impl ToValue for std::path::PathBuf {
+    fn to_value(&self) -> Value {
+        self.as_path().to_value()
+    }
+}
+impl FromValue for std::path::PathBuf {
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        match value {
+            Value::Str(s) => Ok(std::path::PathBuf::from(s)),
+            other => Err(type_err("string (path)", other)),
+        }
+    }
+}
+
 // --- Option -------------------------------------------------------------------
 
 impl<T: ToValue> ToValue for Option<T> {
