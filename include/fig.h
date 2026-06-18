@@ -18,11 +18,11 @@ typedef enum FigStatus {
     FIG_STATUS_INTERNAL_ERROR = 255,
 } FigStatus;
 
-// Not every function accepts every member. fig_parse accepts all six; the
+// Not every function accepts every member. fig_parse accepts all of them; the
 // editor (fig_editor_*) supports JSON/JSONC/YAML only (others return
-// FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts JSON/YAML/TOML/ZON
-// and treats JSONC as JSON. XML is reader-only: accepted by fig_parse, rejected
-// by the editor and serializer.
+// FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts
+// JSON/JSON5/YAML/TOML/ZON and treats JSONC as JSON. XML is reader-only:
+// accepted by fig_parse, rejected by the editor and serializer.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
@@ -30,6 +30,7 @@ typedef enum FigFormat {
     FIG_FORMAT_TOML = 4,
     FIG_FORMAT_ZON = 5,
     FIG_FORMAT_XML = 6,
+    FIG_FORMAT_JSON5 = 7,
 } FigFormat;
 
 typedef struct FigDocument FigDocument;
@@ -262,7 +263,8 @@ typedef struct FigKeyValue {
     FigNodeId value;
 } FigKeyValue;
 
-// Format-specific scalar kinds (TOML datetimes, ZON enum/char literals).
+// Format-specific scalar kinds (TOML datetimes, ZON enum/char literals, JSON5
+// non-finite numbers).
 typedef enum FigExtKind {
     FIG_EXT_OFFSET_DATETIME = 0,
     FIG_EXT_LOCAL_DATETIME  = 1,
@@ -270,6 +272,7 @@ typedef enum FigExtKind {
     FIG_EXT_LOCAL_TIME      = 3,
     FIG_EXT_ENUM_LITERAL    = 4,
     FIG_EXT_CHAR_LITERAL    = 5,
+    FIG_EXT_NUMBER_SPECIAL  = 6,
 } FigExtKind;
 
 FigStatus fig_value_create(FigValue **out_value);

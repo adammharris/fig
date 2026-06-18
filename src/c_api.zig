@@ -54,10 +54,10 @@ pub const FigStatus = enum(c_int) {
 };
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
-/// member: `fig_parse` accepts all five; the editor (`fig_editor_*`) supports
+/// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
 /// `json`/`jsonc`/`yaml` only (others return `unsupported_format`); the
-/// serializer (`fig_value_serialize`) accepts `json`/`yaml`/`toml`/`zon` and
-/// treats `jsonc` as `json`.
+/// serializer (`fig_value_serialize`) accepts `json`/`json5`/`yaml`/`toml`/`zon`
+/// and treats `jsonc` as `json`.
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
@@ -67,6 +67,9 @@ pub const FigFormat = enum(c_int) {
     /// Reader-only: accepted by `fig_parse`; rejected by `fig_editor_*` and
     /// `fig_value_serialize` (no XML writer yet) with `unsupported_format`.
     xml = 6,
+    /// JSON5: read and written. Appended (not inserted) to keep the ABI values
+    /// of the existing members stable.
+    json5 = 7,
 };
 
 /// A handle to a `fig` document. (See `DocumentHandle` and `handle.*` declaration in `fig_parse`)
@@ -155,6 +158,13 @@ pub export fn fig_parse(
         },
         .jsonc => blk: {
             break :blk JsonParser.parse(allocator, source, JsonType.JSONC) catch |err| {
+                allocator.free(source);
+                allocator.destroy(handle);
+                return parseFailureStatus(err);
+            };
+        },
+        .json5 => blk: {
+            break :blk JsonParser.parse(allocator, source, JsonType.JSON5) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
@@ -606,7 +616,7 @@ pub export fn fig_editor_create(
         .json => .{ .json = .{ .allocator = allocator } },
         .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
         // Filtered out by the format switch above; editing these is not yet wired.
-        .toml, .zon, .xml => unreachable,
+        .toml, .zon, .xml, .json5 => unreachable,
     };
 
     switch (handle.inner) {
@@ -1242,6 +1252,7 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
 fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
     return switch (format) {
         @intFromEnum(FigFormat.json), @intFromEnum(FigFormat.jsonc) => .json,
+        @intFromEnum(FigFormat.json5) => .json5,
         @intFromEnum(FigFormat.yaml) => .yaml,
         @intFromEnum(FigFormat.toml) => .toml,
         @intFromEnum(FigFormat.zon) => .zon,

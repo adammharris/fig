@@ -12,7 +12,7 @@ const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, yaml, yml, toml, zon, xml };
+const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml };
 
 const CliAction = enum {
     help,
@@ -100,10 +100,10 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|yaml|toml|zon] [--output json|yaml|toml|zon] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon] [--output json|json5|yaml|toml|zon] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
-            \\  --compact: single-line output with minimal whitespace (JSON, ZON).
+            \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
             \\  --pretty: multi-line, indented output (the default).
             \\  --indent N: spaces per indent level for pretty JSON (default 2).
             \\  --lossless: preserve values the target can't represent natively
@@ -208,6 +208,9 @@ pub fn main(init: std.process.Init) !void {
                     return error.FormatDisabled,
                 // XML is reader-only: no in-place editor yet.
                 .xml => return error.UnsupportedXmlEdit,
+                // JSON5 is read/serialize only so far; comment-preserving
+                // in-place editing of it is not wired yet.
+                .json5 => return error.UnsupportedJson5Edit,
             }
         },
         .get => {
@@ -230,6 +233,7 @@ pub fn main(init: std.process.Init) !void {
                 try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
             else switch (opts.from) {
                 .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
+                .json5 => try parseJsonTypeFromFile(init.arena.allocator(), io, input, .JSON5),
                 .yaml, .yml => if (comptime build_options.lang_yaml) try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input) else return error.FormatDisabled,
                 .toml => if (comptime build_options.lang_toml) try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input) else return error.FormatDisabled,
                 .zon => if (comptime build_options.lang_zon) try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input) else return error.FormatDisabled,
@@ -260,7 +264,10 @@ pub fn main(init: std.process.Init) !void {
             // non-YAML source (or a materialized YAML source) is safe.
             const ast: *const fig.AST = if (opts.lossless and !(src_is_yaml and dst_is_yaml)) blk: {
                 const target: fig.Lossless.Target = switch (opts.to) {
-                    .json, .jsonc => .json,
+                    // JSON5 reuses the JSON envelope target. It could hold
+                    // Infinity/NaN natively, so this is conservative (those ride
+                    // in a `$fig` envelope) but still fully lossless.
+                    .json, .jsonc, .json5 => .json,
                     .yaml, .yml => .yaml,
                     .toml => .toml,
                     .zon => .zon,
@@ -277,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
 
             const target: fig.AST.SerializeFormat = switch (opts.to) {
                 .json, .jsonc => .json,
+                .json5 => .json5,
                 .yaml, .yml => .yaml,
                 .toml => .toml,
                 .zon => .zon,
@@ -318,6 +326,13 @@ fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
 fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
     const content = try readAll(allocator, io, file);
     return try Lang.Parser.parse(allocator, content, Lang.default_type);
+}
+
+/// Parse a JSON-family file with an explicit dialect (the JSON `Language`'s
+/// `default_type` is plain JSON, so JSON5 input needs the type passed through).
+fn parseJsonTypeFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File, json_type: fig.Language.JSON.Type) !fig.Document {
+    const content = try readAll(allocator, io, file);
+    return try fig.Language.JSON.Parser.parse(allocator, content, json_type);
 }
 
 /// Extract the embedded config of `embed_type` from a host file and parse it.
@@ -596,6 +611,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 };
                 if (std.mem.eql(u8, fmt, "json")) {
                     input_override = .json;
+                } else if (std.mem.eql(u8, fmt, "json5")) {
+                    input_override = .json5;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
                     input_override = .yaml;
                 } else if (std.mem.eql(u8, fmt, "toml")) {
@@ -615,6 +632,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 };
                 if (std.mem.eql(u8, fmt, "json")) {
                     output_override = .json;
+                } else if (std.mem.eql(u8, fmt, "json5")) {
+                    output_override = .json5;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
                     output_override = .yaml;
                 } else if (std.mem.eql(u8, fmt, "toml")) {
