@@ -73,6 +73,31 @@ pub fn build(b: *std.Build) void {
     const wasm_step = b.step("wasm", "Build the WebAssembly module for the TypeScript bindings");
     wasm_step.dependOn(&install_wasm.step);
 
+    // WASI build of the *CLI* (`main.zig`), distinct from the freestanding
+    // `fig.wasm` above. This is a real `_start` command module: run it with a
+    // WASI runtime, e.g. `wasmtime run --dir=.::. zig-out/bin/fig-wasi.wasm get foo.yaml`.
+    // File access is capability-gated, so map a dir onto the guest cwd (`--dir`).
+    const wasi_target = b.resolveTargetQuery(.{ .cpu_arch = .wasm32, .os_tag = .wasi });
+    const wasi_mod = b.addModule("fig-wasi", .{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasi_target,
+    });
+    const wasi_cli = b.addExecutable(.{
+        .name = "fig-wasi",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = wasi_target,
+            .optimize = .ReleaseSmall,
+            .strip = true,
+            .imports = &.{
+                .{ .name = "fig", .module = wasi_mod },
+            },
+        }),
+    });
+    const install_wasi = b.addInstallArtifact(wasi_cli, .{});
+    const wasi_step = b.step("wasi", "Build the fig CLI as a WASI module (fig-wasi.wasm)");
+    wasi_step.dependOn(&install_wasi.step);
+
     const run_step = b.step("run", "Run the app");
 
     const run_cmd = b.addRunArtifact(exe);
