@@ -65,6 +65,48 @@ impl From<Format> for ffi::FigFormat {
     }
 }
 
+/// Controls how [`Value::serialize_with`] renders output. The [`Default`] is
+/// fig's historical style (pretty-printed, two-space indent), so
+/// [`Value::serialize`] is exactly `serialize_with(format, SerializeOptions::default())`.
+///
+/// Honored by [`Format::Json`] today; other formats currently ignore these and
+/// render with their built-in style.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SerializeOptions {
+    /// `true`: multi-line, indented output. `false`: compact single-line output
+    /// with no insignificant whitespace.
+    pub pretty: bool,
+    /// Spaces per indentation level when `pretty` is set.
+    pub indent: u8,
+}
+
+impl Default for SerializeOptions {
+    fn default() -> Self {
+        Self { pretty: true, indent: 2 }
+    }
+}
+
+impl SerializeOptions {
+    /// Compact single-line output with no insignificant whitespace.
+    pub fn compact() -> Self {
+        Self { pretty: false, indent: 0 }
+    }
+
+    /// Pretty-printed output with the given number of spaces per indent level.
+    pub fn pretty(indent: u8) -> Self {
+        Self { pretty: true, indent }
+    }
+}
+
+impl From<SerializeOptions> for ffi::FigSerializeOptions {
+    fn from(o: SerializeOptions) -> Self {
+        ffi::FigSerializeOptions {
+            pretty: u8::from(o.pretty),
+            indent: o.indent,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Document {
     raw: NonNull<ffi::FigDocument>,

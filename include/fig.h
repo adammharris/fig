@@ -300,6 +300,22 @@ FigStatus fig_value_map(FigValue *value, const FigKeyValue *entries, size_t entr
 FigStatus fig_value_serialize(FigValue *value, FigNodeId root, int format,
                               const uint8_t **out_ptr, size_t *out_len);
 
+// Output style for fig_value_serialize_opts. A NULL options pointer selects the
+// defaults shown here (identical output to fig_value_serialize). Honored by the
+// JSON format today; other formats ignore it and use their built-in style.
+typedef struct FigSerializeOptions {
+  // Nonzero (default): multi-line, indented output. Zero: compact single-line.
+  uint8_t pretty;
+  // Spaces per indent level when `pretty` is nonzero. 0 is treated as default 2.
+  uint8_t indent;
+} FigSerializeOptions;
+
+// As fig_value_serialize, but `options` (NULL => defaults) controls output style
+// such as compact vs. pretty-printed JSON.
+FigStatus fig_value_serialize_opts(FigValue *value, FigNodeId root, int format,
+                                   const FigSerializeOptions *options,
+                                   const uint8_t **out_ptr, size_t *out_len);
+
 #ifdef __cplusplus
 }
 #endif

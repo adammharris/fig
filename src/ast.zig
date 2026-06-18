@@ -164,6 +164,18 @@ pub fn eql(self: AST, b: AST) bool {
 /// The canonical output format families.
 pub const SerializeFormat = enum { json, yaml, toml, zon };
 
+/// Knobs controlling how a value is rendered. The defaults reproduce fig's
+/// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
+/// change for existing callers. Honored by the JSON printer today; other
+/// formats currently ignore these and render with their built-in style.
+pub const SerializeOptions = struct {
+    /// `true`: multi-line, indented output. `false`: compact single-line output
+    /// with no insignificant whitespace.
+    pretty: bool = true,
+    /// Spaces per indentation level when `pretty` is set.
+    indent: u8 = 2,
+};
+
 /// The canonical set of ways serialization can fail
 pub const SerializeError = Writer.Error || error{
     UnresolvedAlias, // a YAML `*alias` reached a non-YAML printer (materialize first)
@@ -172,21 +184,31 @@ pub const SerializeError = Writer.Error || error{
     FormatDisabled, // the target format was compiled out of this build
 };
 
-/// Render the whole AST to `writer` in the given format.
+/// Render the whole AST to `writer` in the given format, using default options.
 /// Does not handle aliases, tags, or lossless `$fig` envelopes.
 pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) SerializeError!void {
+    return self.serializeWith(writer, format, .{});
+}
+
+/// Render the whole AST to `writer`, controlling output style via `options`.
+pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat, options: SerializeOptions) SerializeError!void {
     return switch (format) {
-        .json => JsonPrinter.print(writer, self),
+        .json => JsonPrinter.print(writer, self, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, self) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, self) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, self) else error.FormatDisabled,
     };
 }
 
-/// Render the subtree rooted at `id` to `writer`.
+/// Render the subtree rooted at `id` to `writer`, using default options.
 pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id) SerializeError!void {
+    return self.serializeNodeWith(writer, format, id, .{});
+}
+
+/// Render the subtree rooted at `id`, controlling output style via `options`.
+pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id, options: SerializeOptions) SerializeError!void {
     return switch (format) {
-        .json => JsonPrinter.printNode(writer, self, id, 0),
+        .json => JsonPrinter.printNode(writer, self, id, 0, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,

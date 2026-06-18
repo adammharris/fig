@@ -1383,6 +1383,26 @@ pub export fn fig_value_map(
     return emitNode(out_id, handle.builder.addMapping(entries));
 }
 
+/// Controls output style for `fig_value_serialize_opts`. A NULL pointer selects
+/// the defaults below (the same output as `fig_value_serialize`). Honored by the
+/// JSON format today; other formats ignore it and use their built-in style.
+pub const FigSerializeOptions = extern struct {
+    /// Nonzero (default): multi-line, indented output. Zero: compact single-line.
+    pretty: u8 = 1,
+    /// Spaces per indent level when `pretty` is nonzero. 0 is treated as the
+    /// default (2).
+    indent: u8 = 2,
+};
+
+/// Translate the C options struct (NULL ⇒ defaults) into the core options.
+fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions {
+    const o = options orelse return .{};
+    return .{
+        .pretty = o.pretty != 0,
+        .indent = if (o.indent == 0) 2 else o.indent,
+    };
+}
+
 /// Render the value subtree rooted at `root` in `format`. Output bytes are
 /// borrowed from the handle and valid until the next `fig_value_serialize` or
 /// `fig_value_destroy`.
@@ -1390,6 +1410,19 @@ pub export fn fig_value_serialize(
     value: ?*FigValue,
     root: FigNodeId,
     format: c_int,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    return fig_value_serialize_opts(value, root, format, null, out_ptr, out_len);
+}
+
+/// As `fig_value_serialize`, but `options` (NULL ⇒ defaults) controls output
+/// style such as compact vs. pretty-printed JSON.
+pub export fn fig_value_serialize_opts(
+    value: ?*FigValue,
+    root: FigNodeId,
+    format: c_int,
+    options: ?*const FigSerializeOptions,
     out_ptr: ?*[*c]const u8,
     out_len: ?*usize,
 ) FigStatus {
@@ -1401,7 +1434,7 @@ pub export fn fig_value_serialize(
 
     handle.rendered.clearRetainingCapacity();
     const ast = handle.builder.view(root); // borrows the builder; never deinit'd
-    ast.serialize(&handle.rendered.writer, fmt) catch |err| return serializeStatus(err);
+    ast.serializeWith(&handle.rendered.writer, fmt, serializeOptionsOf(options)) catch |err| return serializeStatus(err);
 
     const bytes = handle.rendered.written();
     p.* = bytes.ptr;

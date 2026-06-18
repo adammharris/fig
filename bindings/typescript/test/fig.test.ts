@@ -85,6 +85,22 @@ test("serialize a Value to multiple formats", () => {
   assert.equal(serialize(value, Format.Yaml), "name: fig\nnums:\n- 1\n- 2\n");
 });
 
+test("serialize honors JSON pretty/compact options", () => {
+  const value = V.map([
+    [V.string("name"), V.string("fig")],
+    [V.string("nums"), V.seq([V.int(1), V.int(2)])],
+  ]);
+  // No options == pretty default.
+  assert.equal(serialize(value, Format.Json, {}), serialize(value, Format.Json));
+  // Compact: no insignificant whitespace.
+  assert.equal(serialize(value, Format.Json, { pretty: false }), '{"name":"fig","nums":[1,2]}\n');
+  // Custom indent width.
+  assert.equal(
+    serialize(value, Format.Json, { indent: 4 }),
+    '{\n    "name": "fig",\n    "nums": [\n        1,\n        2\n    ]\n}\n',
+  );
+});
+
 test("fromJS / toJS round-trip", () => {
   const js = { a: 1, b: [true, null, "x"], c: { d: 3.5 } };
   assert.deepEqual(toJS(fromJS(js)), js);

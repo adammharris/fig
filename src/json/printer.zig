@@ -8,74 +8,87 @@ const Writer = std.Io.Writer;
 /// means an unmaterialized YAML AST was handed to the JSON printer.
 pub const Error = Writer.Error || error{UnresolvedAlias};
 
+writer: *Writer,
+ast: *const AST,
+options: AST.SerializeOptions,
+
 /// Prints a given document in JSON format.
-pub fn print(writer: *Writer, ast: *const AST) Error!void {
-    try printNode(writer, ast, ast.root, 0);
+pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    try p.node(ast.root, 0);
     try writer.writeByte('\n');
     try writer.flush();
 }
 
-pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Error!void {
-    const node = ast.nodes[id];
-    switch (node.kind) {
-        .null_ => try writer.writeAll("null"),
-        .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
-        .number => |value| try writer.writeAll(value.raw),
+/// Prints the subtree rooted at `id`. Used for partial renders; unlike `print`
+/// it adds no trailing newline and does not flush.
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    try p.node(id, depth);
+}
+
+fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
+    const n = self.ast.nodes[id];
+    switch (n.kind) {
+        .null_ => try self.writer.writeAll("null"),
+        .boolean => |value| try self.writer.writeAll(if (value) "true" else "false"),
+        .number => |value| try self.writer.writeAll(value.raw),
         // JSON has none of these types. Datetimes and enum literals render as
         // strings (the timestamp / the bare name); a char literal renders as its
         // codepoint number.
         .extended => |value| switch (value.kind) {
-            .char_literal => try writer.writeAll(value.text),
-            else => try writeJsonString(writer, value.text),
+            .char_literal => try self.writer.writeAll(value.text),
+            else => try writeJsonString(self.writer, value.text),
         },
-        .string => |value| try writeJsonString(writer, value),
-        .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
-        .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
+        .string => |value| try writeJsonString(self.writer, value),
+        .sequence => |first_child| try self.sequence(first_child, depth),
+        .mapping => |first_child| try self.mapping(first_child, depth),
         .keyvalue => |kv| {
-            try printNode(writer, ast, kv.key, depth);
-            try writer.writeAll(": ");
-            try printNode(writer, ast, kv.value, depth);
+            try self.node(kv.key, depth);
+            // Compact output omits the space after the colon.
+            try self.writer.writeAll(if (self.options.pretty) ": " else ":");
+            try self.node(kv.value, depth);
         },
         .alias => return error.UnresolvedAlias,
     }
 }
 
-fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    if (first_child == null) {
-        try writer.writeAll("[]");
-        return;
-    }
-
-    try writer.writeAll("[\n");
-    var current_id = first_child;
-    while (current_id) |id| {
-        try writeIndent(writer, depth + 1);
-        try printNode(writer, document, id, depth + 1);
-        current_id = document.nodes[id].next_sibling;
-        if (current_id != null) try writer.writeByte(',');
-        try writer.writeByte('\n');
-    }
-    try writeIndent(writer, depth);
-    try writer.writeByte(']');
+fn sequence(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    try self.container('[', ']', first_child, depth);
 }
 
-fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Error!void {
+fn mapping(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    try self.container('{', '}', first_child, depth);
+}
+
+/// Sequences and mappings differ only in their delimiters and in how each child
+/// renders (a bare node vs. a `key: value`), the latter dispatched by `node`.
+fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, depth: usize) Error!void {
     if (first_child == null) {
-        try writer.writeAll("{}");
+        try self.writer.writeByte(open);
+        try self.writer.writeByte(close);
         return;
     }
 
-    try writer.writeAll("{\n");
+    const pretty = self.options.pretty;
+    try self.writer.writeByte(open);
+    if (pretty) try self.writer.writeByte('\n');
+
     var current_id = first_child;
     while (current_id) |id| {
-        try writeIndent(writer, depth + 1);
-        try printNode(writer, document, id, depth + 1);
-        current_id = document.nodes[id].next_sibling;
-        if (current_id != null) try writer.writeByte(',');
-        try writer.writeByte('\n');
+        if (pretty) try self.writeIndent(depth + 1);
+        try self.node(id, depth + 1);
+        current_id = self.ast.nodes[id].next_sibling;
+        if (current_id != null) try self.writer.writeByte(',');
+        if (pretty) try self.writer.writeByte('\n');
     }
-    try writeIndent(writer, depth);
-    try writer.writeByte('}');
+
+    if (pretty) try self.writeIndent(depth);
+    try self.writer.writeByte(close);
+}
+
+fn writeIndent(self: *Printer, depth: usize) Writer.Error!void {
+    for (0..depth * self.options.indent) |_| try self.writer.writeByte(' ');
 }
 
 fn writeJsonString(writer: *Writer, value: []const u8) Writer.Error!void {
@@ -103,10 +116,6 @@ fn writeControlEscape(writer: *Writer, char: u8) Writer.Error!void {
     try writer.writeByte(hex[char & 0x0f]);
 }
 
-fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
-    for (0..depth) |_| try writer.writeAll("  ");
-}
-
 test "prints JSON document" {
     const Parser = @import("parser.zig");
     const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}";
@@ -116,7 +125,7 @@ test "prints JSON document" {
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
 
-    try print(&output.writer, &doc);
+    try print(&output.writer, &doc, .{});
     try std.testing.expectEqualSlices(u8,
         \\{
         \\  "name": "Ada",
@@ -125,6 +134,42 @@ test "prints JSON document" {
         \\    true,
         \\    null
         \\  ]
+        \\}
+        \\
+    , output.written());
+}
+
+test "prints compact JSON document" {
+    const Parser = @import("parser.zig");
+    const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null],\"empty\":{}}";
+    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
+    defer doc.deinit();
+
+    var output: Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    try print(&output.writer, &doc, .{ .pretty = false });
+    try std.testing.expectEqualSlices(u8,
+        \\{"name":"Ada","tags":["zig",true,null],"empty":{}}
+        \\
+    , output.written());
+}
+
+test "honors custom indent width" {
+    const Parser = @import("parser.zig");
+    const input = "{\"a\":[1]}";
+    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
+    defer doc.deinit();
+
+    var output: Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    try print(&output.writer, &doc, .{ .indent = 4 });
+    try std.testing.expectEqualSlices(u8,
+        \\{
+        \\    "a": [
+        \\        1
+        \\    ]
         \\}
         \\
     , output.written());

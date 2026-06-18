@@ -6,7 +6,7 @@
 // and `serialize` accepts either form. Like the Rust binding, the tree is built
 // through the C value API and rendered by fig's own serializer — this file
 // emits no JSON/YAML/TOML/ZON text itself.
-import { check, ExtKind, Format } from "./types.ts";
+import { check, ExtKind, Format, type SerializeOptions } from "./types.ts";
 import { fig, Frame, encodeNodeIds, encodeEntries, readOutSlice } from "./ffi.ts";
 
 const I64_MIN = -(2n ** 63n);
@@ -169,8 +169,9 @@ function emitNumber(handle: number, text: string, isFloat: boolean, frame: Frame
 }
 
 /** Render a value to `format` via fig's serializer. Accepts a {@link Value} tree
- *  or any plain JS value (converted with {@link fromJS}). */
-export function serialize(value: Value | JsValue, format: Format): string {
+ *  or any plain JS value (converted with {@link fromJS}). `options` controls
+ *  output style such as compact vs. pretty-printed JSON. */
+export function serialize(value: Value | JsValue, format: Format, options?: SerializeOptions): string {
   const node: Value = isValue(value) ? value : fromJS(value as JsValue);
   const frame = new Frame();
   const outValue = frame.alloc(4); // *FigValue out-pointer
@@ -180,7 +181,11 @@ export function serialize(value: Value | JsValue, format: Format): string {
     try {
       const scratch = frame.alloc(8); // out_id / out_ptr+out_len
       const root = build(handle, node, frame, scratch);
-      check(fig.fig_value_serialize(handle, root, format, scratch, scratch + 4), "fig_value_serialize");
+      // FigSerializeOptions { pretty: u8, indent: u8 }; NULL (ptr 0) ⇒ defaults.
+      const pretty = options?.pretty === false ? 0 : 1;
+      const indent = options?.indent ?? 2;
+      const optsPtr = frame.bytes(new Uint8Array([pretty, indent]));
+      check(fig.fig_value_serialize_opts(handle, root, format, optsPtr, scratch, scratch + 4), "fig_value_serialize_opts");
       return readOutSlice(scratch);
     } finally {
       fig.fig_value_destroy(handle);
@@ -193,8 +198,8 @@ export function serialize(value: Value | JsValue, format: Format): string {
 /** Serialize a value for splicing into an editor: the rendered form with a
  *  single trailing newline stripped (the editor re-frames context at the site).
  *  Mirrors the Rust binding's `value_text`. */
-export function valueText(value: Value | JsValue, format: Format): string {
-  const s = serialize(value, format);
+export function valueText(value: Value | JsValue, format: Format, options?: SerializeOptions): string {
+  const s = serialize(value, format, options);
   return s.endsWith("\n") ? s.slice(0, -1) : s;
 }
 

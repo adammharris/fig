@@ -86,6 +86,7 @@ interface Exports {
   fig_value_seq(value: number, items: number, items_len: number, out_id: number): number;
   fig_value_map(value: number, entries: number, entries_len: number, out_id: number): number;
   fig_value_serialize(value: number, root: number, format: number, out_ptr: number, out_len: number): number;
+  fig_value_serialize_opts(value: number, root: number, format: number, options: number, out_ptr: number, out_len: number): number;
 }
 
 function decodeBase64(b64: string): Uint8Array<ArrayBuffer> {

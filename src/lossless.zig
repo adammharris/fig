@@ -385,7 +385,12 @@ fn convert(
     const decoded = try decode(arena, &ast);
     const encoded = try encode(arena, &decoded, target);
     var out: std.Io.Writer.Allocating = .init(arena);
-    try Printer.print(&out.writer, &encoded);
+    // The JSON printer takes serialization options; the others don't (yet).
+    if (Printer == JsonPrinter) {
+        try Printer.print(&out.writer, &encoded, .{});
+    } else {
+        try Printer.print(&out.writer, &encoded);
+    }
     return out.written();
 }
 

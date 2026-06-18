@@ -101,6 +101,15 @@ pub struct FigKeyValue {
     pub value: FigNodeId,
 }
 
+/// Output style for `fig_value_serialize_opts`. Mirrors `FigSerializeOptions`
+/// in `fig.h`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct FigSerializeOptions {
+    pub pretty: u8,
+    pub indent: u8,
+}
+
 unsafe extern "C" {
     pub fn fig_value_create(out_value: *mut *mut FigValue) -> FigStatus;
     pub fn fig_value_destroy(value: *mut FigValue);
@@ -145,6 +154,14 @@ unsafe extern "C" {
         value: *mut FigValue,
         root: FigNodeId,
         format: c_int,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
+    pub fn fig_value_serialize_opts(
+        value: *mut FigValue,
+        root: FigNodeId,
+        format: c_int,
+        options: *const FigSerializeOptions,
         out_ptr: *mut *const u8,
         out_len: *mut usize,
     ) -> FigStatus;

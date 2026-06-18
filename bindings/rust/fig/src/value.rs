@@ -10,7 +10,7 @@
 use std::os::raw::c_int;
 use std::ptr::{self, NonNull};
 
-use crate::Format;
+use crate::{Format, SerializeOptions};
 use crate::error::Error;
 use crate::ffi;
 
@@ -124,10 +124,16 @@ impl From<Vec<Value>> for Value {
 }
 
 impl Value {
-    /// Render to `format` via fig's core serializer. The value is built through
-    /// the C value API and emitted by fig, so no JSON/YAML/TOML/ZON formatting
-    /// happens in Rust.
+    /// Render to `format` via fig's core serializer, using default output style.
+    /// The value is built through the C value API and emitted by fig, so no
+    /// JSON/YAML/TOML/ZON formatting happens in Rust.
     pub fn serialize(&self, format: Format) -> Result<String, Error> {
+        self.serialize_with(format, SerializeOptions::default())
+    }
+
+    /// Render to `format`, with `options` controlling output style such as
+    /// compact vs. pretty-printed JSON.
+    pub fn serialize_with(&self, format: Format, options: SerializeOptions) -> Result<String, Error> {
         let mut raw = ptr::null_mut();
         // Safety: `raw` is a valid out-pointer; create sets it or returns non-ok.
         Error::from_status(unsafe { ffi::fig_value_create(&mut raw) })?;
@@ -139,8 +145,16 @@ impl Value {
         let mut ptr_out: *const u8 = ptr::null();
         let mut len: usize = 0;
         let ffi_format: ffi::FigFormat = format.into();
+        let ffi_options: ffi::FigSerializeOptions = options.into();
         Error::from_status(unsafe {
-            ffi::fig_value_serialize(guard.0, root, ffi_format as i32, &mut ptr_out, &mut len)
+            ffi::fig_value_serialize_opts(
+                guard.0,
+                root,
+                ffi_format as i32,
+                &ffi_options,
+                &mut ptr_out,
+                &mut len,
+            )
         })?;
 
         // Safety: on success the ABI guarantees `len` bytes at `ptr_out`, owned

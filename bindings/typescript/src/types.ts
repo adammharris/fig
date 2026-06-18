@@ -13,6 +13,18 @@ export enum Format {
   Zon = 5,
 }
 
+/** Controls how {@link serialize} renders output. Omitted fields fall back to
+ *  fig's historical style (pretty-printed, two-space indent), so passing no
+ *  options renders exactly as before. Honored by {@link Format.Json} today;
+ *  other formats currently ignore it and use their built-in style. */
+export interface SerializeOptions {
+  /** `true` (default): multi-line, indented output. `false`: compact
+   *  single-line output with no insignificant whitespace. */
+  pretty?: boolean;
+  /** Spaces per indentation level when `pretty`. Defaults to 2. */
+  indent?: number;
+}
+
 /** The kind of an AST node reached during read-path traversal. */
 export enum NodeKind {
   Invalid = -1,

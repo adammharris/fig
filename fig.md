@@ -22,7 +22,8 @@ It is currently in early alpha. Most features are not implemented yet.
 - [x] C ABI
 - [x] Serialization
 - [x] Standardize/document errors
-- [ ] Typescript bindings
+- [x] Typescript bindings
+- [ ] Serialization options
 - [ ] Pin C ABI surface
 
 Other planned features:
@@ -44,9 +45,9 @@ Contributions are welcome, subject to my approval.
 I started writing this library by hand (no AI) for my own education, and for use in my larger project, [Diaryx](https://diaryx.org). After writing a JSON tokenizer and parser by hand, and designing the Document, Token, and Language abstractions, I have decided to make use of the Codex AI tool to generate specific portions of the code that would otherwise require hours of tedious, repetitive work. So far, this includes:
 
 - Portions of `src/yaml/tokenizer.zig`. (GPT-5.5-medium, [commit 776ca93](https://github.com/adammharris/fig/commit/776ca93de564e146fd31bacdf64448ab8ee1643c))
-- Most of `src/yaml/parser.zig`. (GPT-5.5-medium, [commit a6dceb2](https://github.com/adammharris/fig/commit/a6dceb2a654524ab27f276d27603ff7411344155), [commit 963bfb3](https://github.com/adammharris/fig/commit/963bfb34c95d07ee2efceb0dceb398fb6e986205))
-- The Rust bindings (GPT-5.5-medium, [commit fbf4c82](https://github.com/adammharris/fig/commit/fbf4c82eeb5a73937db28745b1ba72037ade0e64)).
-- YAML conformance + C ABI + Rust bindings work by Claude Opus 4.8, pending more thorough review, but working and well-tested to far
+- Most of `src/yaml/parser.zig`. (GPT-5.5-medium, [commit a6dceb2](https://github.com/adammharris/fig/commit/a6dceb2a654524ab27f276d27603ff7411344155), [commit 963bfb3](https://github.com/adammharris/fig/commit/963bfb34c95d07ee2efceb0dceb398fb6e986205), others)
+- The Rust bindings (GPT-5.5-medium, [commit fbf4c82](https://github.com/adammharris/fig/commit/fbf4c82eeb5a73937db28745b1ba72037ade0e64), others).
+- Easily verifiable work that follows from the core has been implemented by Claude Opus 4.8, including TOML and bindings.
 
 This code was carefully reviewed and edited according to my taste before being accepted.
 

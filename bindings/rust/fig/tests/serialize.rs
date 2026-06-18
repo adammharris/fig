@@ -193,3 +193,37 @@ fn special_floats_round_trip() {
     let back: f64 = fig::from_str(&yaml).unwrap();
     assert!(back.is_nan());
 }
+
+#[test]
+fn json_compact_vs_pretty() {
+    use fig::SerializeOptions;
+    let value = map(vec![
+        ("name", "Ada".into()),
+        ("tags", Value::Seq(vec!["zig".into(), true.into(), Value::Null])),
+    ]);
+
+    // Default serialize == pretty default == 2-space multi-line.
+    let pretty = value.serialize(Format::Json).unwrap();
+    assert_eq!(
+        pretty,
+        "{\n  \"name\": \"Ada\",\n  \"tags\": [\n    \"zig\",\n    true,\n    null\n  ]\n}\n"
+    );
+    assert_eq!(
+        value
+            .serialize_with(Format::Json, SerializeOptions::default())
+            .unwrap(),
+        pretty
+    );
+
+    // Compact: no insignificant whitespace.
+    let compact = value
+        .serialize_with(Format::Json, SerializeOptions::compact())
+        .unwrap();
+    assert_eq!(compact, "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}\n");
+
+    // Custom indent width.
+    let wide = value
+        .serialize_with(Format::Json, SerializeOptions::pretty(4))
+        .unwrap();
+    assert!(wide.contains("\n    \"name\": \"Ada\""));
+}
