@@ -97,6 +97,96 @@ fn newtype_is_transparent() {
     assert_eq!(Newtype::from_value(&v).unwrap(), Newtype(vec![1, 2, 3]));
 }
 
+// --- rename_all ---------------------------------------------------------------
+
+/// Collect a map value's string keys in order.
+fn map_keys(value: &Value) -> Vec<String> {
+    match value {
+        Value::Map(entries) => entries
+            .iter()
+            .filter_map(|(k, _)| match k {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => panic!("expected map, got {value:?}"),
+    }
+}
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+#[fig(rename_all = "camelCase")]
+struct CamelStruct {
+    first_name: String,
+    last_seen_at: u64,
+    #[fig(rename = "ID")]
+    user_id: u32,
+}
+
+#[test]
+fn rename_all_camel_case_with_explicit_override() {
+    let original = CamelStruct {
+        first_name: "ada".to_owned(),
+        last_seen_at: 9,
+        user_id: 42,
+    };
+    let value = original.to_value();
+    assert_eq!(map_keys(&value), vec!["firstName", "lastSeenAt", "ID"]);
+    // Explicit `rename` wins over the container rule, both directions.
+    assert_eq!(CamelStruct::from_value(&value).unwrap(), original);
+}
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+#[fig(rename_all = "kebab-case")]
+struct KebabStruct {
+    max_retries: u8,
+    is_enabled: bool,
+}
+
+#[test]
+fn rename_all_kebab_case_round_trips() {
+    let original = KebabStruct {
+        max_retries: 3,
+        is_enabled: true,
+    };
+    let value = original.to_value();
+    assert_eq!(map_keys(&value), vec!["max-retries", "is-enabled"]);
+    assert_eq!(KebabStruct::from_value(&value).unwrap(), original);
+}
+
+// --- skip_serializing_if ------------------------------------------------------
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+struct WithSkipIf {
+    name: String,
+    #[fig(skip_serializing_if = "Option::is_none")]
+    nickname: Option<String>,
+    #[fig(skip_serializing_if = "Vec::is_empty")]
+    #[fig(default)]
+    tags: Vec<String>,
+}
+
+#[test]
+fn skip_serializing_if_omits_then_round_trips() {
+    // Empty/None -> keys omitted entirely (not emitted as null).
+    let empty = WithSkipIf {
+        name: "x".to_owned(),
+        nickname: None,
+        tags: vec![],
+    };
+    assert_eq!(map_keys(&empty.to_value()), vec!["name"]);
+    // Absent keys deserialize back to the same value (Option/default).
+    assert_eq!(WithSkipIf::from_value(&empty.to_value()).unwrap(), empty);
+
+    // Present values are kept.
+    let full = WithSkipIf {
+        name: "x".to_owned(),
+        nickname: Some("xx".to_owned()),
+        tags: vec!["a".to_owned()],
+    };
+    assert_eq!(map_keys(&full.to_value()), vec!["name", "nickname", "tags"]);
+    assert_eq!(WithSkipIf::from_value(&full.to_value()).unwrap(), full);
+}
+
 #[test]
 fn missing_required_field_errors() {
     let err = Simple::from_value(&Value::Map(vec![(

@@ -7,8 +7,13 @@
 //!
 //! # Structs
 //! Named-field, newtype (one field), and unit structs. Field attributes:
-//! `#[fig(rename = "..")]`, `#[fig(skip)]`, `#[fig(flatten)]`, `#[fig(default)]`.
-//! `Option<_>` fields are optional (absent key → `None`).
+//! `#[fig(rename = "..")]`, `#[fig(skip)]`, `#[fig(flatten)]`, `#[fig(default)]`,
+//! `#[fig(skip_serializing_if = "path")]` (omit from `ToValue` output when the
+//! predicate `fn(&Field) -> bool` is true). `Option<_>` fields are optional
+//! (absent key → `None`). The container attribute `#[fig(rename_all = "..")]`
+//! applies a case rule (`camelCase`, `snake_case`, `PascalCase`, `kebab-case`,
+//! and their SCREAMING variants, plus `lowercase`/`UPPERCASE`) to every field
+//! name not carrying an explicit `rename`.
 //!
 //! # Enums
 //! All four serde-style taggings, chosen by container attribute:
@@ -18,9 +23,11 @@
 //! * untagged — `#[fig(untagged)]` (first matching variant wins, in order)
 //!
 //! Variant shapes: unit, newtype, tuple, struct. Variant `#[fig(rename = "..")]`
-//! is honored. Restrictions (matching/extending serde): tuple variants are not
-//! allowed with internal tagging, and `#[fig(flatten)]` is not yet supported
-//! inside enum variants.
+//! is honored, and the container `#[fig(rename_all = "..")]` applies to variant
+//! names (matching serde — it does not rename a struct-variant's inner fields).
+//! Restrictions (matching/extending serde): tuple variants are not allowed with
+//! internal tagging, and `#[fig(flatten)]` is not yet supported inside enum
+//! variants.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -50,6 +57,107 @@ pub fn derive_from_value(input: TokenStream) -> TokenStream {
 // Attribute parsing
 // ============================================================================
 
+/// Case-conversion for `#[fig(rename_all = "..")]`, matching serde's rules.
+///
+/// Field names are assumed snake_case and variant names PascalCase, so the two
+/// `apply_to_*` methods differ exactly as serde's do — this keeps generated keys
+/// byte-identical to serde output (and therefore to ts-rs bindings).
+#[derive(Clone, Copy)]
+enum RenameRule {
+    Lower,
+    Upper,
+    Pascal,
+    Camel,
+    Snake,
+    ScreamingSnake,
+    Kebab,
+    ScreamingKebab,
+}
+
+impl RenameRule {
+    fn from_str(s: &str) -> Result<Self, String> {
+        Ok(match s {
+            "lowercase" => RenameRule::Lower,
+            "UPPERCASE" => RenameRule::Upper,
+            "PascalCase" => RenameRule::Pascal,
+            "camelCase" => RenameRule::Camel,
+            "snake_case" => RenameRule::Snake,
+            "SCREAMING_SNAKE_CASE" => RenameRule::ScreamingSnake,
+            "kebab-case" => RenameRule::Kebab,
+            "SCREAMING-KEBAB-CASE" => RenameRule::ScreamingKebab,
+            other => {
+                return Err(format!(
+                    "unknown `rename_all` rule `{other}` (expected one of: lowercase, \
+                     UPPERCASE, PascalCase, camelCase, snake_case, SCREAMING_SNAKE_CASE, \
+                     kebab-case, SCREAMING-KEBAB-CASE)"
+                ));
+            }
+        })
+    }
+
+    /// Apply to a snake_case field name.
+    fn apply_to_field(self, field: &str) -> String {
+        match self {
+            RenameRule::Lower | RenameRule::Snake => field.to_owned(),
+            RenameRule::Upper | RenameRule::ScreamingSnake => field.to_ascii_uppercase(),
+            RenameRule::Pascal => {
+                let mut out = String::new();
+                let mut capitalize = true;
+                for ch in field.chars() {
+                    if ch == '_' {
+                        capitalize = true;
+                    } else if capitalize {
+                        out.push(ch.to_ascii_uppercase());
+                        capitalize = false;
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                out
+            }
+            RenameRule::Camel => {
+                let pascal = RenameRule::Pascal.apply_to_field(field);
+                match pascal.char_indices().nth(1) {
+                    Some((i, _)) => pascal[..1].to_ascii_lowercase() + &pascal[i..],
+                    None => pascal.to_ascii_lowercase(),
+                }
+            }
+            RenameRule::Kebab => field.replace('_', "-"),
+            RenameRule::ScreamingKebab => field.to_ascii_uppercase().replace('_', "-"),
+        }
+    }
+
+    /// Apply to a PascalCase variant name.
+    fn apply_to_variant(self, variant: &str) -> String {
+        match self {
+            RenameRule::Pascal => variant.to_owned(),
+            RenameRule::Lower => variant.to_ascii_lowercase(),
+            RenameRule::Upper => variant.to_ascii_uppercase(),
+            RenameRule::Camel => match variant.char_indices().nth(1) {
+                Some((i, _)) => variant[..1].to_ascii_lowercase() + &variant[i..],
+                None => variant.to_ascii_lowercase(),
+            },
+            RenameRule::Snake => {
+                let mut out = String::new();
+                for (i, ch) in variant.char_indices() {
+                    if i > 0 && ch.is_uppercase() {
+                        out.push('_');
+                    }
+                    out.push(ch.to_ascii_lowercase());
+                }
+                out
+            }
+            RenameRule::ScreamingSnake => {
+                RenameRule::Snake.apply_to_variant(variant).to_ascii_uppercase()
+            }
+            RenameRule::Kebab => RenameRule::Snake.apply_to_variant(variant).replace('_', "-"),
+            RenameRule::ScreamingKebab => RenameRule::ScreamingSnake
+                .apply_to_variant(variant)
+                .replace('_', "-"),
+        }
+    }
+}
+
 /// Parsed `#[fig(..)]` attributes on a single field.
 #[derive(Default)]
 struct FieldAttrs {
@@ -57,6 +165,9 @@ struct FieldAttrs {
     skip: bool,
     flatten: bool,
     default: bool,
+    /// `#[fig(skip_serializing_if = "path")]` — predicate `fn(&Field) -> bool`
+    /// that, when true, omits the field from `ToValue` output.
+    skip_serializing_if: Option<syn::Path>,
 }
 
 fn parse_field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -74,9 +185,13 @@ fn parse_field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
                 parsed.flatten = true;
             } else if meta.path.is_ident("default") {
                 parsed.default = true;
+            } else if meta.path.is_ident("skip_serializing_if") {
+                let path = meta.value()?.parse::<LitStr>()?.parse::<syn::Path>()?;
+                parsed.skip_serializing_if = Some(path);
             } else {
                 return Err(meta.error(
-                    "unknown `fig` field attribute (expected: rename, skip, flatten, default)",
+                    "unknown `fig` field attribute (expected: rename, skip, flatten, \
+                     default, skip_serializing_if)",
                 ));
             }
             Ok(())
@@ -109,9 +224,10 @@ fn parse_variant_attrs(attrs: &[syn::Attribute]) -> syn::Result<VariantAttrs> {
     Ok(parsed)
 }
 
-/// Parsed `#[fig(..)]` attributes on an enum container.
+/// Parsed `#[fig(..)]` attributes on a struct or enum container.
 #[derive(Default)]
 struct ContainerAttrs {
+    rename_all: Option<RenameRule>,
     tag: Option<String>,
     content: Option<String>,
     untagged: bool,
@@ -124,7 +240,12 @@ fn parse_container_attrs(attrs: &[syn::Attribute]) -> syn::Result<ContainerAttrs
             continue;
         }
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("tag") {
+            if meta.path.is_ident("rename_all") {
+                let lit = meta.value()?.parse::<LitStr>()?;
+                let rule = RenameRule::from_str(&lit.value())
+                    .map_err(|msg| syn::Error::new(lit.span(), msg))?;
+                parsed.rename_all = Some(rule);
+            } else if meta.path.is_ident("tag") {
                 parsed.tag = Some(meta.value()?.parse::<LitStr>()?.value());
             } else if meta.path.is_ident("content") {
                 parsed.content = Some(meta.value()?.parse::<LitStr>()?.value());
@@ -132,13 +253,18 @@ fn parse_container_attrs(attrs: &[syn::Attribute]) -> syn::Result<ContainerAttrs
                 parsed.untagged = true;
             } else {
                 return Err(meta.error(
-                    "unknown `fig` container attribute (expected: tag, content, untagged)",
+                    "unknown `fig` container attribute (expected: rename_all, tag, content, untagged)",
                 ));
             }
             Ok(())
         })?;
     }
     Ok(parsed)
+}
+
+/// The container-level `rename_all` rule, if any.
+fn container_rename_all(attrs: &[syn::Attribute]) -> syn::Result<Option<RenameRule>> {
+    Ok(parse_container_attrs(attrs)?.rename_all)
 }
 
 /// How an enum's variants are distinguished on the wire.
@@ -180,9 +306,18 @@ struct FieldInfo<'a> {
     flatten: bool,
     /// Whether a missing key falls back to `Default` instead of erroring.
     use_default: bool,
+    /// `skip_serializing_if` predicate path, omitting the field from output
+    /// when it returns `true`.
+    skip_serializing_if: Option<syn::Path>,
 }
 
-fn collect_named_fields(fields: &FieldsNamed) -> syn::Result<Vec<FieldInfo<'_>>> {
+/// Collect a struct/variant's named fields. `rename_all` (the container rule, if
+/// any) is applied to each field name unless the field carries an explicit
+/// `#[fig(rename = "..")]`, which always wins.
+fn collect_named_fields(
+    fields: &FieldsNamed,
+    rename_all: Option<RenameRule>,
+) -> syn::Result<Vec<FieldInfo<'_>>> {
     let mut infos = Vec::with_capacity(fields.named.len());
     for field in &fields.named {
         let attrs = parse_field_attrs(&field.attrs)?;
@@ -193,7 +328,13 @@ fn collect_named_fields(fields: &FieldsNamed) -> syn::Result<Vec<FieldInfo<'_>>>
             ));
         }
         let ident = field.ident.as_ref().expect("named field has an ident");
-        let key = attrs.rename.unwrap_or_else(|| ident.to_string());
+        let key = match attrs.rename {
+            Some(explicit) => explicit,
+            None => match rename_all {
+                Some(rule) => rule.apply_to_field(&ident.to_string()),
+                None => ident.to_string(),
+            },
+        };
         let use_default = attrs.default || is_option(&field.ty);
         infos.push(FieldInfo {
             ident,
@@ -202,6 +343,7 @@ fn collect_named_fields(fields: &FieldsNamed) -> syn::Result<Vec<FieldInfo<'_>>>
             skip: attrs.skip,
             flatten: attrs.flatten,
             use_default,
+            skip_serializing_if: attrs.skip_serializing_if,
         });
     }
     Ok(infos)
@@ -233,9 +375,17 @@ fn bounded_where(generics: &Generics, bound: TokenStream2) -> TokenStream2 {
     }
 }
 
-fn variant_key(variant: &Variant) -> syn::Result<String> {
+/// The wire key for an enum variant. An explicit `#[fig(rename = "..")]` wins;
+/// otherwise the container `rename_all` rule (if any) is applied.
+fn variant_key(variant: &Variant, rename_all: Option<RenameRule>) -> syn::Result<String> {
     let attrs = parse_variant_attrs(&variant.attrs)?;
-    Ok(attrs.rename.unwrap_or_else(|| variant.ident.to_string()))
+    Ok(match attrs.rename {
+        Some(explicit) => explicit,
+        None => match rename_all {
+            Some(rule) => rule.apply_to_variant(&variant.ident.to_string()),
+            None => variant.ident.to_string(),
+        },
+    })
 }
 
 // ============================================================================
@@ -270,7 +420,7 @@ fn expand_to_value(input: &DeriveInput) -> syn::Result<TokenStream2> {
 fn to_value_struct(fields: &Fields, input: &DeriveInput) -> syn::Result<TokenStream2> {
     match fields {
         Fields::Named(named) => {
-            let infos = collect_named_fields(named)?;
+            let infos = collect_named_fields(named, container_rename_all(&input.attrs)?)?;
             let stmts = infos.iter().filter(|f| !f.skip).map(|f| {
                 let ident = f.ident;
                 if f.flatten {
@@ -281,11 +431,17 @@ fn to_value_struct(fields: &Fields, input: &DeriveInput) -> syn::Result<TokenStr
                     }
                 } else {
                     let key = &f.key;
-                    quote! {
+                    let push = quote! {
                         __entries.push((
                             fig::Value::Str(::std::string::String::from(#key)),
                             fig::ToValue::to_value(&self.#ident),
                         ));
+                    };
+                    match &f.skip_serializing_if {
+                        Some(pred) => quote! {
+                            if !#pred(&self.#ident) { #push }
+                        },
+                        None => push,
                     }
                 }
             });
@@ -308,9 +464,10 @@ fn to_value_struct(fields: &Fields, input: &DeriveInput) -> syn::Result<TokenStr
 
 fn to_value_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<TokenStream2> {
     let tagging = tagging_of(input)?;
+    let rename_all = container_rename_all(&input.attrs)?;
     let mut arms = Vec::with_capacity(data.variants.len());
     for variant in &data.variants {
-        arms.push(to_value_variant_arm(variant, &tagging)?);
+        arms.push(to_value_variant_arm(variant, &tagging, rename_all)?);
     }
     Ok(quote! {
         match self {
@@ -320,9 +477,13 @@ fn to_value_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<Token
 }
 
 /// Build one `match self` arm for an enum variant's `ToValue`.
-fn to_value_variant_arm(variant: &Variant, tagging: &Tagging) -> syn::Result<TokenStream2> {
+fn to_value_variant_arm(
+    variant: &Variant,
+    tagging: &Tagging,
+    rename_all: Option<RenameRule>,
+) -> syn::Result<TokenStream2> {
     let vident = &variant.ident;
-    let key = variant_key(variant)?;
+    let key = variant_key(variant, rename_all)?;
     let key_value = quote! { fig::Value::Str(::std::string::String::from(#key)) };
 
     // Destructuring pattern + the "content" Value expression for non-unit shapes.
@@ -342,7 +503,10 @@ fn to_value_variant_arm(variant: &Variant, tagging: &Tagging) -> syn::Result<Tok
             )
         }
         Fields::Named(named) => {
-            let infos = collect_named_fields(named)?;
+            // serde applies the container `rename_all` to variant *names*, not
+            // to a struct-variant's fields (that is serde's separate
+            // `rename_all_fields`, not implemented here), so pass `None`.
+            let infos = collect_named_fields(named, None)?;
             if let Some(f) = infos.iter().find(|f| f.flatten) {
                 return Err(syn::Error::new_spanned(
                     f.ident,
@@ -357,15 +521,27 @@ fn to_value_variant_arm(variant: &Variant, tagging: &Tagging) -> syn::Result<Tok
                 let id = f.ident;
                 quote! { #id: #b }
             });
-            let entries = infos.iter().zip(&binds).filter(|(f, _)| !f.skip).map(|(f, b)| {
+            let entry_stmts = infos.iter().zip(&binds).filter(|(f, _)| !f.skip).map(|(f, b)| {
                 let fkey = &f.key;
-                quote! {
-                    (fig::Value::Str(::std::string::String::from(#fkey)), fig::ToValue::to_value(#b))
+                let push = quote! {
+                    __vmap.push((
+                        fig::Value::Str(::std::string::String::from(#fkey)),
+                        fig::ToValue::to_value(#b),
+                    ));
+                };
+                match &f.skip_serializing_if {
+                    Some(pred) => quote! { if !#pred(#b) { #push } },
+                    None => push,
                 }
             });
             (
                 quote! { Self::#vident { #(#pat_fields),* } },
-                Some(quote! { fig::Value::Map(vec![ #(#entries),* ]) }),
+                Some(quote! {{
+                    let mut __vmap: ::std::vec::Vec<(fig::Value, fig::Value)> =
+                        ::std::vec::Vec::new();
+                    #(#entry_stmts)*
+                    fig::Value::Map(__vmap)
+                }}),
             )
         }
     };
@@ -472,6 +648,7 @@ fn from_value_struct(
             &quote! { value },
             &name.to_string(),
             true,
+            container_rename_all(&input.attrs)?,
         ),
         Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
             let ty = &unnamed.unnamed[0].ty;
@@ -496,8 +673,9 @@ fn from_map_named(
     map_value: &TokenStream2,
     type_label: &str,
     allow_flatten: bool,
+    rename_all: Option<RenameRule>,
 ) -> syn::Result<TokenStream2> {
-    let infos = collect_named_fields(fields)?;
+    let infos = collect_named_fields(fields, rename_all)?;
     if !allow_flatten && let Some(f) = infos.iter().find(|f| f.flatten) {
         return Err(syn::Error::new_spanned(
             f.ident,
@@ -611,29 +789,41 @@ fn build_variant(
                 ))
             }})
         }
-        Fields::Named(named) => {
-            from_map_named(named, &quote! { Self::#vident }, value_expr, label, false)
-        }
+        Fields::Named(named) => from_map_named(
+            named,
+            &quote! { Self::#vident },
+            value_expr,
+            label,
+            false,
+            None,
+        ),
     }
 }
 
 fn from_value_enum(input: &DeriveInput, data: &syn::DataEnum) -> syn::Result<TokenStream2> {
     let tagging = tagging_of(input)?;
+    let rename_all = container_rename_all(&input.attrs)?;
     let enum_name = input.ident.to_string();
     match tagging {
-        Tagging::External => from_value_external(data, &enum_name),
-        Tagging::Internal(tag) => from_value_internal(data, &enum_name, &tag),
-        Tagging::Adjacent(tag, content) => from_value_adjacent(data, &enum_name, &tag, &content),
+        Tagging::External => from_value_external(data, &enum_name, rename_all),
+        Tagging::Internal(tag) => from_value_internal(data, &enum_name, &tag, rename_all),
+        Tagging::Adjacent(tag, content) => {
+            from_value_adjacent(data, &enum_name, &tag, &content, rename_all)
+        }
         Tagging::Untagged => from_value_untagged(data, &enum_name),
     }
 }
 
-fn from_value_external(data: &syn::DataEnum, enum_name: &str) -> syn::Result<TokenStream2> {
+fn from_value_external(
+    data: &syn::DataEnum,
+    enum_name: &str,
+    rename_all: Option<RenameRule>,
+) -> syn::Result<TokenStream2> {
     let mut unit_arms = Vec::new();
     let mut map_arms = Vec::new();
     for variant in &data.variants {
         let vident = &variant.ident;
-        let key = variant_key(variant)?;
+        let key = variant_key(variant, rename_all)?;
         let label = format!("{enum_name}::{vident}");
         if matches!(variant.fields, Fields::Unit) {
             unit_arms.push(quote! { #key => ::core::result::Result::Ok(Self::#vident), });
@@ -700,11 +890,12 @@ fn from_value_internal(
     data: &syn::DataEnum,
     enum_name: &str,
     tag: &str,
+    rename_all: Option<RenameRule>,
 ) -> syn::Result<TokenStream2> {
     let mut arms = Vec::new();
     for variant in &data.variants {
         let vident = &variant.ident;
-        let key = variant_key(variant)?;
+        let key = variant_key(variant, rename_all)?;
         let label = format!("{enum_name}::{vident}");
         let arm = match &variant.fields {
             Fields::Unit => quote! { #key => ::core::result::Result::Ok(Self::#vident), },
@@ -716,6 +907,7 @@ fn from_value_internal(
                     &quote! { value },
                     &label,
                     false,
+                    None,
                 )?;
                 quote! { #key => #body, }
             }
@@ -762,11 +954,12 @@ fn from_value_adjacent(
     enum_name: &str,
     tag: &str,
     content: &str,
+    rename_all: Option<RenameRule>,
 ) -> syn::Result<TokenStream2> {
     let mut arms = Vec::new();
     for variant in &data.variants {
         let vident = &variant.ident;
-        let key = variant_key(variant)?;
+        let key = variant_key(variant, rename_all)?;
         let label = format!("{enum_name}::{vident}");
         if matches!(variant.fields, Fields::Unit) {
             arms.push(quote! { #key => ::core::result::Result::Ok(Self::#vident), });

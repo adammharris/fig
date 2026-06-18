@@ -189,3 +189,68 @@ fn variant_rename_applies() {
         Value::Map(vec![(s("err"), s("boom"))])
     );
 }
+
+// --- rename_all on variants ---------------------------------------------------
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+#[fig(rename_all = "snake_case")]
+enum SnakeVariants {
+    NotFound,
+    InternalError(String),
+    #[fig(rename = "teapot")]
+    ImATeapot,
+}
+
+#[test]
+fn rename_all_applies_to_variant_names() {
+    // PascalCase -> snake_case on the wire.
+    assert_eq!(SnakeVariants::NotFound.to_value(), s("not_found"));
+    assert_eq!(
+        SnakeVariants::from_value(&s("not_found")).unwrap(),
+        SnakeVariants::NotFound
+    );
+    assert_eq!(
+        SnakeVariants::InternalError("boom".into()).to_value(),
+        Value::Map(vec![(s("internal_error"), s("boom"))])
+    );
+    // Explicit variant rename still wins over the container rule.
+    assert_eq!(SnakeVariants::ImATeapot.to_value(), s("teapot"));
+    assert_eq!(
+        SnakeVariants::from_value(&s("teapot")).unwrap(),
+        SnakeVariants::ImATeapot
+    );
+}
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+#[fig(tag = "type", content = "params", rename_all = "snake_case")]
+enum AdjacentRenamed {
+    GetEntry { path: String },
+    ListAll,
+}
+
+#[test]
+fn rename_all_with_adjacent_tagging() {
+    // Container rule renames the variant tag; struct-variant *fields* keep their
+    // own names (serde's `rename_all` does not touch them).
+    let v = AdjacentRenamed::GetEntry {
+        path: "a.md".into(),
+    };
+    let value = v.to_value();
+    assert_eq!(
+        value,
+        Value::Map(vec![
+            (s("type"), s("get_entry")),
+            (s("params"), Value::Map(vec![(s("path"), s("a.md"))])),
+        ])
+    );
+    assert_eq!(AdjacentRenamed::from_value(&value).unwrap(), v);
+
+    assert_eq!(
+        AdjacentRenamed::ListAll.to_value(),
+        Value::Map(vec![(s("type"), s("list_all"))])
+    );
+    assert_eq!(
+        AdjacentRenamed::from_value(&AdjacentRenamed::ListAll.to_value()).unwrap(),
+        AdjacentRenamed::ListAll
+    );
+}
