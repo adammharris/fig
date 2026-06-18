@@ -4,7 +4,7 @@
 // `using` declaration). Nodes are addressed by numeric id; `null` stands in for
 // the C ABI's "no such node" sentinel. `toValue`/`toJS` walk the whole tree in
 // one call for the common case.
-import { check, FigError, Format, NodeKind, Status } from "./types.ts";
+import { check, ExtKind, FigError, Format, NodeKind, Status } from "./types.ts";
 import { fig, Frame, readOutSlice } from "./ffi.ts";
 import { numberFromRaw, toJS, V, type JsValue, type Value } from "./value.ts";
 
@@ -109,6 +109,23 @@ export class Document {
     return this.readSlice((scratch) => fig.fig_node_string(this.live(), id, scratch, scratch + 4));
   }
 
+  /** If `id` is a format-specific extended scalar (TOML datetime, ZON enum/char
+   *  literal), its {@link ExtKind} and source text; otherwise `null`. The plain
+   *  {@link Document#kind} still reports these as `String`/`Int`, so traversal
+   *  checks this first to recover them faithfully. */
+  asExtended(id: number): { ext: ExtKind; text: string } | null {
+    const frame = new Frame();
+    try {
+      // out_kind (i32), then the out_ptr/out_len slice pair.
+      const scratch = frame.alloc(12);
+      if (fig.fig_node_extended(this.live(), id, scratch, scratch + 4, scratch + 8) === 0) return null;
+      const ext = new DataView(fig.memory.buffer).getInt32(scratch, true) as ExtKind;
+      return { ext, text: readOutSlice(scratch + 4) };
+    } finally {
+      frame.dispose();
+    }
+  }
+
   private readSlice(call: (scratch: number) => number): string | null {
     const frame = new Frame();
     try {
@@ -142,6 +159,10 @@ export class Document {
   }
 
   private nodeToValue(id: number): Value {
+    // A format-specific scalar reports as String/Int at the `kind` ABI; recover
+    // it faithfully here (mirrors the Rust binding's `to_value`).
+    const ext = this.asExtended(id);
+    if (ext !== null) return V.extended(ext.ext, ext.text);
     const kind = this.kind(id);
     switch (kind) {
       case NodeKind.Null:

@@ -6,6 +6,7 @@ import {
   Editor,
   Embed,
   EmbedType,
+  ExtKind,
   FigError,
   Format,
   NodeKind,
@@ -40,6 +41,39 @@ test("Document low-level traversal", () => {
   const countVal = doc.valueOf(second)!;
   assert.equal(doc.kind(countVal), NodeKind.Int);
   assert.equal(doc.asNumberRaw(countVal), "42");
+});
+
+test("extended scalars (TOML datetime, ZON enum/char) read faithfully", () => {
+  // TOML datetimes report as String at the `kind` ABI but recover via asExtended.
+  {
+    using doc = Document.parse("d = 2026-06-18\nt = 07:32:00\n", Format.Toml);
+    const root = doc.root()!;
+    const dVal = doc.valueOf(doc.firstChild(root)!)!;
+    assert.equal(doc.kind(dVal), NodeKind.String);
+    assert.deepEqual(doc.asExtended(dVal), { ext: ExtKind.LocalDate, text: "2026-06-18" });
+
+    assert.deepEqual(doc.toValue(), V.map([
+      [V.string("d"), V.extended(ExtKind.LocalDate, "2026-06-18")],
+      [V.string("t"), V.extended(ExtKind.LocalTime, "07:32:00")],
+    ]));
+    // Round-trips back out through serialize.
+    assert.equal(serialize(doc.toValue(), Format.Toml), "d = 2026-06-18\nt = 07:32:00\n");
+  }
+
+  // ZON char literals report as Int; enum literals as String. Both recover.
+  {
+    using doc = Document.parse(".{ .mode = .fast, .c = 'a' }", Format.Zon);
+    assert.deepEqual(doc.toValue(), V.map([
+      [V.string("mode"), V.extended(ExtKind.EnumLiteral, "fast")],
+      [V.string("c"), V.extended(ExtKind.CharLiteral, "97")],
+    ]));
+  }
+
+  // A plain string is not extended.
+  {
+    using doc = Document.parse("s = \"hi\"\n", Format.Toml);
+    assert.equal(doc.asExtended(doc.valueOf(doc.firstChild(doc.root()!)!)!), null);
+  }
 });
 
 test("serialize a Value to multiple formats", () => {

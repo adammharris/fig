@@ -41,6 +41,7 @@ interface Exports {
   fig_node_bool(doc: number, node: number, out: number): number;
   fig_node_number(doc: number, node: number, out_ptr: number, out_len: number): number;
   fig_node_string(doc: number, node: number, out_ptr: number, out_len: number): number;
+  fig_node_extended(doc: number, node: number, out_kind: number, out_ptr: number, out_len: number): number;
 
   fig_editor_create(input: number, input_len: number, format: number, out: number): number;
   fig_editor_destroy(ed: number): void;
