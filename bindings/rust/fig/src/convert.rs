@@ -44,6 +44,20 @@ fn type_err(expected: &str, found: &Value) -> Error {
     Error::Message(format!("expected {expected}, found {}", kind_of(found)))
 }
 
+/// Look up `name` in a mapping's entries, last-wins (so later duplicate keys
+/// shadow earlier ones, matching how object literals are usually read).
+///
+/// Used by `#[derive(FromValue)]`: the generated code calls this shared function
+/// instead of emitting its own lookup closure per field/variant, which keeps the
+/// derived code small for large structs and many-variant enums.
+#[doc(hidden)]
+pub fn map_get<'a>(entries: &'a [(Value, Value)], name: &str) -> Option<&'a Value> {
+    entries.iter().rev().find_map(|(k, v)| match k {
+        Value::Str(s) if s == name => Some(v),
+        _ => None,
+    })
+}
+
 // --- Passthrough --------------------------------------------------------------
 
 impl ToValue for Value {

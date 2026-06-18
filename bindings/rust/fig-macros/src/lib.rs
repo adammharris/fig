@@ -510,21 +510,7 @@ fn from_map_named(
         .filter(|f| !f.skip && !f.flatten)
         .map(|f| &f.key)
         .collect();
-    let has_explicit = !known_keys.is_empty();
     let has_flatten = infos.iter().any(|f| f.flatten && !f.skip);
-
-    let lookup = if has_explicit {
-        quote! {
-            let __get = |__name: &str| -> ::std::option::Option<&fig::Value> {
-                __entries.iter().rev().find_map(|(__k, __v)| match __k {
-                    fig::Value::Str(__s) if __s == __name => ::std::option::Option::Some(__v),
-                    _ => ::std::option::Option::None,
-                })
-            };
-        }
-    } else {
-        quote! {}
-    };
 
     let rest = if has_flatten {
         quote! {
@@ -561,7 +547,7 @@ fn from_map_named(
             quote! { return ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#msg))) }
         };
         quote! {
-            let #ident: #ty = match __get(#key) {
+            let #ident: #ty = match fig::map_get(__entries, #key) {
                 ::std::option::Option::Some(__v) => <#ty as fig::FromValue>::from_value(__v)?,
                 ::std::option::Option::None => #missing,
             };
@@ -579,7 +565,6 @@ fn from_map_named(
             ),
         };
         let _ = &__entries;
-        #lookup
         #rest
         #(#field_lets)*
         ::core::result::Result::Ok(#ctor { #(#field_names),* })
