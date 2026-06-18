@@ -18,16 +18,18 @@ typedef enum FigStatus {
     FIG_STATUS_INTERNAL_ERROR = 255,
 } FigStatus;
 
-// Not every function accepts every member. fig_parse accepts all five; the
+// Not every function accepts every member. fig_parse accepts all six; the
 // editor (fig_editor_*) supports JSON/JSONC/YAML only (others return
 // FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts JSON/YAML/TOML/ZON
-// and treats JSONC as JSON.
+// and treats JSONC as JSON. XML is reader-only: accepted by fig_parse, rejected
+// by the editor and serializer.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
     FIG_FORMAT_YAML = 3,
     FIG_FORMAT_TOML = 4,
     FIG_FORMAT_ZON = 5,
+    FIG_FORMAT_XML = 6,
 } FigFormat;
 
 typedef struct FigDocument FigDocument;

@@ -6,6 +6,7 @@ pub const JSON = @import("json/json.zig").Language;
 pub const YAML = @import("yaml/yaml.zig").Language;
 pub const TOML = @import("toml/toml.zig").Language;
 pub const ZON = @import("zon/zon.zig").Language;
+pub const XML = @import("xml/xml.zig").Language;
 
 pub fn detect(allocator: Allocator, input: []const u8) ?JSON.Type {
     var parser = JSON.Parser{ .allocator = allocator };

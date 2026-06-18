@@ -25,6 +25,8 @@ test {
     _ = @import("toml/printer.zig");
     _ = @import("zon/parser.zig");
     _ = @import("zon/printer.zig");
+    _ = @import("xml/tokenizer.zig");
+    _ = @import("xml/parser.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
@@ -38,5 +40,8 @@ test {
     }
     if (build_options.toml_conformance) {
         _ = @import("toml/conformance.zig");
+    }
+    if (build_options.xml_conformance) {
+        _ = @import("xml/conformance.zig");
     }
 }

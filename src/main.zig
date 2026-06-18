@@ -11,7 +11,7 @@ const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, yaml, yml, toml, zon };
+const Format = enum { json, jsonc, yaml, yml, toml, zon, xml };
 
 const CliAction = enum {
     help,
@@ -192,6 +192,8 @@ pub fn main(init: std.process.Init) !void {
                 // ZON edits take the replacement verbatim (a literal ZON value),
                 // like YAML — the editor splices and reparses it.
                 .zon => try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),
+                // XML is reader-only: no in-place editor yet.
+                .xml => return error.UnsupportedXmlEdit,
             }
         },
         .get => {
@@ -199,6 +201,13 @@ pub fn main(init: std.process.Init) !void {
             if (opts.requested_help) {
                 try Help.get(&stdout_terminal, config.binary_name);
                 return;
+            }
+            // XML is reader-only: it can be a `--from` source but not a `--to`
+            // target. Reject early so the serialize switches below stay total.
+            if (opts.to == .xml) {
+                try stderr_terminal.writer.print("error: XML output is not yet supported (reader-only); XML may only be a `--from` source.\n", .{});
+                try stderr_terminal.writer.flush();
+                return error.UnsupportedOutputFormat;
             }
             const input = try getInput(io, opts.file, .read_only);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
@@ -210,6 +219,7 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
                 .toml => try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input),
                 .zon => try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input),
+                .xml => try parseFromFile(fig.Language.XML, init.arena.allocator(), io, input),
             };
 
             // Converting YAML to a non-YAML format resolves the reference layer
@@ -236,6 +246,7 @@ pub fn main(init: std.process.Init) !void {
                     .yaml, .yml => .yaml,
                     .toml => .toml,
                     .zon => .zon,
+                    .xml => unreachable, // rejected up front (reader-only)
                 };
                 const decoded = try init.arena.allocator().create(fig.AST);
                 decoded.* = try fig.Lossless.decode(init.arena.allocator(), base_ast);
@@ -251,6 +262,7 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => .yaml,
                 .toml => .toml,
                 .zon => .zon,
+                .xml => unreachable, // rejected up front (reader-only)
             };
 
             if (target == .toml and !opts.lossless) {
@@ -555,6 +567,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .toml;
                 } else if (std.mem.eql(u8, fmt, "zon")) {
                     input_override = .zon;
+                } else if (std.mem.eql(u8, fmt, "xml")) {
+                    input_override = .xml;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;

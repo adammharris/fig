@@ -19,6 +19,8 @@ const TomlParser = @import("toml/parser.zig");
 const TomlType = @import("toml/toml.zig").Type;
 const ZonParser = @import("zon/parser.zig");
 const ZonType = @import("zon/zon.zig").Type;
+const XmlParser = @import("xml/parser.zig");
+const XmlType = @import("xml/xml.zig").Type;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
 /// `std_options` wins). The default `std.log` handler writes to stderr via
@@ -59,6 +61,9 @@ pub const FigFormat = enum(c_int) {
     yaml = 3,
     toml = 4,
     zon = 5,
+    /// Reader-only: accepted by `fig_parse`; rejected by `fig_editor_*` and
+    /// `fig_value_serialize` (no XML writer yet) with `unsupported_format`.
+    xml = 6,
 };
 
 /// A handle to a `fig` document. (See `DocumentHandle` and `handle.*` declaration in `fig_parse`)
@@ -125,6 +130,7 @@ pub export fn fig_parse(
         @intFromEnum(FigFormat.yaml) => .yaml,
         @intFromEnum(FigFormat.toml) => .toml,
         @intFromEnum(FigFormat.zon) => .zon,
+        @intFromEnum(FigFormat.xml) => .xml,
         else => return .unsupported_format,
     };
 
@@ -167,6 +173,13 @@ pub export fn fig_parse(
         },
         .zon => blk: {
             break :blk ZonParser.parse(allocator, source, ZonType.ZON) catch |err| {
+                allocator.free(source);
+                allocator.destroy(handle);
+                return parseFailureStatus(err);
+            };
+        },
+        .xml => blk: {
+            break :blk XmlParser.parse(allocator, source, XmlType.XML_1_0) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
@@ -519,7 +532,7 @@ pub export fn fig_editor_create(
         .json => .{ .json = .{ .allocator = allocator } },
         .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
         // Filtered out by the format switch above; editing these is not yet wired.
-        .toml, .zon => unreachable,
+        .toml, .zon, .xml => unreachable,
     };
 
     switch (handle.inner) {

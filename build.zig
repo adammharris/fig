@@ -8,11 +8,13 @@ pub fn build(b: *std.Build) void {
     const run_conformance = b.option(bool, "json-conformance", "Run JSON conformance tests") orelse false;
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
+    const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
+    options.addOption(bool, "xml_conformance", run_xml_conformance);
 
 
     const mod = b.addModule("fig", .{
