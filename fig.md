@@ -21,14 +21,15 @@ It is currently in early alpha. Most features are not implemented yet.
 - [x] Command-line interface
 - [x] C ABI
 - [x] Serialization
-- [ ] Standardize/document errors
-- [ ] Convenience lossy deserialization layer: Zig, Rust, Typescript
+- [x] Standardize/document errors
+- [ ] Typescript bindings
 - [ ] Pin C ABI surface
 
 Other planned features:
-- JSONC, JSON5
+- JSON5
+- Expand editor to include TOML and ZON
 - Publish Rust crate
-- [ ] Publish NPM package
+- Publish NPM package
 
 ## Fine print
 
