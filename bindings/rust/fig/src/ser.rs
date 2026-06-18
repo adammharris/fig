@@ -4,11 +4,11 @@
 //! then [`Value::serialize`](crate::Value::serialize) hands it to fig's core
 //! serializer for emission.
 
-use serde::{ser, Serialize, Serializer};
+use serde::{Serialize, Serializer, ser};
 
+use crate::Format;
 use crate::error::Error;
 use crate::value::Value;
-use crate::Format;
 
 /// Build a [`Value`] from any `Serialize` type.
 pub fn to_value<T: Serialize + ?Sized>(value: &T) -> Result<Value, Error> {
@@ -92,7 +92,9 @@ impl Serializer for ValueSerializer {
         Ok(Value::Str(v.to_string()))
     }
     fn serialize_bytes(self, v: &[u8]) -> Result<Value, Error> {
-        Ok(Value::Seq(v.iter().map(|b| Value::Uint(*b as u64)).collect()))
+        Ok(Value::Seq(
+            v.iter().map(|b| Value::Uint(*b as u64)).collect(),
+        ))
     }
     fn serialize_none(self) -> Result<Value, Error> {
         Ok(Value::Null)
@@ -275,8 +277,10 @@ impl ser::SerializeStruct for SerializeMap {
         key: &'static str,
         value: &T,
     ) -> Result<(), Error> {
-        self.entries
-            .push((Value::Str(key.to_string()), value.serialize(ValueSerializer)?));
+        self.entries.push((
+            Value::Str(key.to_string()),
+            value.serialize(ValueSerializer)?,
+        ));
         Ok(())
     }
     fn end(self) -> Result<Value, Error> {
@@ -297,8 +301,10 @@ impl ser::SerializeStructVariant for SerializeStructVariant {
         key: &'static str,
         value: &T,
     ) -> Result<(), Error> {
-        self.entries
-            .push((Value::Str(key.to_string()), value.serialize(ValueSerializer)?));
+        self.entries.push((
+            Value::Str(key.to_string()),
+            value.serialize(ValueSerializer)?,
+        ));
         Ok(())
     }
     fn end(self) -> Result<Value, Error> {

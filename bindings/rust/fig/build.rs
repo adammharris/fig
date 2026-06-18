@@ -9,8 +9,8 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let repo_root = manifest_dir
         .ancestors()
-        .nth(2)
-        .expect("bindings/rust should be two levels below the repository root");
+        .nth(3)
+        .expect("bindings/rust/fig should be three levels below the repository root");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let prefix = out_dir.join("zig-prefix");
 
@@ -117,7 +117,11 @@ fn repack_archive_for_apple_ld(lib_path: &Path) {
     );
 
     let mut libtool = Command::new("libtool");
-    libtool.arg("-static").arg("-o").arg(lib_path).args(&objects);
+    libtool
+        .arg("-static")
+        .arg("-o")
+        .arg(lib_path)
+        .args(&objects);
     run(&mut libtool);
 
     let _ = fs::remove_dir_all(&work);

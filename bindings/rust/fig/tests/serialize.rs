@@ -36,7 +36,10 @@ fn generic_values_round_trip() {
                 map(vec![("name", "b".into()), ("v", 2i64.into())]),
             ]),
         )]),
-        map(vec![("seq", Value::Seq(vec![])), ("map", Value::Map(vec![]))]),
+        map(vec![
+            ("seq", Value::Seq(vec![])),
+            ("map", Value::Map(vec![])),
+        ]),
         map(vec![
             ("a", "yes".into()),
             ("b", "123".into()),

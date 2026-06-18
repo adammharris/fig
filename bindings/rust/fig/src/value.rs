@@ -9,9 +9,9 @@
 
 use std::ptr::{self, NonNull};
 
+use crate::Format;
 use crate::error::Error;
 use crate::ffi;
-use crate::Format;
 
 /// An owned, format-independent value tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +96,9 @@ impl Value {
         } else {
             unsafe { std::slice::from_raw_parts(ptr_out, len) }
         };
-        Ok(std::str::from_utf8(bytes).map_err(|_| Error::Utf8)?.to_owned())
+        Ok(std::str::from_utf8(bytes)
+            .map_err(|_| Error::Utf8)?
+            .to_owned())
     }
 }
 
@@ -216,8 +218,8 @@ fn format_float(f: f64) -> String {
 #[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for Value {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        use serde::de::{MapAccess, SeqAccess, Visitor};
-        use serde::Deserialize; // for the recursive `Value::deserialize` in visit_some
+        use serde::Deserialize;
+        use serde::de::{MapAccess, SeqAccess, Visitor}; // for the recursive `Value::deserialize` in visit_some
 
         struct ValueVisitor;
 
@@ -238,10 +240,14 @@ impl<'de> serde::Deserialize<'de> for Value {
                 Ok(Value::Uint(v))
             }
             fn visit_i128<E>(self, v: i128) -> Result<Value, E> {
-                Ok(i64::try_from(v).map(Value::Int).unwrap_or(Value::Float(v as f64)))
+                Ok(i64::try_from(v)
+                    .map(Value::Int)
+                    .unwrap_or(Value::Float(v as f64)))
             }
             fn visit_u128<E>(self, v: u128) -> Result<Value, E> {
-                Ok(u64::try_from(v).map(Value::Uint).unwrap_or(Value::Float(v as f64)))
+                Ok(u64::try_from(v)
+                    .map(Value::Uint)
+                    .unwrap_or(Value::Float(v as f64)))
             }
             fn visit_f64<E>(self, v: f64) -> Result<Value, E> {
                 Ok(Value::Float(v))
@@ -296,7 +302,10 @@ mod tests {
                 Value::Seq(vec![Value::Int(1), Value::Int(2)]),
             ),
         ]);
-        assert_eq!(v.serialize(Format::Yaml).unwrap(), "name: fig\nnums:\n- 1\n- 2\n");
+        assert_eq!(
+            v.serialize(Format::Yaml).unwrap(),
+            "name: fig\nnums:\n- 1\n- 2\n"
+        );
         assert_eq!(
             v.serialize(Format::Json).unwrap(),
             "{\n  \"name\": \"fig\",\n  \"nums\": [\n    1,\n    2\n  ]\n}\n",
@@ -306,11 +315,20 @@ mod tests {
     #[test]
     fn quotes_and_round_trip_safe_strings() {
         // A colon-space scalar must be single-quoted to stay a string.
-        assert_eq!(Value::Str("a: b".into()).serialize(Format::Yaml).unwrap(), "'a: b'\n");
+        assert_eq!(
+            Value::Str("a: b".into()).serialize(Format::Yaml).unwrap(),
+            "'a: b'\n"
+        );
         // A multi-line string *value* becomes a `|` block scalar (a bare root
         // scalar is double-quoted instead, having no containing line to indent).
-        let v = Value::Map(vec![(Value::Str("s".into()), Value::Str("multi\nline".into()))]);
-        assert_eq!(v.serialize(Format::Yaml).unwrap(), "s: |-\n  multi\n  line\n");
+        let v = Value::Map(vec![(
+            Value::Str("s".into()),
+            Value::Str("multi\nline".into()),
+        )]);
+        assert_eq!(
+            v.serialize(Format::Yaml).unwrap(),
+            "s: |-\n  multi\n  line\n"
+        );
     }
 
     #[test]
@@ -327,7 +345,8 @@ mod tests {
     #[test]
     fn document_reads_into_value() {
         use crate::{Document, Format};
-        let doc = Document::parse(b"title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n", Format::Yaml).unwrap();
+        let doc =
+            Document::parse(b"title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n", Format::Yaml).unwrap();
         let v = doc.to_value().unwrap();
         assert_eq!(
             v,
@@ -338,6 +357,9 @@ mod tests {
             ]),
         );
         // round-trips back out through serialize
-        assert_eq!(v.serialize(Format::Yaml).unwrap(), "title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n");
+        assert_eq!(
+            v.serialize(Format::Yaml).unwrap(),
+            "title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n"
+        );
     }
 }

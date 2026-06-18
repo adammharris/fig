@@ -24,15 +24,20 @@ fn from_slice_deserializes_every_format() {
 
     // Only the formats whose features are enabled are linked into the native
     // library; gate the cases so the suite passes under any feature selection.
-    let mut cases: Vec<(&[u8], Format)> = vec![
-        (br#"{"name":"x","n":5,"tags":["a","b"]}"#, Format::Json),
-    ];
+    let mut cases: Vec<(&[u8], Format)> =
+        vec![(br#"{"name":"x","n":5,"tags":["a","b"]}"#, Format::Json)];
     #[cfg(feature = "yaml")]
     cases.push((b"name: x\nn: 5\ntags:\n- a\n- b\n", Format::Yaml));
     #[cfg(feature = "toml")]
-    cases.push((b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n", Format::Toml));
+    cases.push((
+        b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n",
+        Format::Toml,
+    ));
     #[cfg(feature = "zon")]
-    cases.push((b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }", Format::Zon));
+    cases.push((
+        b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }",
+        Format::Zon,
+    ));
     for (src, format) in cases {
         let got: S = fig::from_slice(src, format).unwrap();
         assert_eq!(got, want, "mismatch for {format:?}");
@@ -131,7 +136,10 @@ fn indentless_block_sequence() {
     let root: Value = fig::from_str("one:\n- 2\nfour: 5\n").unwrap();
     assert_eq!(
         root,
-        map(vec![("one", Value::Seq(vec![2i64.into()])), ("four", 5i64.into())]),
+        map(vec![
+            ("one", Value::Seq(vec![2i64.into()])),
+            ("four", 5i64.into())
+        ]),
     );
 }
 

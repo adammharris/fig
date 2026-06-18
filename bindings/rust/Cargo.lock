@@ -6,7 +6,17 @@ version = 4
 name = "fig"
 version = "0.0.0"
 dependencies = [
+ "fig-macros",
  "serde",
+]
+
+[[package]]
+name = "fig-macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

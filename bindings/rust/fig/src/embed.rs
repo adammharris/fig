@@ -1,98 +1,80 @@
-//! Comment-preserving, in-place editing of a YAML/JSON document.
+//! Comment-preserving editing of a config embedded in a host file.
 //!
-//! Unlike [`crate::Value::serialize`], which reserializes a whole value,
-//! [`Editor`] splices only the bytes of the node you change — comments, key
-//! order, blank lines, and quoting style everywhere else are left byte-
-//! identical. Inserted values are rendered by fig's serializer (via [`Value`]),
-//! then spliced in; the Zig editor re-frames indentation and flow/block context
-//! at the site.
+//! [`Embed`] opens the config region selected by an [`EmbedType`] — markdown
+//! YAML frontmatter, JSON frontmatter, or YAML endmatter — and edits only that
+//! block in its inner format. The fences and surrounding host text are left
+//! byte-identical, and within the embed only the changed node's bytes move
+//! (comments, key order, and formatting are preserved). This generalizes the
+//! former YAML-frontmatter-only `Frontmatter`.
 //!
-//! The value-taking methods come in two forms: [`Editor::replace_value`] &c.
-//! take a [`Value`] directly and are always available; the `serde`-gated
-//! [`Editor::replace`] &c. accept any `Serialize` type for convenience.
+//! Value-taking methods mirror [`crate::Editor`]: `*_value` take a [`Value`] and
+//! are always available; the `serde`-gated forms accept any `Serialize`.
 
 use std::ptr::NonNull;
 
+use crate::editor::{Segment, borrow_str, to_ffi_keys, to_ffi_path};
 use crate::error::Error;
-use crate::value::{value_text, Value};
-use crate::{ffi, Format};
+use crate::value::{Value, value_text};
+use crate::{Format, ffi};
 
-/// One step of a path into a document: a mapping key or a sequence index.
-#[derive(Clone, Copy, Debug)]
-pub enum Segment<'a> {
-    Key(&'a str),
-    Index(usize),
+/// Which embedded config to open. Each fixes both the host delimiters and the
+/// inner format, mirroring fig's `Embed.Type`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbedType {
+    /// `---` … `---` YAML frontmatter at the top of a markdown file.
+    FrontmatterYaml,
+    /// `;;;` … `;;;` JSON frontmatter at the top of a markdown file.
+    FrontmatterJson,
+    /// YAML in a trailing ```` ```endmatter ```` code block.
+    EndmatterYaml,
 }
 
-impl<'a> From<&'a str> for Segment<'a> {
-    fn from(key: &'a str) -> Self {
-        Segment::Key(key)
+impl EmbedType {
+    fn ffi(self) -> ffi::FigEmbedType {
+        match self {
+            EmbedType::FrontmatterYaml => ffi::FigEmbedType::FrontmatterYaml,
+            EmbedType::FrontmatterJson => ffi::FigEmbedType::FrontmatterJson,
+            EmbedType::EndmatterYaml => ffi::FigEmbedType::EndmatterYaml,
+        }
+    }
+
+    /// The inner format values are serialized to when spliced in.
+    fn inner_format(self) -> Format {
+        match self {
+            EmbedType::FrontmatterYaml | EmbedType::EndmatterYaml => Format::Yaml,
+            EmbedType::FrontmatterJson => Format::Json,
+        }
     }
 }
 
-impl From<usize> for Segment<'_> {
-    fn from(index: usize) -> Self {
-        Segment::Index(index)
-    }
-}
-
-/// Build the C path array. The returned segments borrow the key bytes of
-/// `path`, so the result must not outlive `path` (it never does: it is consumed
-/// within a single FFI call).
-pub(crate) fn to_ffi_path(path: &[Segment]) -> Vec<ffi::FigPathSegment> {
-    path.iter()
-        .map(|seg| match seg {
-            Segment::Key(k) => ffi::FigPathSegment {
-                kind: 0,
-                key_ptr: k.as_ptr(),
-                key_len: k.len(),
-                index: 0,
-            },
-            Segment::Index(i) => ffi::FigPathSegment {
-                kind: 1,
-                key_ptr: std::ptr::null(),
-                key_len: 0,
-                index: *i,
-            },
-        })
-        .collect()
-}
-
-/// Build the C `FigStr` array for a key list. The returned entries borrow the
-/// key bytes of `keys`, so the result must not outlive `keys` (it never does:
-/// it is consumed within a single FFI call).
-pub(crate) fn to_ffi_keys<S: AsRef<str>>(keys: &[S]) -> Vec<ffi::FigStr> {
-    keys.iter()
-        .map(|k| {
-            let s = k.as_ref();
-            ffi::FigStr {
-                ptr: s.as_ptr(),
-                len: s.len(),
-            }
-        })
-        .collect()
-}
-
-/// An in-place editor over an owned copy of a document's source.
+/// An editor over an embedded config region of a host file.
 #[derive(Debug)]
-pub struct Editor {
-    raw: NonNull<ffi::FigEditor>,
+pub struct Embed {
+    raw: NonNull<ffi::FigEmbed>,
+    inner: Format,
 }
 
-impl Editor {
-    /// Open an editor over a copy of `input` in the given format.
-    pub fn open(input: &[u8], format: Format) -> Result<Self, Error> {
+impl Embed {
+    /// Open the embed of `kind` in `host`. Returns [`Error::NotFound`] if no such
+    /// region exists.
+    pub fn open(host: &[u8], kind: EmbedType) -> Result<Self, Error> {
         let mut raw = std::ptr::null_mut();
-        let ffi_format: ffi::FigFormat = format.into();
-        let status = unsafe {
-            ffi::fig_editor_create(input.as_ptr(), input.len(), ffi_format as i32, &mut raw)
-        };
+        let status =
+            unsafe { ffi::fig_embed_open(host.as_ptr(), host.len(), kind.ffi() as i32, &mut raw) };
         Error::from_status(status)?;
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            inner: kind.inner_format(),
+        })
     }
 
-    fn ptr(&self) -> *mut ffi::FigEditor {
+    /// Open the markdown YAML frontmatter of `markdown` — the common case.
+    pub fn frontmatter(markdown: &[u8]) -> Result<Self, Error> {
+        Self::open(markdown, EmbedType::FrontmatterYaml)
+    }
+
+    fn ptr(&self) -> *mut ffi::FigEmbed {
         self.raw.as_ptr()
     }
 
@@ -100,31 +82,36 @@ impl Editor {
 
     /// Replace the value at `path` with `value`.
     pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let repl = value_text(value, Format::Yaml)?;
+        let repl = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+            ffi::fig_embed_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
         };
         Error::from_status(status)
     }
 
     /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
+        let repl = value_text(&Value::Str(key.to_string()), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+            ffi::fig_embed_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
         };
         Error::from_status(status)
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
-    pub fn insert_value(&mut self, path: &[Segment], key: &str, value: &Value) -> Result<(), Error> {
-        let key_text = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
-        let val = value_text(value, Format::Yaml)?;
+    pub fn insert_value(
+        &mut self,
+        path: &[Segment],
+        key: &str,
+        value: &Value,
+    ) -> Result<(), Error> {
+        let key_text = value_text(&Value::Str(key.to_string()), self.inner)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_insert_key(
+            ffi::fig_embed_insert_key(
                 self.ptr(),
                 p.as_ptr(),
                 p.len(),
@@ -139,20 +126,20 @@ impl Editor {
 
     /// Append `value` to the sequence at `path`.
     pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, Format::Yaml)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
+            ffi::fig_embed_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
         };
         Error::from_status(status)
     }
 
     /// Prepend `value` to the sequence at `path`.
     pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, Format::Yaml)?;
+        let val = value_text(value, self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
+            ffi::fig_embed_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
         };
         Error::from_status(status)
     }
@@ -205,7 +192,7 @@ impl Editor {
     /// Delete the mapping entry named by `path`.
     pub fn delete(&mut self, path: &[Segment]) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status = unsafe { ffi::fig_editor_delete_key(self.ptr(), p.as_ptr(), p.len()) };
+        let status = unsafe { ffi::fig_embed_delete_key(self.ptr(), p.as_ptr(), p.len()) };
         Error::from_status(status)
     }
 
@@ -213,7 +200,7 @@ impl Editor {
     pub fn remove_item(&mut self, path: &[Segment], index: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let status =
-            unsafe { ffi::fig_editor_remove_seq_item(self.ptr(), p.as_ptr(), p.len(), index) };
+            unsafe { ffi::fig_embed_remove_seq_item(self.ptr(), p.as_ptr(), p.len(), index) };
         Error::from_status(status)
     }
 
@@ -223,8 +210,9 @@ impl Editor {
     pub fn move_key(&mut self, src_path: &[Segment], dest_path: &[Segment]) -> Result<(), Error> {
         let s = to_ffi_path(src_path);
         let d = to_ffi_path(dest_path);
-        let status =
-            unsafe { ffi::fig_editor_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len()) };
+        let status = unsafe {
+            ffi::fig_embed_move_key(self.ptr(), s.as_ptr(), s.len(), d.as_ptr(), d.len())
+        };
         Error::from_status(status)
     }
 
@@ -232,11 +220,15 @@ impl Editor {
     /// `keys` come first in that order; entries whose key is not listed keep
     /// their original relative order and follow. Unknown keys are ignored. Each
     /// entry's comments and interleaved trivia are preserved.
-    pub fn reorder_keys<S: AsRef<str>>(&mut self, path: &[Segment], keys: &[S]) -> Result<(), Error> {
+    pub fn reorder_keys<S: AsRef<str>>(
+        &mut self,
+        path: &[Segment],
+        keys: &[S],
+    ) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let k = to_ffi_keys(keys);
         let status = unsafe {
-            ffi::fig_editor_reorder_keys(self.ptr(), p.as_ptr(), p.len(), k.as_ptr(), k.len())
+            ffi::fig_embed_reorder_keys(self.ptr(), p.as_ptr(), p.len(), k.as_ptr(), k.len())
         };
         Error::from_status(status)
     }
@@ -246,8 +238,7 @@ impl Editor {
     /// its separators. No-op when `from == to`.
     pub fn move_item(&mut self, path: &[Segment], from: usize, to: usize) -> Result<(), Error> {
         let p = to_ffi_path(path);
-        let status =
-            unsafe { ffi::fig_editor_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
+        let status = unsafe { ffi::fig_embed_move_item(self.ptr(), p.as_ptr(), p.len(), from, to) };
         Error::from_status(status)
     }
 
@@ -258,7 +249,7 @@ impl Editor {
     pub fn reorder_items(&mut self, path: &[Segment], indices: &[usize]) -> Result<(), Error> {
         let p = to_ffi_path(path);
         let status = unsafe {
-            ffi::fig_editor_reorder_items(
+            ffi::fig_embed_reorder_items(
                 self.ptr(),
                 p.as_ptr(),
                 p.len(),
@@ -269,31 +260,20 @@ impl Editor {
         Error::from_status(status)
     }
 
-    /// The current source. Borrows editor memory; invalidated by the next edit.
-    pub fn source(&self) -> Result<&str, Error> {
+    /// Render the full host file with the edited embed spliced back between the
+    /// (untouched) fences. Borrows handle memory; invalidated by the next call
+    /// or edit. Takes `&mut self` because the render buffer is rebuilt in place.
+    pub fn render(&mut self) -> Result<&str, Error> {
         let mut ptr: *const u8 = std::ptr::null();
         let mut len: usize = 0;
-        let status = unsafe { ffi::fig_editor_source(self.raw.as_ptr(), &mut ptr, &mut len) };
+        let status = unsafe { ffi::fig_embed_render(self.raw.as_ptr(), &mut ptr, &mut len) };
         Error::from_status(status)?;
         borrow_str(ptr, len)
     }
 }
 
-impl Drop for Editor {
+impl Drop for Embed {
     fn drop(&mut self) {
-        unsafe { ffi::fig_editor_destroy(self.raw.as_ptr()) };
+        unsafe { ffi::fig_embed_destroy(self.raw.as_ptr()) };
     }
-}
-
-/// Interpret `len` bytes at `ptr` (owned by a fig handle, valid for `'a`) as a
-/// UTF-8 string slice.
-pub(crate) fn borrow_str<'a>(ptr: *const u8, len: usize) -> Result<&'a str, Error> {
-    if len == 0 {
-        return Ok("");
-    }
-    // Safety: on success the ABI guarantees `len` bytes at `ptr` owned by the
-    // handle and valid until the next mutation / destroy; the caller bounds the
-    // returned borrow accordingly.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
-    std::str::from_utf8(bytes).map_err(|_| Error::Utf8)
 }

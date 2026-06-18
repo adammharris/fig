@@ -78,7 +78,8 @@ prose goes here
 #[test]
 fn frontmatter_edit_touches_only_target_bytes() {
     let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
-    fm.replace(&[Segment::Key("title")], &"Hello world").unwrap();
+    fm.replace(&[Segment::Key("title")], &"Hello world")
+        .unwrap();
     let rendered = fm.render().unwrap();
     // Everything except the title line is byte-identical to the original.
     let expected = NOTE.replace("title: Hello\n", "title: Hello world\n");

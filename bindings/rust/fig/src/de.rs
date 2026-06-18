@@ -4,11 +4,9 @@
 //! intermediate value type. `id == None` means "no node", which we treat as
 //! YAML null (e.g. an empty document, or a missing mapping value).
 
-use serde::de::{
-    self, DeserializeOwned, DeserializeSeed, EnumAccess, VariantAccess, Visitor,
-};
-use serde::forward_to_deserialize_any;
 use serde::Deserializer;
+use serde::de::{self, DeserializeOwned, DeserializeSeed, EnumAccess, VariantAccess, Visitor};
+use serde::forward_to_deserialize_any;
 
 use crate::error::Error;
 use crate::ffi::{FigNodeId, FigNodeKind};
@@ -133,7 +131,9 @@ impl<'de, 'a> Deserializer<'de> for NodeDeserializer<'a> {
                     value: self.doc.kv_value(kv),
                 })
             }
-            _ => Err(Error::Message("expected a string or mapping for enum".into())),
+            _ => Err(Error::Message(
+                "expected a string or mapping for enum".into(),
+            )),
         }
     }
 

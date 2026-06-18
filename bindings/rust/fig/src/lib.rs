@@ -1,9 +1,15 @@
+// Lets the `derive`-generated code refer to this crate as `fig::…` even from
+// within the crate's own tests and examples.
+extern crate self as fig;
+
 mod editor;
 mod embed;
 mod error;
 mod ffi;
 mod value;
 
+#[cfg(feature = "derive")]
+mod convert;
 #[cfg(feature = "serde")]
 mod de;
 #[cfg(feature = "serde")]
@@ -16,12 +22,19 @@ pub use embed::{Embed, EmbedType};
 pub use error::Error;
 pub use value::Value;
 
+#[cfg(feature = "derive")]
+pub use convert::{FromValue, ToValue};
+// The derive macros share the trait names (trait vs. macro namespace), mirroring
+// `serde::Serialize`. Glob users get both with one import.
+#[cfg(feature = "derive")]
+pub use fig_macros::{FromValue, ToValue};
+
 #[cfg(feature = "serde")]
 pub use de::{from_slice, from_str};
 #[cfg(feature = "serde")]
 pub use ser::to_string;
 
-use ffi::{FigNodeId, FigNodeKind, FIG_NODE_NONE};
+use ffi::{FIG_NODE_NONE, FigNodeId, FigNodeKind};
 
 /// A config format. Parsing and editing support `Json`/`Jsonc`/`Yaml`;
 /// [`Value::serialize`] additionally supports `Toml`/`Zon`.
@@ -121,7 +134,9 @@ impl Document {
             }
             // A bare keyvalue, an invalid id, or an unresolved alias can't stand
             // alone as a value.
-            FigNodeKind::Keyvalue | FigNodeKind::Invalid | FigNodeKind::Alias => Err(Error::Internal),
+            FigNodeKind::Keyvalue | FigNodeKind::Invalid | FigNodeKind::Alias => {
+                Err(Error::Internal)
+            }
         }
     }
 
@@ -213,11 +228,7 @@ impl Drop for Document {
 }
 
 fn normalize(id: FigNodeId) -> Option<FigNodeId> {
-    if id == FIG_NODE_NONE {
-        None
-    } else {
-        Some(id)
-    }
+    if id == FIG_NODE_NONE { None } else { Some(id) }
 }
 
 #[cfg(test)]
@@ -253,7 +264,8 @@ mod tests {
     fn frontmatter_move_key_preserves_comments_and_body() {
         let md = "---\na: 1\n# note for c\nc: 3\nb: 2\n---\nbody\n";
         let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();
-        fm.move_key(&[Segment::Key("c")], &[Segment::Key("a")]).unwrap();
+        fm.move_key(&[Segment::Key("c")], &[Segment::Key("a")])
+            .unwrap();
         assert_eq!(
             fm.render().unwrap(),
             "---\n# note for c\nc: 3\na: 1\nb: 2\n---\nbody\n",
