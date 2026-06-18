@@ -314,6 +314,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "toml")]
     fn null_value_is_unsupported_in_toml() {
         let v = Value::Map(vec![(Value::Str("k".into()), Value::Null)]);
         assert!(matches!(

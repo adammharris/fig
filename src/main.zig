@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const fig = @import("fig");
+const build_options = @import("build_options");
 const Io = std.Io;
 
 const title_string = "\n=========\n   FIG\n=========\n\n";
@@ -178,9 +179,9 @@ pub fn main(init: std.process.Init) !void {
                     const replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{opts.replacement});
                     try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, opts.key);
                 },
-                .yaml, .yml => {
+                .yaml, .yml => if (comptime build_options.lang_yaml) {
                     try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key);
-                },
+                } else return error.FormatDisabled,
                 // TOML value/key replacement: a value or key node has a tight,
                 // contiguous span (the parser's node_spans point at the original
                 // source bytes), so the generic span-splice editor handles it
@@ -188,10 +189,16 @@ pub fn main(init: std.process.Init) !void {
                 // The replacement is taken verbatim as a TOML literal, like YAML
                 // and ZON. (Structural inserts/deletes that must place text
                 // relative to a scattered table are still unsupported.)
-                .toml => try editDocument(fig.Language.TOML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),
+                .toml => if (comptime build_options.lang_toml)
+                    try editDocument(fig.Language.TOML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key)
+                else
+                    return error.FormatDisabled,
                 // ZON edits take the replacement verbatim (a literal ZON value),
                 // like YAML — the editor splices and reparses it.
-                .zon => try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key),
+                .zon => if (comptime build_options.lang_zon)
+                    try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key)
+                else
+                    return error.FormatDisabled,
                 // XML is reader-only: no in-place editor yet.
                 .xml => return error.UnsupportedXmlEdit,
             }
@@ -216,10 +223,10 @@ pub fn main(init: std.process.Init) !void {
                 try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
             else switch (opts.from) {
                 .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
-                .yaml, .yml => try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input),
-                .toml => try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input),
-                .zon => try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input),
-                .xml => try parseFromFile(fig.Language.XML, init.arena.allocator(), io, input),
+                .yaml, .yml => if (comptime build_options.lang_yaml) try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input) else return error.FormatDisabled,
+                .toml => if (comptime build_options.lang_toml) try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input) else return error.FormatDisabled,
+                .zon => if (comptime build_options.lang_zon) try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input) else return error.FormatDisabled,
+                .xml => if (comptime build_options.lang_xml) try parseFromFile(fig.Language.XML, init.arena.allocator(), io, input) else return error.FormatDisabled,
             };
 
             // Converting YAML to a non-YAML format resolves the reference layer
@@ -228,10 +235,14 @@ pub fn main(init: std.process.Init) !void {
             const src_is_yaml = opts.from == .yaml or opts.from == .yml;
             const dst_is_yaml = opts.to == .yaml or opts.to == .yml;
             const base_ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
-                const mode: fig.Language.YAML.TagMode = if (opts.lax_tags) .lax else .strict;
-                const mat = try init.arena.allocator().create(fig.AST);
-                mat.* = try fig.Language.YAML.materialize(init.arena.allocator(), &doc.ast, mode);
-                break :blk mat;
+                // Reachable only when the source is YAML, so YAML is compiled in;
+                // the comptime guard keeps `Language.YAML` out of the gated build.
+                if (comptime build_options.lang_yaml) {
+                    const mode: fig.Language.YAML.TagMode = if (opts.lax_tags) .lax else .strict;
+                    const mat = try init.arena.allocator().create(fig.AST);
+                    mat.* = try fig.Language.YAML.materialize(init.arena.allocator(), &doc.ast, mode);
+                    break :blk mat;
+                } else unreachable;
             } else &doc.ast;
 
             // Lossless mode: decode any `$fig` envelopes in the input back to
@@ -368,7 +379,10 @@ fn editEmbedded(
     const inner = content[region.content.start..region.content.end];
 
     const edited_inner = switch (embed_type) {
-        .FrontmatterYaml, .EndmatterYaml => try editSlice(fig.Language.YAML, allocator, inner, path, replacement, edit_key),
+        .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
+            try editSlice(fig.Language.YAML, allocator, inner, path, replacement, edit_key)
+        else
+            return error.FormatDisabled,
         .FrontmatterJson => blk: {
             const quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{replacement});
             break :blk try editSlice(fig.Language.JSON, allocator, inner, path, quoted, edit_key);

@@ -13,13 +13,16 @@
 
 const std = @import("std");
 const AST = @import("ast.zig");
+const build_options = @import("build_options");
 
 const Json = @import("json/parser.zig");
-const Yaml = @import("yaml/parser.zig");
-const Toml = @import("toml/parser.zig");
-const Zon = @import("zon/parser.zig");
+const Yaml = if (build_options.lang_yaml) @import("yaml/parser.zig") else void;
+const Toml = if (build_options.lang_toml) @import("toml/parser.zig") else void;
+const Zon = if (build_options.lang_zon) @import("zon/parser.zig") else void;
 
-/// The source format to parse before mapping onto `T`.
+/// The source format to parse before mapping onto `T`. A format that was
+/// compiled out is still a valid enum value, but parsing it yields
+/// `error.FormatDisabled` (see `parseToAst`).
 pub const Format = enum { json, jsonc, yaml, toml, zon };
 
 pub const Options = struct {
@@ -95,9 +98,9 @@ fn parseToAst(allocator: std.mem.Allocator, source: []const u8, format: Format) 
     return switch (format) {
         .json => Json.parseAbstract(allocator, source, .JSON),
         .jsonc => Json.parseAbstract(allocator, source, .JSONC),
-        .yaml => Yaml.parseAbstract(allocator, source, .v1_2_2),
-        .toml => Toml.parseAbstract(allocator, source, .TOML_1_1),
-        .zon => Zon.parseAbstract(allocator, source, .ZON),
+        .yaml => if (comptime build_options.lang_yaml) Yaml.parseAbstract(allocator, source, .v1_2_2) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) Toml.parseAbstract(allocator, source, .TOML_1_1) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) Zon.parseAbstract(allocator, source, .ZON) else error.FormatDisabled,
     };
 }
 
@@ -262,6 +265,7 @@ fn parseArray(comptime T: type, allocator: std.mem.Allocator, ast: *const AST, n
 const testing = std.testing;
 
 test "deserialize: yaml into a struct (defaults, optionals, unknown ignored)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const Config = struct {
         title: []const u8,
         count: i64,
@@ -305,6 +309,7 @@ test "deserialize: json into a struct" {
 }
 
 test "deserialize: enums from string scalars" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const Color = enum { red, green, blue };
     const S = struct { c: Color };
     const parsed = try parseFromSlice(S, testing.allocator, "c: green\n", .yaml, .{});
@@ -315,6 +320,7 @@ test "deserialize: enums from string scalars" {
 }
 
 test "deserialize: strict unknown fields and missing required fields error" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const S = struct { a: u8, b: u8 };
     try testing.expectError(
         error.UnknownField,
@@ -327,6 +333,7 @@ test "deserialize: strict unknown fields and missing required fields error" {
 }
 
 test "deserialize: zon enum literals and toml scalars" {
+    if (comptime !(build_options.lang_zon and build_options.lang_toml)) return error.SkipZigTest;
     const Mode = enum { fast, slow };
     const S = struct { mode: Mode, n: u32 };
 
@@ -344,6 +351,7 @@ test "deserialize: zon enum literals and toml scalars" {
 }
 
 test "deserialize: fixed-size array requires an exact-length sequence" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const S = struct { rgb: [3]u8 };
     const ok = try parseFromSlice(S, testing.allocator, "rgb: [1, 2, 3]\n", .yaml, .{});
     defer ok.deinit();

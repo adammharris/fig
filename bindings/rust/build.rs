@@ -34,6 +34,22 @@ fn main() {
         command.arg(format!("-Dtarget={zig_target}"));
     }
 
+    // Mirror the per-language cargo features onto `build.zig`'s `-D<lang>` gates.
+    // Cargo sets `CARGO_FEATURE_<NAME>` for every enabled feature; when one is
+    // absent we pass `-D<lang>=false` so that format's parser/printer is compiled
+    // out of `libfig.a`. JSON has no gate (always on). Cargo reruns this script
+    // automatically when the active feature set changes.
+    for (feature, flag) in [
+        ("CARGO_FEATURE_YAML", "-Dyaml=false"),
+        ("CARGO_FEATURE_TOML", "-Dtoml=false"),
+        ("CARGO_FEATURE_ZON", "-Dzon=false"),
+        ("CARGO_FEATURE_XML", "-Dxml=false"),
+    ] {
+        if env::var_os(feature).is_none() {
+            command.arg(flag);
+        }
+    }
+
     let status = command
         .arg("--prefix")
         .arg(&prefix)

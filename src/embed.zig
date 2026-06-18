@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const Language = @import("language.zig");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
+const build_options = @import("build_options");
 
 const Embed = @This();
 
@@ -142,10 +143,10 @@ pub fn locateRegion(source: []const u8, t: Type) Error!Region {
 pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Type) !Document {
     const slice = Span.of(u8, content, source);
     return switch (archetypeOf(t).inner) {
-        .yaml => blk: {
+        .yaml => if (comptime build_options.lang_yaml) blk: {
             var parser = Language.YAML.Parser{ .allocator = allocator };
             break :blk Language.YAML.parse(&parser, slice, Language.YAML.default_type);
-        },
+        } else error.FormatDisabled,
         .json => blk: {
             var parser = Language.JSON.Parser{ .allocator = allocator };
             break :blk Language.JSON.parse(&parser, slice, Language.JSON.default_type);
@@ -246,8 +247,10 @@ fn pushSegment(
 }
 
 fn parseYamlSlice(allocator: Allocator, slice: []const u8) !Document {
-    var parser = Language.YAML.Parser{ .allocator = allocator };
-    return Language.YAML.parse(&parser, slice, Language.YAML.default_type);
+    if (comptime build_options.lang_yaml) {
+        var parser = Language.YAML.Parser{ .allocator = allocator };
+        return Language.YAML.parse(&parser, slice, Language.YAML.default_type);
+    } else return error.FormatDisabled;
 }
 
 const MarkerKind = enum { start, end, none };
@@ -358,6 +361,7 @@ fn rootKind(doc: Document) AST.Node.Kind {
 }
 
 test "extractStream: two explicit documents in a stream (JHB9)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src =
         \\# Ranking of 1998 home runs
         \\---
@@ -382,6 +386,7 @@ test "extractStream: two explicit documents in a stream (JHB9)" {
 }
 
 test "extractStream: directives fold into the following document (6ZKB-shaped)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     // Each `%…` prefix belongs to the `---` it introduces, not a document of its
     // own: `Document` is doc 1, the empty `---` is doc 2, and `%YAML 1.2\n---\n…`
     // is doc 3.
@@ -404,6 +409,7 @@ test "extractStream: directives fold into the following document (6ZKB-shaped)" 
 }
 
 test "extractStream: a tag handle scoped to the first document fails later use (QLJ7)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     // `!prefix!` is declared only for the first document; documents 2 and 3 use
     // it undeclared, so the splitter must reject the stream.
     const src =
@@ -418,6 +424,7 @@ test "extractStream: a tag handle scoped to the first document fails later use (
 }
 
 test "extractStream: two document start markers yields two null docs (6XDY)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "---\n---\n");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), stream.documents.len);
@@ -426,6 +433,7 @@ test "extractStream: two document start markers yields two null docs (6XDY)" {
 }
 
 test "extractStream: document start on last line (PUW8)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "---\na: b\n---\n");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), stream.documents.len);
@@ -434,6 +442,7 @@ test "extractStream: document start on last line (PUW8)" {
 }
 
 test "extractStream: bare docs separated by ... with a comment-only segment (M7A3)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src = "Bare\ndocument\n...\n# No document\n...\n|\n  %!PS-Adobe-2.0 # Not the first line\n";
     const stream = try extractStream(testing.allocator, src);
     defer stream.deinit(testing.allocator);
@@ -444,6 +453,7 @@ test "extractStream: bare docs separated by ... with a comment-only segment (M7A
 }
 
 test "extractStream: inline content on the marker line (L383)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "--- foo  # comment\n--- foo  # comment\n");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), stream.documents.len);
@@ -452,6 +462,7 @@ test "extractStream: inline content on the marker line (L383)" {
 }
 
 test "extractStream: explicit doc then bare doc after ... (7Z25)" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "---\nscalar1\n...\nkey: value\n");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 2), stream.documents.len);
@@ -462,6 +473,7 @@ test "extractStream: explicit doc then bare doc after ... (7Z25)" {
 }
 
 test "extractStream: single bare document" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "key: value\n");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), stream.documents.len);
@@ -469,6 +481,7 @@ test "extractStream: single bare document" {
 }
 
 test "extractStream: empty stream is one null document" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const stream = try extractStream(testing.allocator, "");
     defer stream.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 1), stream.documents.len);
@@ -476,6 +489,7 @@ test "extractStream: empty stream is one null document" {
 }
 
 test "extractStream: outerSpan lifts node spans into outer coordinates" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src = "---\nfoo\n---\nbar\n";
     const stream = try extractStream(testing.allocator, src);
     defer stream.deinit(testing.allocator);

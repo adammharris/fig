@@ -14,10 +14,15 @@ const Allocator = @import("std").mem.Allocator;
 const util = @import("util/util.zig");
 const Writer = @import("std").Io.Writer;
 
+const build_options = @import("build_options");
+
+// Printers are pulled in only for the formats compiled into this build. A gated
+// format's `*Printer` is `void`, so the matching `serialize` arm below (guarded
+// by the same comptime flag) is never analyzed and the printer never compiles.
 const JsonPrinter = @import("json/printer.zig");
-const YamlPrinter = @import("yaml/printer.zig");
-const TomlPrinter = @import("toml/printer.zig");
-const ZonPrinter = @import("zon/printer.zig");
+const YamlPrinter = if (build_options.lang_yaml) @import("yaml/printer.zig") else void;
+const TomlPrinter = if (build_options.lang_toml) @import("toml/printer.zig") else void;
+const ZonPrinter = if (build_options.lang_zon) @import("zon/printer.zig") else void;
 
 pub fn deinit(self: *AST) void {
     for (self.owned_strings) |string| {
@@ -164,6 +169,7 @@ pub const SerializeError = Writer.Error || error{
     UnresolvedAlias, // a YAML `*alias` reached a non-YAML printer (materialize first)
     NullUnsupported, // a `null` reached a format with no null type (TOML)
     NonStringKey, // a mapping key was not a string (TOML, ZON)
+    FormatDisabled, // the target format was compiled out of this build
 };
 
 /// Render the whole AST to `writer` in the given format.
@@ -171,9 +177,9 @@ pub const SerializeError = Writer.Error || error{
 pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) SerializeError!void {
     return switch (format) {
         .json => JsonPrinter.print(writer, self),
-        .yaml => YamlPrinter.print(writer, self),
-        .toml => TomlPrinter.print(writer, self),
-        .zon => ZonPrinter.print(writer, self),
+        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, self) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, self) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, self) else error.FormatDisabled,
     };
 }
 
@@ -181,9 +187,9 @@ pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) Ser
 pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id) SerializeError!void {
     return switch (format) {
         .json => JsonPrinter.printNode(writer, self, id, 0),
-        .yaml => YamlPrinter.printNode(writer, self, id, 0),
-        .toml => TomlPrinter.printNode(writer, self, id, 0),
-        .zon => ZonPrinter.printNode(writer, self, id, 0),
+        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
     };
 }
 
@@ -387,16 +393,18 @@ test "Builder constructs an AST that serializes" {
     , w.buffered());
 
     // Same AST, YAML — exercises the empty side-table (anchor/tag) guard path.
-    var ybuf: [256]u8 = undefined;
-    var yw = std.Io.Writer.fixed(&ybuf);
-    try ast.serialize(&yw, .yaml);
-    try testing.expectEqualStrings(
-        \\name: fig
-        \\nums:
-        \\- 1
-        \\- 2
-        \\
-    , yw.buffered());
+    if (comptime build_options.lang_yaml) {
+        var ybuf: [256]u8 = undefined;
+        var yw = std.Io.Writer.fixed(&ybuf);
+        try ast.serialize(&yw, .yaml);
+        try testing.expectEqualStrings(
+            \\name: fig
+            \\nums:
+            \\- 1
+            \\- 2
+            \\
+        , yw.buffered());
+    }
 }
 
 // ==================

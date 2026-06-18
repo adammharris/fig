@@ -9,11 +9,21 @@ name = "fig"
 path = "src/lib.rs"
 
 [features]
-default = ["serde"]
+default = ["serde", "yaml", "toml", "zon", "xml"]
 # Typed (de)serialization: `to_string`/`from_str`, the editor's `T: Serialize`
 # value methods, and serde impls for `Value`. Without it, the binding still
 # parses, edits, and serializes via the `Value` tree directly.
 serde = ["dep:serde"]
+# Per-language gates, mirroring `build.zig`'s `-D<lang>` options. Each is passed
+# through to the bundled `zig build` (see `build.rs`), so disabling a feature
+# compiles that format's parser/printer out of the linked `libfig.a` and shrinks
+# the binary. JSON is always present (the base format), so it has no feature.
+# The `Format` enum keeps every variant regardless; selecting a format whose
+# feature is off returns `Error::UnsupportedFormat` at runtime.
+yaml = []
+toml = []
+zon = []
+xml = []
 
 [dependencies]
 serde = { version = "1", optional = true }

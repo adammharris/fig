@@ -10,17 +10,40 @@ pub fn build(b: *std.Build) void {
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
     const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
 
+    // Per-language feature gates. Each non-JSON format can be compiled out to
+    // shrink the binary and drop its parser/printer. JSON is always included: it
+    // is the base format `Language.detect()` sniffs and the lingua-franca every
+    // consumer expects, and its footprint is small. Default: everything on.
+    const enable_yaml = b.option(bool, "yaml", "Include YAML support") orelse true;
+    const enable_toml = b.option(bool, "toml", "Include TOML support") orelse true;
+    const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
+    const enable_xml = b.option(bool, "xml", "Include XML support") orelse true;
+
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
     options.addOption(bool, "xml_conformance", run_xml_conformance);
+    // Language gates, consumed across the codebase as `build_options.lang_*`.
+    // JSON has no gate (always on); it is hard-coded `true` for symmetry so call
+    // sites can read `build_options.lang_json` uniformly.
+    options.addOption(bool, "lang_json", true);
+    options.addOption(bool, "lang_yaml", enable_yaml);
+    options.addOption(bool, "lang_toml", enable_toml);
+    options.addOption(bool, "lang_zon", enable_zon);
+    options.addOption(bool, "lang_xml", enable_xml);
+
+    // Build the options module once and share the single instance across every
+    // target. Calling `addOptions` per-module would generate a fresh module from
+    // the same generated file, which Zig rejects ("file belongs to two modules").
+    const options_mod = options.createModule();
 
 
     const mod = b.addModule("fig", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    mod.addImport("build_options", options_mod);
 
     const exe = b.addExecutable(.{
         .name = "fig",
@@ -34,6 +57,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    exe.root_module.addImport("build_options", options_mod);
 
     b.installArtifact(exe);
 
@@ -48,6 +72,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = !resolved_target.cpu.arch.isWasm(),
         }),
     });
+    c_lib.root_module.addImport("build_options", options_mod);
     const install_c_lib = b.addInstallArtifact(c_lib, .{});
     b.getInstallStep().dependOn(&install_c_lib.step);
 
@@ -69,6 +94,7 @@ pub fn build(b: *std.Build) void {
             .strip = true,
         }),
     });
+    wasm.root_module.addImport("build_options", options_mod);
     wasm.entry = .disabled;
     wasm.rdynamic = true;
     const install_wasm = b.addInstallArtifact(wasm, .{});
@@ -84,6 +110,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = wasi_target,
     });
+    wasi_mod.addImport("build_options", options_mod);
     const wasi_cli = b.addExecutable(.{
         .name = "fig-wasi",
         .root_module = b.createModule(.{
@@ -96,6 +123,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    wasi_cli.root_module.addImport("build_options", options_mod);
     const install_wasi = b.addInstallArtifact(wasi_cli, .{});
     const wasi_step = b.step("wasi", "Build the fig CLI as a WASI module (fig-wasi.wasm)");
     wasi_step.dependOn(&install_wasi.step);
@@ -169,8 +197,8 @@ pub fn build(b: *std.Build) void {
         .root_module = mod,
         .filters = test_filters,
     });
-
-    mod_tests.root_module.addOptions("build_options", options);
+    // `mod` already carries `build_options` (added above); the test artifact
+    // reuses that module, so no second `addOptions` is needed here.
 
     const install_mod_tests = b.addInstallArtifact(mod_tests, .{
         .dest_sub_path = "fig-tests",

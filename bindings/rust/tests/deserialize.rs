@@ -22,12 +22,17 @@ fn from_slice_deserializes_every_format() {
         tags: vec!["a".into(), "b".into()],
     };
 
-    let cases: [(&[u8], Format); 4] = [
+    // Only the formats whose features are enabled are linked into the native
+    // library; gate the cases so the suite passes under any feature selection.
+    let mut cases: Vec<(&[u8], Format)> = vec![
         (br#"{"name":"x","n":5,"tags":["a","b"]}"#, Format::Json),
-        (b"name: x\nn: 5\ntags:\n- a\n- b\n", Format::Yaml),
-        (b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n", Format::Toml),
-        (b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }", Format::Zon),
     ];
+    #[cfg(feature = "yaml")]
+    cases.push((b"name: x\nn: 5\ntags:\n- a\n- b\n", Format::Yaml));
+    #[cfg(feature = "toml")]
+    cases.push((b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n", Format::Toml));
+    #[cfg(feature = "zon")]
+    cases.push((b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }", Format::Zon));
     for (src, format) in cases {
         let got: S = fig::from_slice(src, format).unwrap();
         assert_eq!(got, want, "mismatch for {format:?}");

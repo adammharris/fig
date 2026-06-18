@@ -9,18 +9,21 @@ const AST = @import("ast.zig");
 const Span = @import("util/span.zig");
 const Embed = @import("embed.zig");
 const Editor = @import("editor.zig").Editor;
+const build_options = @import("build_options");
 const JsonParser = @import("json/parser.zig");
 const JsonType = @import("json/json.zig").Type;
 const JsonLang = @import("json/json.zig").Language;
-const YamlParser = @import("yaml/parser.zig");
-const YamlType = @import("yaml/yaml.zig").Type;
-const YamlLang = @import("yaml/yaml.zig").Language;
-const TomlParser = @import("toml/parser.zig");
-const TomlType = @import("toml/toml.zig").Type;
-const ZonParser = @import("zon/parser.zig");
-const ZonType = @import("zon/zon.zig").Type;
-const XmlParser = @import("xml/parser.zig");
-const XmlType = @import("xml/xml.zig").Type;
+// Gated formats collapse to `void`; every reference below is behind the matching
+// `build_options.lang_*` comptime guard so the parser/printer never compiles in.
+const YamlParser = if (build_options.lang_yaml) @import("yaml/parser.zig") else void;
+const YamlType = if (build_options.lang_yaml) @import("yaml/yaml.zig").Type else void;
+const YamlLang = if (build_options.lang_yaml) @import("yaml/yaml.zig").Language else void;
+const TomlParser = if (build_options.lang_toml) @import("toml/parser.zig") else void;
+const TomlType = if (build_options.lang_toml) @import("toml/toml.zig").Type else void;
+const ZonParser = if (build_options.lang_zon) @import("zon/parser.zig") else void;
+const ZonType = if (build_options.lang_zon) @import("zon/zon.zig").Type else void;
+const XmlParser = if (build_options.lang_xml) @import("xml/parser.zig") else void;
+const XmlType = if (build_options.lang_xml) @import("xml/xml.zig").Type else void;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
 /// `std_options` wins). The default `std.log` handler writes to stderr via
@@ -157,33 +160,49 @@ pub export fn fig_parse(
                 return parseFailureStatus(err);
             };
         },
-        .yaml => blk: {
+        .yaml => if (comptime build_options.lang_yaml) blk: {
             break :blk YamlParser.parse(allocator, source, YamlType.v1_2_2) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
             };
+        } else {
+            allocator.free(source);
+            allocator.destroy(handle);
+            return .unsupported_format;
         },
-        .toml => blk: {
+        .toml => if (comptime build_options.lang_toml) blk: {
             break :blk TomlParser.parse(allocator, source, TomlType.TOML_1_1) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
             };
+        } else {
+            allocator.free(source);
+            allocator.destroy(handle);
+            return .unsupported_format;
         },
-        .zon => blk: {
+        .zon => if (comptime build_options.lang_zon) blk: {
             break :blk ZonParser.parse(allocator, source, ZonType.ZON) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
             };
+        } else {
+            allocator.free(source);
+            allocator.destroy(handle);
+            return .unsupported_format;
         },
-        .xml => blk: {
+        .xml => if (comptime build_options.lang_xml) blk: {
             break :blk XmlParser.parse(allocator, source, XmlType.XML_1_0) catch |err| {
                 allocator.free(source);
                 allocator.destroy(handle);
                 return parseFailureStatus(err);
             };
+        } else {
+            allocator.free(source);
+            allocator.destroy(handle);
+            return .unsupported_format;
         },
     };
 
@@ -485,12 +504,22 @@ fn editStatus(err: anyerror) FigStatus {
 
 pub const FigEditor = opaque {};
 
-const EditorHandle = struct {
-    allocator: std.mem.Allocator,
-    inner: union(enum) {
+// The editor backends, shared by the document editor and the embed editor. The
+// `yaml` variant only exists when YAML is compiled in — gating it out (rather
+// than leaving a `void` field) keeps the `inline else` switches below valid.
+const EditorUnion = if (build_options.lang_yaml)
+    union(enum) {
         yaml: Editor(YamlLang),
         json: Editor(JsonLang),
-    },
+    }
+else
+    union(enum) {
+        json: Editor(JsonLang),
+    };
+
+const EditorHandle = struct {
+    allocator: std.mem.Allocator,
+    inner: EditorUnion,
 
     fn deinit(self: *EditorHandle) void {
         switch (self.inner) {
@@ -520,7 +549,7 @@ pub export fn fig_editor_create(
     const fig_format: FigFormat = switch (format) {
         @intFromEnum(FigFormat.json) => .json,
         @intFromEnum(FigFormat.jsonc) => .jsonc,
-        @intFromEnum(FigFormat.yaml) => .yaml,
+        @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
         else => return .unsupported_format,
     };
 
@@ -528,7 +557,7 @@ pub export fn fig_editor_create(
     const handle = allocator.create(EditorHandle) catch return .out_of_memory;
     handle.allocator = allocator;
     handle.inner = switch (fig_format) {
-        .yaml => .{ .yaml = .{ .allocator = allocator } },
+        .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
         .json => .{ .json = .{ .allocator = allocator } },
         .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
         // Filtered out by the format switch above; editing these is not yet wired.
@@ -825,10 +854,7 @@ const EmbedHandle = struct {
     allocator: std.mem.Allocator,
     host: []u8,
     content: Span,
-    editor: union(enum) {
-        yaml: Editor(YamlLang),
-        json: Editor(JsonLang),
-    },
+    editor: EditorUnion,
     rendered: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *EmbedHandle) void {
@@ -864,6 +890,10 @@ pub export fn fig_embed_open(
     out.* = null;
     const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
     const t = embedTypeOf(embed_type) orelse return .invalid_argument;
+    // A YAML-inner embed needs the YAML editor; reject it when YAML is gated out.
+    if (comptime !build_options.lang_yaml) {
+        if (embedInner(t) == .yaml) return .unsupported_format;
+    }
 
     const region = Embed.locateRegion(input, t) catch |err| return switch (err) {
         error.NotFound => .not_found,
@@ -881,7 +911,7 @@ pub export fn fig_embed_open(
         .host = host,
         .content = region.content,
         .editor = switch (embedInner(t)) {
-            .yaml => .{ .yaml = .{ .allocator = allocator } },
+            .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
             .json => .{ .json = .{ .allocator = allocator } },
         },
     };
@@ -1178,7 +1208,7 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
 /// other failure is allocation, surfaced as `WriteFailed`.
 fn serializeStatus(err: AST.SerializeError) FigStatus {
     return switch (err) {
-        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey => .unsupported_format,
+        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey, error.FormatDisabled => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };
 }
@@ -1336,6 +1366,7 @@ pub export fn fig_value_serialize(
 }
 
 test "traversal over a parsed mapping" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src = "title: Hello\ncount: 42\ntags:\n- a\n- b\n";
 
     var out_doc: ?*FigDocument = null;
@@ -1376,6 +1407,7 @@ test "traversal over a parsed mapping" {
 }
 
 test "parse c abi reads toml and zon" {
+    if (comptime !(build_options.lang_toml and build_options.lang_zon)) return error.SkipZigTest;
     // TOML
     {
         var out_doc: ?*FigDocument = null;
@@ -1402,6 +1434,7 @@ fn keySeg(s: []const u8) FigPathSegment {
 }
 
 test "editor c abi insert + source round-trip" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src = "a: 1\nb: 2\n";
     var out_ed: ?*FigEditor = null;
     try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &out_ed));
@@ -1418,6 +1451,7 @@ test "editor c abi insert + source round-trip" {
 }
 
 test "editor c abi accepts empty input as an empty document" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     var out_ed: ?*FigEditor = null;
     // Null pointer + zero length is a valid empty document.
     try std.testing.expectEqual(FigStatus.ok, fig_editor_create(null, 0, @intFromEnum(FigFormat.yaml), &out_ed));
@@ -1434,6 +1468,7 @@ test "editor c abi accepts empty input as an empty document" {
 }
 
 test "frontmatter c abi preserves fences and body" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
@@ -1461,6 +1496,7 @@ fn figStr(s: []const u8) FigStr {
 }
 
 test "frontmatter c abi reorder keys preserves comments, fences, body" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\ntitle: Hi\n# keep\ntags:\n- x\nauthor: me\n---\n# Body\ntext\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
@@ -1479,6 +1515,7 @@ test "frontmatter c abi reorder keys preserves comments, fences, body" {
 }
 
 test "frontmatter c abi move key preserves fences and body" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\na: 1\nb: 2\nc: 3\n---\nbody\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
@@ -1495,6 +1532,7 @@ test "frontmatter c abi move key preserves fences and body" {
 }
 
 test "frontmatter c abi reorder items in a block sequence value" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\ntags:\n- x\n- y\n- z\n---\nbody\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
@@ -1511,6 +1549,7 @@ test "frontmatter c abi reorder items in a block sequence value" {
 }
 
 test "frontmatter c abi move item in a flow sequence value" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\ntags: [x, y, z]\n---\nbody\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
@@ -1579,8 +1618,10 @@ test "value c abi builds and serializes to multiple formats" {
     try std.testing.expectEqualStrings("{\n  \"name\": \"fig\",\n  \"nums\": [\n    1,\n    2\n  ]\n}\n", ptr[0..len]);
 
     // Same value, different format — the borrowed bytes are refreshed in place.
-    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.yaml), &ptr, &len));
-    try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
+    if (comptime build_options.lang_yaml) {
+        try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.yaml), &ptr, &len));
+        try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
+    }
 }
 
 test "value c abi maps an unrepresentable value to unsupported_format" {
