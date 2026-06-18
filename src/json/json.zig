@@ -8,7 +8,7 @@ pub const Printer = @import("printer.zig");
 pub const Type = enum {
     JSON,
     JSONC,
-    // TODO: JSON5
+    JSON5,
 };
 
 pub const Language = struct {

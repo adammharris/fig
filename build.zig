@@ -6,6 +6,7 @@ pub fn build(b: *std.Build) void {
     const strip = b.option(bool, "strip", "Strip debug information") orelse (optimize == .ReleaseSmall);
     const resolved_target = target.result;
     const run_conformance = b.option(bool, "json-conformance", "Run JSON conformance tests") orelse false;
+    const run_json5_conformance = b.option(bool, "json5-conformance", "Run JSON5 conformance tests") orelse false;
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
     const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
@@ -21,6 +22,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
+    options.addOption(bool, "json5_conformance", run_json5_conformance);
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
     options.addOption(bool, "xml_conformance", run_xml_conformance);
@@ -188,6 +190,22 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| gen_toml_run.addArgs(args);
     const gen_toml_step = b.step("gen-toml-conformance", "Vendor the toml-test corpus");
     gen_toml_step.dependOn(&gen_toml_run.step);
+
+    // Dev tool: vendor the json5/json5-tests corpus into testdata/json5/.
+    //   zig build gen-json5-conformance -- <path-to-json5-tests> [<fig-root>]
+    const gen_json5 = b.addExecutable(.{
+        .name = "gen_json5_conformance",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/gen_json5_conformance.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "fig", .module = mod }},
+        }),
+    });
+    const gen_json5_run = b.addRunArtifact(gen_json5);
+    if (b.args) |args| gen_json5_run.addArgs(args);
+    const gen_json5_step = b.step("gen-json5-conformance", "Vendor the json5-tests corpus");
+    gen_json5_step.dependOn(&gen_json5_run.step);
 
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")

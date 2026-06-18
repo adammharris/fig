@@ -37,6 +37,9 @@ pub const Kind = enum {
     number,
     comment,
     whitespace,
+    /// JSON5 only: an unquoted ECMAScript IdentifierName. Used as an object key,
+    /// or as a value when it spells `Infinity` / `NaN`.
+    identifier,
 
     /// Find length of token kind. Returns null for variable-length tokens.
     pub fn len(self: Kind) ?usize {
@@ -69,7 +72,32 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
         self.index = 3;
     }
 
+    const json5 = self.kind == JsonFormat.JSON5;
     while (self.char()) |c| {
+        // JSON5 widens the alphabet: unquoted identifier keys (and the bare
+        // `Infinity`/`NaN` values), single-quoted strings, a leading `+` or `.`
+        // on numbers, and the extra ES whitespace (vertical tab, form feed).
+        if (json5) {
+            if (isIdentStart(c)) {
+                try self.addToken(try self.identifierOrKeyword());
+                continue;
+            }
+            switch (c) {
+                '\'' => {
+                    try self.addToken(try self.string('\''));
+                    continue;
+                },
+                '+', '.' => {
+                    try self.addToken(try self.number());
+                    continue;
+                },
+                0x0b, 0x0c => {
+                    try self.addToken(try self.getWhitespace());
+                    continue;
+                },
+                else => {},
+            }
+        }
         try self.addToken(switch (c) {
             '{' => .init(.open_brace, .init(self.index, self.index + 1)),
             '}' => .init(.close_brace, .init(self.index, self.index + 1)),
@@ -80,7 +108,7 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
             't' => try self.findLiteral(.true_),
             'f' => try self.findLiteral(.false_),
             'n' => try self.findLiteral(.null_),
-            '"' => try self.string(),
+            '"' => try self.string('"'),
             '/' => try self.comment(),
             '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-' => try self.number(),
             ' ', '\t', '\n', '\r' => try self.getWhitespace(),
@@ -152,6 +180,37 @@ fn isDigit(c: u8) bool {
     return c >= '0' and c <= '9';
 }
 
+/// ASCII subset of an ECMAScript IdentifierStart (`$`, `_`, letters). Unicode and
+/// `\u` escapes in identifiers are out of scope (the suite's `todo/` cases).
+fn isIdentStart(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_' or c == '$';
+}
+
+fn isIdentPart(c: u8) bool {
+    return isIdentStart(c) or isDigit(c);
+}
+
+/// Scan a run of identifier characters, classifying the three reserved value
+/// keywords (`true`/`false`/`null`) into their dedicated tokens and everything
+/// else (`Infinity`, `NaN`, and bare object keys) into an `identifier` token.
+fn identifierOrKeyword(self: *Tokenizer) TokenizeError!Token {
+    const start = self.index;
+    while (self.char()) |c| {
+        if (!isIdentPart(c)) break;
+        self.index += 1;
+    }
+    const word = self.str[start..self.index];
+    const kind: Token.Kind = if (std.mem.eql(u8, word, "true"))
+        .true_
+    else if (std.mem.eql(u8, word, "false"))
+        .false_
+    else if (std.mem.eql(u8, word, "null"))
+        .null_
+    else
+        .identifier;
+    return .init(kind, .init(start, self.index));
+}
+
 fn isHexDigit(c: u8) bool {
     return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
 }
@@ -163,20 +222,30 @@ fn isHexDigit(c: u8) bool {
 /// Collects all the bytes of a string and returns a JsonToken.string
 /// Never returns null, but can be an empty string.
 /// Respects escaped values.
-fn string(self: *Tokenizer) TokenizeError!Token {
+fn string(self: *Tokenizer, delimiter: u8) TokenizeError!Token {
+    const json5 = self.kind == JsonFormat.JSON5;
     const start = self.index;
-    self.index += 1; // skip first `"`
+    self.index += 1; // skip opening quote
 
     while (self.char()) |c| {
+        if (c == delimiter) { // Closing quote
+            self.index += 1;
+            return .init(.string, .init(start, self.index));
+        }
         switch (c) {
-            '"' => { // Closing quote
-                self.index += 1; // skip final `"`
-                const end = self.index;
-                return .init(.string, .init(start, end));
-            },
             '\\' => { // Escape a character
                 self.index += 1; // skip backslash
                 const escaped = self.char() orelse return TokenizeError.UnclosedString;
+                if (json5) {
+                    // JSON5 accepts any escape: the JSON set, plus `\x`, `\v`,
+                    // `\0`, identity escapes (`\'`), and line continuations
+                    // (`\` + LF/CR/CRLF). Validation/decoding is deferred to the
+                    // parser; here we only need to consume the escaped unit so a
+                    // `\'` or `\<newline>` does not terminate the string.
+                    self.index += 1;
+                    if (escaped == '\r' and self.char() == '\n') self.index += 1;
+                    continue;
+                }
                 switch (escaped) {
                     // Valid escapes: quote, backslash, whitespace
                     '"', '\\', '/', 'b', 'f', 'n', 'r', 't' => {
@@ -205,6 +274,7 @@ fn string(self: *Tokenizer) TokenizeError!Token {
 /// Negative, decimal, exponent
 /// Checks for leading zero as well.
 fn number(self: *Tokenizer) TokenizeError!Token {
+    if (self.kind == JsonFormat.JSON5) return self.numberJson5();
     const start = self.index;
 
     // Check for negativity
@@ -259,6 +329,92 @@ fn number(self: *Tokenizer) TokenizeError!Token {
     return .init(.number, .init(start, self.index));
 }
 
+/// JSON5 number: optional `+`/`-` sign, then one of
+///   * `Infinity` / `NaN`              (non-finite; the parser lifts these to an
+///                                      extended `number_special` node)
+///   * `0x`-prefixed hexadecimal integer
+///   * a decimal with an optional leading or trailing `.` and optional exponent
+/// Leading zeros on a decimal integer stay illegal (no octal), matching JSON.
+fn numberJson5(self: *Tokenizer) TokenizeError!Token {
+    const start = self.index;
+
+    if (self.char() == '+' or self.char() == '-') self.index += 1;
+
+    if (self.matches("Infinity")) {
+        self.index += "Infinity".len;
+        return .init(.number, .init(start, self.index));
+    }
+    if (self.matches("NaN")) {
+        self.index += "NaN".len;
+        return .init(.number, .init(start, self.index));
+    }
+
+    // Hexadecimal integer: `0x`/`0X` then at least one hex digit.
+    if (self.char() == '0' and (self.peek(1) == 'x' or self.peek(1) == 'X')) {
+        self.index += 2;
+        const hex_start = self.index;
+        while (self.char()) |c| {
+            if (!isHexDigit(c)) break;
+            self.index += 1;
+        }
+        if (self.index == hex_start) return TokenizeError.UnexpectedToken; // bare `0x`
+        return .init(.number, .init(start, self.index));
+    }
+
+    var digits_seen = false;
+
+    // Integer part. A leading zero may not be followed by another digit (octal).
+    if (self.char() == '0') {
+        self.index += 1;
+        digits_seen = true;
+        if (self.char()) |c| if (isDigit(c)) return TokenizeError.LeadingZero;
+    } else {
+        while (self.char()) |c| {
+            if (!isDigit(c)) break;
+            self.index += 1;
+            digits_seen = true;
+        }
+    }
+
+    // Fractional part. Leading (`.5`) and trailing (`5.`) points are both legal.
+    if (self.char() == '.') {
+        self.index += 1;
+        while (self.char()) |c| {
+            if (!isDigit(c)) break;
+            self.index += 1;
+            digits_seen = true;
+        }
+    }
+
+    // A lone `.` (or sign with no digits at all) is not a number.
+    if (!digits_seen) return TokenizeError.UnexpectedToken;
+
+    // Exponent.
+    if (self.char()) |c| {
+        if (c == 'e' or c == 'E') {
+            self.index += 1;
+            if (self.char()) |sign| {
+                if (sign == '+' or sign == '-') self.index += 1;
+            }
+            const exp_start = self.index;
+            while (self.char()) |d| {
+                if (!isDigit(d)) break;
+                self.index += 1;
+            }
+            if (self.index == exp_start) return TokenizeError.UnexpectedEndOfInput;
+        }
+    }
+
+    return .init(.number, .init(start, self.index));
+}
+
+/// Look ahead `n` bytes from the current index without consuming.
+fn peek(self: *const Tokenizer, n: usize) ?u8 {
+    const i = self.index + n;
+    if (i >= self.str.len) return null;
+    return self.str[i];
+}
+
 /// Collects all bytes until arriving at a newline
 /// Never returns null, but can be empty
 fn comment(self: *Tokenizer) TokenizeError!Token {
@@ -274,7 +430,9 @@ fn comment(self: *Tokenizer) TokenizeError!Token {
         '/' => { // Single line comment
             self.index += 2;
             while (self.char()) |c| {
-                if (c == '\n') break;
+                // A line comment ends at any line terminator. JSON5/ES allow a
+                // bare CR (and CRLF) to close it, not just LF.
+                if (c == '\n' or c == '\r') break;
                 self.index += 1;
             }
             return .init(.comment, .init(start, self.index));

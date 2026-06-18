@@ -456,6 +456,7 @@ fn figExtKindOf(kind: AST.Node.Kind.Extended.ExtKind) FigExtKind {
         .local_time => .local_time,
         .enum_literal => .enum_literal,
         .char_literal => .char_literal,
+        .number_special => .number_special,
     };
 }
 
@@ -1209,6 +1210,7 @@ pub const FigExtKind = enum(c_int) {
     local_time = 3,
     enum_literal = 4,
     char_literal = 5,
+    number_special = 6,
 };
 
 const ValueHandle = struct {
@@ -1232,6 +1234,7 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
         @intFromEnum(FigExtKind.local_time) => .local_time,
         @intFromEnum(FigExtKind.enum_literal) => .enum_literal,
         @intFromEnum(FigExtKind.char_literal) => .char_literal,
+        @intFromEnum(FigExtKind.number_special) => .number_special,
         else => null,
     };
 }

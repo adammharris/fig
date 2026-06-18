@@ -196,7 +196,20 @@ fn writeExtended(w: *Writer, ext: AST.Node.Kind.Extended) Error!void {
         .offset_datetime, .local_datetime, .local_date, .local_time => try w.writeAll(ext.text),
         .enum_literal => try writeBasicString(w, ext.text),
         .char_literal => try w.writeAll(ext.text),
+        // JSON5 `Infinity`/`NaN` map onto TOML's native lowercase float forms.
+        .number_special => try w.writeAll(tomlSpecial(ext.text)),
     }
+}
+
+/// Map a JSON5 non-finite lexeme (`Infinity`, `-Infinity`, `+Infinity`, `NaN`,
+/// `-NaN`, `+NaN`) to its TOML float spelling (`inf`/`-inf`/`+inf`/`nan`).
+fn tomlSpecial(text: []const u8) []const u8 {
+    if (std.mem.endsWith(u8, text, "NaN")) {
+        return if (text.len > 0 and text[0] == '-') "-nan" else if (text.len > 0 and text[0] == '+') "+nan" else "nan";
+    }
+    if (std.mem.startsWith(u8, text, "-")) return "-inf";
+    if (std.mem.startsWith(u8, text, "+")) return "+inf";
+    return "inf";
 }
 
 // ── Keys and strings ────────────────────────────────────────────────────────

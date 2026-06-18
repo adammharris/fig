@@ -123,6 +123,10 @@ pub const Node = struct {
                 local_time,
                 enum_literal,
                 char_literal,
+                /// A non-finite JSON5 number (`Infinity`, `-Infinity`, `NaN`).
+                /// `text` is the source lexeme verbatim, sign included. No JSON
+                /// number can hold these, so they ride in an extended scalar.
+                number_special,
             };
             pub fn eql(self: Extended, other: Extended) bool {
                 return self.kind == other.kind and util.eql(u8, self.text, other.text);

@@ -62,15 +62,19 @@ fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
         // Only TOML lacks a null. JSON/YAML/ZON all have one.
         .null_ => target == .toml,
         .extended => |e| switch (target) {
-            // TOML has the four datetimes natively; enum/char it does not.
+            // TOML has the four datetimes and inf/nan floats natively;
+            // enum/char it does not.
             .toml => switch (e.kind) {
                 .offset_datetime, .local_datetime, .local_date, .local_time => false,
+                .number_special => false,
                 .enum_literal, .char_literal => true,
             },
-            // ZON has enum and char literals natively; datetimes it does not.
+            // ZON has enum and char literals natively; datetimes and the
+            // non-finite floats it does not.
             .zon => switch (e.kind) {
                 .enum_literal, .char_literal => false,
                 .offset_datetime, .local_datetime, .local_date, .local_time => true,
+                .number_special => true,
             },
             // Neither JSON nor YAML's core schema has any of these.
             .json, .yaml => true,
