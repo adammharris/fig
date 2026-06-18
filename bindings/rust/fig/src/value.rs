@@ -7,11 +7,57 @@
 //! and the editor's typed methods build a `Value` from any `Serialize` type
 //! (see [`crate::ser`]); without it, callers construct `Value` directly.
 
+use std::os::raw::c_int;
 use std::ptr::{self, NonNull};
 
 use crate::Format;
 use crate::error::Error;
 use crate::ffi;
+
+/// The kind of a format-specific [`Value::Extended`] scalar. Mirrors the core's
+/// `ExtKind` and the C ABI's `FigExtKind`; the discriminants match that ABI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExtKind {
+    /// TOML offset date-time, e.g. `1979-05-27T07:32:00Z`.
+    OffsetDateTime,
+    /// TOML local date-time, e.g. `1979-05-27T07:32:00`.
+    LocalDateTime,
+    /// TOML local date, e.g. `1979-05-27`.
+    LocalDate,
+    /// TOML local time, e.g. `07:32:00`.
+    LocalTime,
+    /// ZON enum literal, e.g. `.foo` (text is the bare name, without the dot).
+    EnumLiteral,
+    /// ZON character literal, e.g. `'a'` (text is the decimal codepoint).
+    CharLiteral,
+}
+
+impl ExtKind {
+    /// The C ABI enumerator (`FigExtKind`) for this kind.
+    fn to_c(self) -> c_int {
+        match self {
+            ExtKind::OffsetDateTime => 0,
+            ExtKind::LocalDateTime => 1,
+            ExtKind::LocalDate => 2,
+            ExtKind::LocalTime => 3,
+            ExtKind::EnumLiteral => 4,
+            ExtKind::CharLiteral => 5,
+        }
+    }
+
+    /// Map a C ABI `FigExtKind` back to an [`ExtKind`], or `None` if unknown.
+    pub(crate) fn from_c(kind: c_int) -> Option<Self> {
+        Some(match kind {
+            0 => ExtKind::OffsetDateTime,
+            1 => ExtKind::LocalDateTime,
+            2 => ExtKind::LocalDate,
+            3 => ExtKind::LocalTime,
+            4 => ExtKind::EnumLiteral,
+            5 => ExtKind::CharLiteral,
+            _ => return None,
+        })
+    }
+}
 
 /// An owned, format-independent value tree.
 #[derive(Clone, Debug, PartialEq)]
@@ -22,6 +68,14 @@ pub enum Value {
     Uint(u64),
     Float(f64),
     Str(String),
+    /// A format-specific scalar (TOML datetime, ZON enum/char literal) carried
+    /// verbatim. Produced by [`crate::Document::to_value`] when reading TOML/ZON,
+    /// and rendered back by [`Value::serialize`]. The serde path instead reads
+    /// these as plain strings/integers.
+    Extended {
+        kind: ExtKind,
+        text: String,
+    },
     Seq(Vec<Value>),
     /// Mapping entries, in order. Keys are conventionally strings; a non-string
     /// key serializes only to formats whose printer accepts one.
@@ -128,6 +182,9 @@ fn build(handle: *mut ffi::FigValue, value: &Value) -> Result<ffi::FigNodeId, Er
                 ffi::fig_value_number(handle, text.as_ptr(), text.len(), true, &mut id)
             }
             Value::Str(s) => ffi::fig_value_string(handle, s.as_ptr(), s.len(), &mut id),
+            Value::Extended { kind, text } => {
+                ffi::fig_value_extended(handle, kind.to_c(), text.as_ptr(), text.len(), &mut id)
+            }
             Value::Seq(items) => {
                 let ids = items
                     .iter()
@@ -360,6 +417,87 @@ mod tests {
         assert_eq!(
             v.serialize(Format::Yaml).unwrap(),
             "title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n"
+        );
+    }
+
+    // TOML datetimes read into `Value::Extended` and serialize back verbatim,
+    // instead of degrading to strings.
+    #[test]
+    #[cfg(feature = "toml")]
+    fn toml_datetimes_round_trip_as_extended() {
+        use crate::{Document, ExtKind, Format};
+        let src = "d = 2026-06-18\nt = 07:32:00\n";
+        let v = Document::parse(src.as_bytes(), Format::Toml)
+            .unwrap()
+            .to_value()
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Map(vec![
+                (
+                    "d".into(),
+                    Value::Extended {
+                        kind: ExtKind::LocalDate,
+                        text: "2026-06-18".into()
+                    }
+                ),
+                (
+                    "t".into(),
+                    Value::Extended {
+                        kind: ExtKind::LocalTime,
+                        text: "07:32:00".into()
+                    }
+                ),
+            ])
+        );
+        assert_eq!(v.serialize(Format::Toml).unwrap(), src);
+    }
+
+    // ZON enum and char literals read into `Value::Extended` (the char literal
+    // surfaces as an `int` kind at the ABI, but is recovered faithfully).
+    #[test]
+    #[cfg(feature = "zon")]
+    fn zon_literals_round_trip_as_extended() {
+        use crate::{Document, ExtKind, Format};
+        let v = Document::parse(b".{ .mode = .fast, .c = 'a' }", Format::Zon)
+            .unwrap()
+            .to_value()
+            .unwrap();
+        assert_eq!(
+            v,
+            Value::Map(vec![
+                (
+                    "mode".into(),
+                    Value::Extended {
+                        kind: ExtKind::EnumLiteral,
+                        text: "fast".into()
+                    }
+                ),
+                (
+                    "c".into(),
+                    Value::Extended {
+                        kind: ExtKind::CharLiteral,
+                        text: "97".into()
+                    }
+                ),
+            ])
+        );
+    }
+
+    // A directly-constructed extended value serializes via the existing write ABI.
+    #[test]
+    #[cfg(feature = "toml")]
+    fn constructed_extended_serializes() {
+        let v = Value::Map(vec![(
+            "when".into(),
+            Value::Extended {
+                kind: ExtKind::OffsetDateTime,
+                text: "1979-05-27T07:32:00Z".into(),
+            },
+        )]);
+        assert_eq!(
+            v.serialize(Format::Toml).unwrap(),
+            "when = 1979-05-27T07:32:00Z\n"
         );
     }
 }

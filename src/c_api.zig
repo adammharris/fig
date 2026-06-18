@@ -415,6 +415,50 @@ pub export fn fig_node_string(
     }
 }
 
+/// Recover the precise kind and text of a format-specific extended scalar (TOML
+/// datetime, ZON enum/char literal). Returns true and writes its `FigExtKind` to
+/// `out_kind` and source text to `out_ptr`/`out_len` when `node` is extended;
+/// otherwise returns false, leaving the out-params untouched.
+///
+/// `fig_node_kind` still reports these nodes as STRING (datetime / enum literal)
+/// or INT (char literal) for ABI compatibility, and `fig_node_string` /
+/// `fig_node_number` still yield their text; this accessor is the opt-in way to
+/// distinguish a true string/int from an extended scalar.
+pub export fn fig_node_extended(
+    doc: ?*const FigDocument,
+    node: FigNodeId,
+    out_kind: ?*c_int,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) bool {
+    const k = out_kind orelse return false;
+    const p = out_ptr orelse return false;
+    const l = out_len orelse return false;
+    const n = nodeAt(doc, node) orelse return false;
+    switch (n.kind) {
+        .extended => |ext| {
+            k.* = @intFromEnum(figExtKindOf(ext.kind));
+            p.* = ext.text.ptr;
+            l.* = ext.text.len;
+            return true;
+        },
+        else => return false,
+    }
+}
+
+/// Map an AST extended kind to its C ABI enumerator. The two enums carry the
+/// same cases in the same order; the explicit switch keeps them pinned together.
+fn figExtKindOf(kind: AST.Node.Kind.Extended.ExtKind) FigExtKind {
+    return switch (kind) {
+        .offset_datetime => .offset_datetime,
+        .local_datetime => .local_datetime,
+        .local_date => .local_date,
+        .local_time => .local_time,
+        .enum_literal => .enum_literal,
+        .char_literal => .char_literal,
+    };
+}
+
 // ======
 // EDITING
 // ======
@@ -1426,6 +1470,50 @@ test "parse c abi reads toml and zon" {
         defer fig_document_destroy(out_doc);
         const root = fig_document_root(out_doc);
         try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, root));
+    }
+}
+
+test "fig_node_extended recovers datetime and char-literal scalars" {
+    if (comptime !(build_options.lang_toml and build_options.lang_zon)) return error.SkipZigTest;
+
+    var kind: c_int = undefined;
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+
+    // TOML local date: kind still reports STRING; fig_node_extended recovers it.
+    {
+        var out_doc: ?*FigDocument = null;
+        const src = "d = 2026-06-18\n";
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.toml), &out_doc));
+        defer fig_document_destroy(out_doc);
+        const val = fig_keyvalue_value(out_doc, fig_node_first_child(out_doc, fig_document_root(out_doc)));
+        try std.testing.expectEqual(FigNodeKind.string, fig_node_kind(out_doc, val));
+        try std.testing.expect(fig_node_extended(out_doc, val, &kind, &ptr, &len));
+        try std.testing.expectEqual(@intFromEnum(FigExtKind.local_date), kind);
+        try std.testing.expectEqualStrings("2026-06-18", ptr[0..len]);
+    }
+
+    // ZON char literal: kind reports INT; fig_node_extended recovers the codepoint.
+    {
+        var out_doc: ?*FigDocument = null;
+        const src = ".{ .c = 'a' }";
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.zon), &out_doc));
+        defer fig_document_destroy(out_doc);
+        const val = fig_keyvalue_value(out_doc, fig_node_first_child(out_doc, fig_document_root(out_doc)));
+        try std.testing.expectEqual(FigNodeKind.int, fig_node_kind(out_doc, val));
+        try std.testing.expect(fig_node_extended(out_doc, val, &kind, &ptr, &len));
+        try std.testing.expectEqual(@intFromEnum(FigExtKind.char_literal), kind);
+        try std.testing.expectEqualStrings("97", ptr[0..len]);
+    }
+
+    // A plain string is not extended.
+    {
+        var out_doc: ?*FigDocument = null;
+        const src = "s = \"hi\"\n";
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.toml), &out_doc));
+        defer fig_document_destroy(out_doc);
+        const val = fig_keyvalue_value(out_doc, fig_node_first_child(out_doc, fig_document_root(out_doc)));
+        try std.testing.expect(!fig_node_extended(out_doc, val, &kind, &ptr, &len));
     }
 }
 

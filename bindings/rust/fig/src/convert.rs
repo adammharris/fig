@@ -33,6 +33,7 @@ fn kind_of(value: &Value) -> &'static str {
         Value::Int(_) | Value::Uint(_) => "integer",
         Value::Float(_) => "float",
         Value::Str(_) => "string",
+        Value::Extended { .. } => "extended scalar",
         Value::Seq(_) => "sequence",
         Value::Map(_) => "mapping",
     }

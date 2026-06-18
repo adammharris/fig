@@ -498,9 +498,7 @@ fn from_map_named(
     allow_flatten: bool,
 ) -> syn::Result<TokenStream2> {
     let infos = collect_named_fields(fields)?;
-    if !allow_flatten
-        && let Some(f) = infos.iter().find(|f| f.flatten)
-    {
+    if !allow_flatten && let Some(f) = infos.iter().find(|f| f.flatten) {
         return Err(syn::Error::new_spanned(
             f.ident,
             "`#[fig(flatten)]` is not supported inside enum variants yet",

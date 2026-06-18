@@ -80,6 +80,13 @@ unsafe extern "C" {
         out_ptr: *mut *const u8,
         out_len: *mut usize,
     ) -> bool;
+    pub fn fig_node_extended(
+        doc: *const FigDocument,
+        node: FigNodeId,
+        out_kind: *mut c_int,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> bool;
 }
 
 // ---- value construction + serialization ----
@@ -115,7 +122,6 @@ unsafe extern "C" {
         len: usize,
         out_id: *mut FigNodeId,
     ) -> FigStatus;
-    #[allow(dead_code)]
     pub fn fig_value_extended(
         value: *mut FigValue,
         kind: c_int,

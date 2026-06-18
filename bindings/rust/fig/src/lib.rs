@@ -15,12 +15,13 @@ mod de;
 #[cfg(feature = "serde")]
 mod ser;
 
+use std::os::raw::c_int;
 use std::ptr::NonNull;
 
 pub use editor::{Editor, Segment};
 pub use embed::{Embed, EmbedType};
 pub use error::Error;
-pub use value::Value;
+pub use value::{ExtKind, Value};
 
 #[cfg(feature = "derive")]
 pub use convert::{FromValue, ToValue};
@@ -98,6 +99,11 @@ impl Document {
     }
 
     fn node_to_value(&self, id: FigNodeId) -> Result<Value, Error> {
+        // A format-specific scalar masquerades as a string/int at the `kind`
+        // ABI; recover it faithfully here (the serde path keeps the string/int).
+        if let Some((kind, text)) = self.extended(id) {
+            return Ok(Value::Extended { kind, text });
+        }
         let kind = self.kind(id);
         match kind {
             FigNodeKind::Null => Ok(Value::Null),
@@ -188,6 +194,30 @@ impl Document {
     pub(crate) fn get_str(&self, node: FigNodeId) -> Option<Result<&str, Error>> {
         self.scalar_bytes(node, ffi::fig_node_string)
             .map(|bytes| std::str::from_utf8(bytes).map_err(|_| Error::Utf8))
+    }
+
+    /// If `node` is a format-specific extended scalar (TOML datetime, ZON
+    /// enum/char literal), recover its [`ExtKind`] and text; `None` otherwise.
+    /// Used only by the structural [`Document::to_value`] read — the serde path
+    /// reads these as plain strings/ints.
+    pub(crate) fn extended(&self, node: FigNodeId) -> Option<(ExtKind, String)> {
+        let mut kind: c_int = 0;
+        let mut ptr: *const u8 = std::ptr::null();
+        let mut len: usize = 0;
+        let ok = unsafe { ffi::fig_node_extended(self.ptr(), node, &mut kind, &mut ptr, &mut len) };
+        if !ok {
+            return None;
+        }
+        let ext = ExtKind::from_c(kind)?;
+        let text = if len == 0 {
+            String::new()
+        } else {
+            // Safety: on success the ABI guarantees `ptr` points to `len` bytes
+            // owned by the document, valid until our `Drop`.
+            let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+            std::str::from_utf8(bytes).ok()?.to_owned()
+        };
+        Some((ext, text))
     }
 
     /// Shared helper for the byte-returning scalar accessors. The returned

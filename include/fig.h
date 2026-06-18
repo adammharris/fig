@@ -95,6 +95,15 @@ bool fig_node_number(const FigDocument *doc, FigNodeId node,
 bool fig_node_string(const FigDocument *doc, FigNodeId node,
                      const uint8_t **out_ptr, size_t *out_len);
 
+// Format-specific extended scalar (TOML datetime, ZON enum/char literal).
+// Returns true and writes its FigExtKind to *out_kind and source text to
+// *out_ptr/*out_len when node is extended; otherwise returns false. Note that
+// fig_node_kind still reports such nodes as STRING (datetime / enum literal) or
+// INT (char literal), and fig_node_string/fig_node_number still yield the text;
+// use this accessor to tell a true string/int apart from an extended scalar.
+bool fig_node_extended(const FigDocument *doc, FigNodeId node, int *out_kind,
+                       const uint8_t **out_ptr, size_t *out_len);
+
 // ============================================================================
 // Editing (write path)
 //
