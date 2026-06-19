@@ -165,6 +165,122 @@ struct WithSkipIf {
     tags: Vec<String>,
 }
 
+// --- default = "path" ---------------------------------------------------------
+
+fn default_true() -> bool {
+    true
+}
+fn default_port() -> u16 {
+    8080
+}
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+struct WithDefaultFn {
+    #[fig(default = "default_true")]
+    enabled: bool,
+    #[fig(default = "default_port")]
+    port: u16,
+    #[fig(default)]
+    plain: u32,
+}
+
+#[test]
+fn default_path_calls_fn_for_missing_key() {
+    // All keys absent -> custom defaults (true/8080), bare default (0).
+    let parsed = WithDefaultFn::from_value(&Value::Map(vec![])).unwrap();
+    assert_eq!(
+        parsed,
+        WithDefaultFn {
+            enabled: true,
+            port: 8080,
+            plain: 0,
+        }
+    );
+    // Present values win over the defaults.
+    let present = WithDefaultFn::from_value(&Value::Map(vec![
+        (Value::Str("enabled".into()), Value::Bool(false)),
+        (Value::Str("port".into()), Value::Uint(3000)),
+        (Value::Str("plain".into()), Value::Uint(5)),
+    ]))
+    .unwrap();
+    assert_eq!(
+        present,
+        WithDefaultFn {
+            enabled: false,
+            port: 3000,
+            plain: 5,
+        }
+    );
+}
+
+// --- alias --------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, ToValue, FromValue)]
+struct WithAlias {
+    #[fig(alias = "old_name", alias = "legacy")]
+    new_name: String,
+}
+
+#[test]
+fn alias_accepts_old_keys_on_read() {
+    // Primary key wins.
+    let primary =
+        WithAlias::from_value(&Value::Map(vec![(Value::Str("new_name".into()), Value::Str("a".into()))]))
+            .unwrap();
+    assert_eq!(primary.new_name, "a");
+    // First alias accepted.
+    let old =
+        WithAlias::from_value(&Value::Map(vec![(Value::Str("old_name".into()), Value::Str("b".into()))]))
+            .unwrap();
+    assert_eq!(old.new_name, "b");
+    // Second alias accepted.
+    let legacy =
+        WithAlias::from_value(&Value::Map(vec![(Value::Str("legacy".into()), Value::Str("c".into()))]))
+            .unwrap();
+    assert_eq!(legacy.new_name, "c");
+    // ToValue always writes the primary key.
+    assert_eq!(map_keys(&primary.to_value()), vec!["new_name"]);
+}
+
+// --- deserialize_with ---------------------------------------------------------
+
+/// Coerce a scalar (int/bool/string) to its string form; null/absent -> None.
+fn lenient_opt_string(value: &Value) -> Result<Option<String>, fig::Error> {
+    Ok(match value {
+        Value::Null => None,
+        Value::Str(s) => Some(s.clone()),
+        Value::Int(i) => Some(i.to_string()),
+        Value::Uint(u) => Some(u.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        other => return Err(fig::Error::Message(format!("not a scalar: {other:?}"))),
+    })
+}
+
+#[derive(Debug, PartialEq, FromValue)]
+struct WithDeserializeWith {
+    #[fig(default, deserialize_with = "lenient_opt_string")]
+    label: Option<String>,
+}
+
+#[test]
+fn deserialize_with_coerces_present_value() {
+    // Integer scalar coerced to string.
+    let from_int =
+        WithDeserializeWith::from_value(&Value::Map(vec![(Value::Str("label".into()), Value::Int(42))]))
+            .unwrap();
+    assert_eq!(from_int.label.as_deref(), Some("42"));
+    // Absent key -> default (None), hook not called.
+    let absent = WithDeserializeWith::from_value(&Value::Map(vec![])).unwrap();
+    assert_eq!(absent.label, None);
+    // Explicit null -> None via the hook.
+    let null = WithDeserializeWith::from_value(&Value::Map(vec![(
+        Value::Str("label".into()),
+        Value::Null,
+    )]))
+    .unwrap();
+    assert_eq!(null.label, None);
+}
+
 #[test]
 fn skip_serializing_if_omits_then_round_trips() {
     // Empty/None -> keys omitted entirely (not emitted as null).

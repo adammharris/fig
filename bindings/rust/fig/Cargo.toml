@@ -18,6 +18,9 @@ serde = ["dep:serde"]
 # generates straight-line conversions to/from the concrete `Value` tree (no
 # format-generic Visitor machinery), via the `fig-macros` proc-macro crate.
 derive = ["dep:fig-macros"]
+# `ToValue`/`FromValue` impls for `indexmap::IndexMap<String, T>`, preserving
+# insertion order (unlike the std map impls). Opt-in to keep the dep optional.
+indexmap = ["dep:indexmap"]
 # Per-language gates, mirroring `build.zig`'s `-D<lang>` options. Each is passed
 # through to the bundled `zig build` (see `build.rs`), so disabling a feature
 # compiles that format's parser/printer out of the linked `libfig.a` and shrinks
@@ -32,6 +35,7 @@ xml = []
 [dependencies]
 serde = { version = "1", optional = true }
 fig-macros = { workspace = true, optional = true }
+indexmap = { version = "2", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }

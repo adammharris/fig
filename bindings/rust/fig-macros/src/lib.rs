@@ -7,9 +7,12 @@
 //!
 //! # Structs
 //! Named-field, newtype (one field), and unit structs. Field attributes:
-//! `#[fig(rename = "..")]`, `#[fig(skip)]`, `#[fig(flatten)]`, `#[fig(default)]`,
+//! `#[fig(rename = "..")]`, `#[fig(skip)]`, `#[fig(flatten)]`, `#[fig(default)]`
+//! or `#[fig(default = "path")]` (call `path()` for a missing key),
 //! `#[fig(skip_serializing_if = "path")]` (omit from `ToValue` output when the
-//! predicate `fn(&Field) -> bool` is true). `Option<_>` fields are optional
+//! predicate `fn(&Field) -> bool` is true), and `#[fig(deserialize_with =
+//! "path")]` (parse a present value with `path(&fig::Value) -> Result<Field,
+//! fig::Error>`). `Option<_>` fields are optional
 //! (absent key → `None`). The container attribute `#[fig(rename_all = "..")]`
 //! applies a case rule (`camelCase`, `snake_case`, `PascalCase`, `kebab-case`,
 //! and their SCREAMING variants, plus `lowercase`/`UPPERCASE`) to every field
@@ -165,9 +168,19 @@ struct FieldAttrs {
     skip: bool,
     flatten: bool,
     default: bool,
+    /// `#[fig(default = "path")]` — call `path()` for a missing key instead of
+    /// `Default::default()`. Mirrors serde's `default = ".."`.
+    default_path: Option<syn::Path>,
     /// `#[fig(skip_serializing_if = "path")]` — predicate `fn(&Field) -> bool`
     /// that, when true, omits the field from `ToValue` output.
     skip_serializing_if: Option<syn::Path>,
+    /// `#[fig(deserialize_with = "path")]` — parse a present value with
+    /// `path(&fig::Value) -> Result<Field, fig::Error>` instead of the field
+    /// type's `FromValue`. Mirrors serde's `deserialize_with`.
+    deserialize_with: Option<syn::Path>,
+    /// `#[fig(alias = "old")]` — additional key(s) accepted when reading, tried
+    /// in order after the primary key. Mirrors serde's `alias`.
+    aliases: Vec<String>,
 }
 
 fn parse_field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
@@ -184,14 +197,24 @@ fn parse_field_attrs(attrs: &[syn::Attribute]) -> syn::Result<FieldAttrs> {
             } else if meta.path.is_ident("flatten") {
                 parsed.flatten = true;
             } else if meta.path.is_ident("default") {
-                parsed.default = true;
+                // Bare `default` (use `Default`) or `default = "path"` (call fn).
+                if let Ok(value) = meta.value() {
+                    parsed.default_path = Some(value.parse::<LitStr>()?.parse::<syn::Path>()?);
+                } else {
+                    parsed.default = true;
+                }
             } else if meta.path.is_ident("skip_serializing_if") {
                 let path = meta.value()?.parse::<LitStr>()?.parse::<syn::Path>()?;
                 parsed.skip_serializing_if = Some(path);
+            } else if meta.path.is_ident("deserialize_with") {
+                let path = meta.value()?.parse::<LitStr>()?.parse::<syn::Path>()?;
+                parsed.deserialize_with = Some(path);
+            } else if meta.path.is_ident("alias") {
+                parsed.aliases.push(meta.value()?.parse::<LitStr>()?.value());
             } else {
                 return Err(meta.error(
                     "unknown `fig` field attribute (expected: rename, skip, flatten, \
-                     default, skip_serializing_if)",
+                     default, skip_serializing_if, deserialize_with, alias)",
                 ));
             }
             Ok(())
@@ -304,11 +327,18 @@ struct FieldInfo<'a> {
     key: String,
     skip: bool,
     flatten: bool,
-    /// Whether a missing key falls back to `Default` instead of erroring.
+    /// Whether a missing key falls back to a default instead of erroring.
     use_default: bool,
+    /// `default = "path"` function to call for a missing key (overrides the
+    /// plain `Default::default()` fallback).
+    default_path: Option<syn::Path>,
     /// `skip_serializing_if` predicate path, omitting the field from output
     /// when it returns `true`.
     skip_serializing_if: Option<syn::Path>,
+    /// `deserialize_with` function to parse a present value.
+    deserialize_with: Option<syn::Path>,
+    /// Alternate keys accepted when reading (after the primary key).
+    aliases: Vec<String>,
 }
 
 /// Collect a struct/variant's named fields. `rename_all` (the container rule, if
@@ -335,7 +365,7 @@ fn collect_named_fields(
                 None => ident.to_string(),
             },
         };
-        let use_default = attrs.default || is_option(&field.ty);
+        let use_default = attrs.default || attrs.default_path.is_some() || is_option(&field.ty);
         infos.push(FieldInfo {
             ident,
             ty: &field.ty,
@@ -343,7 +373,10 @@ fn collect_named_fields(
             skip: attrs.skip,
             flatten: attrs.flatten,
             use_default,
+            default_path: attrs.default_path,
             skip_serializing_if: attrs.skip_serializing_if,
+            deserialize_with: attrs.deserialize_with,
+            aliases: attrs.aliases,
         });
     }
     Ok(infos)
@@ -718,15 +751,24 @@ fn from_map_named(
             };
         }
         let key = &f.key;
-        let missing = if f.use_default {
-            quote! { ::core::default::Default::default() }
-        } else {
-            let msg = format!("missing field `{key}` while building `{type_label}`");
-            quote! { return ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#msg))) }
+        let missing = match &f.default_path {
+            Some(path) => quote! { #path() },
+            None if f.use_default => quote! { ::core::default::Default::default() },
+            None => {
+                let msg = format!("missing field `{key}` while building `{type_label}`");
+                quote! { return ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#msg))) }
+            }
         };
+        let present = match &f.deserialize_with {
+            Some(path) => quote! { #path(__v)? },
+            None => quote! { <#ty as fig::FromValue>::from_value(__v)? },
+        };
+        let aliases = &f.aliases;
         quote! {
-            let #ident: #ty = match fig::map_get(__entries, #key) {
-                ::std::option::Option::Some(__v) => <#ty as fig::FromValue>::from_value(__v)?,
+            let #ident: #ty = match fig::map_get(__entries, #key)
+                #(.or_else(|| fig::map_get(__entries, #aliases)))*
+            {
+                ::std::option::Option::Some(__v) => #present,
                 ::std::option::Option::None => #missing,
             };
         }

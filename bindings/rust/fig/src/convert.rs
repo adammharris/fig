@@ -197,6 +197,31 @@ impl FromValue for String {
     }
 }
 
+// --- Char ---------------------------------------------------------------------
+// Chars travel as single-character strings (matching serde).
+
+impl ToValue for char {
+    fn to_value(&self) -> Value {
+        Value::Str(self.to_string())
+    }
+}
+impl FromValue for char {
+    fn from_value(value: &Value) -> Result<Self, Error> {
+        match value {
+            Value::Str(s) => {
+                let mut chars = s.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => Ok(c),
+                    _ => Err(Error::Message(format!(
+                        "expected a single-character string, found {s:?}"
+                    ))),
+                }
+            }
+            other => Err(type_err("char (single-character string)", other)),
+        }
+    }
+}
+
 // --- Paths --------------------------------------------------------------------
 // Paths travel as strings (matching serde). `ToValue` is lossy for non-UTF-8
 // paths; `FromValue` accepts any string.
@@ -299,3 +324,10 @@ macro_rules! string_map_impls {
     )*};
 }
 string_map_impls!(BTreeMap, HashMap);
+
+// `IndexMap` keeps insertion order — important for round-tripping frontmatter.
+// Gated behind the `indexmap` feature so the dependency is opt-in.
+#[cfg(feature = "indexmap")]
+use indexmap::IndexMap;
+#[cfg(feature = "indexmap")]
+string_map_impls!(IndexMap);
