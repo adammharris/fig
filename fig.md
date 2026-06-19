@@ -58,3 +58,7 @@ Not licensed for now. Please contact me at amh421@icloud.com if you would like t
 **Credits**
 
 I took the JSON test suite at `testdata/json` from [Nicolas Seriot's JSONTestSuite repository](https://github.com/nst/JSONTestSuite). I'm grateful that it is licensed under the MIT license, so I am allowed to use it for `fig`. A copy of the license is included in this repository at `testdata/json/LICENSE`.
+
+Likewise, test suite licenses are included for JSON5, TOML, and YAML. I am thankful for each of them.
+
+I am also thankful for the `toml-edit` Rust crate, which provided inspiration for the complex structural edits required by any format-preserving TOML editor.
