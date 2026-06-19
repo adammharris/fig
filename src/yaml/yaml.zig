@@ -26,3 +26,13 @@ pub const Language = struct {
     pub const materialize = Materialize.materialize;
     pub const TagMode = Materialize.TagMode;
 };
+
+// Test discovery: importing `yaml.zig` (from root.zig) pulls in every YAML
+// submodule's tests, so the module owns its own test surface. The conformance
+// suite is build-option-gated and stays in root.zig.
+test {
+    _ = @import("tokenizer.zig");
+    _ = @import("parser.zig");
+    _ = @import("printer.zig");
+    _ = @import("materialize.zig");
+}

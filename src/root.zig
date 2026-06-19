@@ -13,20 +13,14 @@ pub const Lossless = @import("lossless.zig");
 pub const deserialize = @import("deserialize.zig");
 
 test {
-    _ = @import("json/tokenizer.zig");
-    _ = @import("json/parser.zig");
-    _ = @import("json/printer.zig");
-    _ = @import("yaml/tokenizer.zig");
-    _ = @import("yaml/parser.zig");
-    _ = @import("yaml/printer.zig");
-    _ = @import("yaml/materialize.zig");
-    _ = @import("toml/tokenizer.zig");
-    _ = @import("toml/parser.zig");
-    _ = @import("toml/printer.zig");
-    _ = @import("zon/parser.zig");
-    _ = @import("zon/printer.zig");
-    _ = @import("xml/tokenizer.zig");
-    _ = @import("xml/parser.zig");
+    // Each language module's own `test {}` block pulls in its submodules' tests,
+    // so root only imports the module entry points. Build-option-gated
+    // conformance suites stay enumerated below.
+    _ = @import("json/json.zig");
+    _ = @import("yaml/yaml.zig");
+    _ = @import("toml/toml.zig");
+    _ = @import("zon/zon.zig");
+    _ = @import("xml/xml.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");

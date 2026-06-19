@@ -35,3 +35,11 @@ pub const Language = struct {
         return error.WriteUnsupported;
     }
 };
+
+// Test discovery: importing `xml.zig` (from root.zig) pulls in every XML
+// submodule's tests, so the module owns its own test surface. The conformance
+// suite is build-option-gated and stays in root.zig.
+test {
+    _ = @import("tokenizer.zig");
+    _ = @import("parser.zig");
+}

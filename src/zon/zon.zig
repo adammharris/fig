@@ -21,3 +21,10 @@ pub const Language = struct {
     pub const print = Printer.print;
     pub const printNode = Printer.printNode;
 };
+
+// Test discovery: importing `zon.zig` (from root.zig) pulls in every ZON
+// submodule's tests, so the module owns its own test surface.
+test {
+    _ = @import("parser.zig");
+    _ = @import("printer.zig");
+}

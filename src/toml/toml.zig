@@ -24,3 +24,14 @@ pub const Language = struct {
     pub const print = Printer.print;
     pub const printNode = Printer.printNode;
 };
+
+// Test discovery for the TOML module: importing `toml.zig` (from root.zig) pulls
+// in every TOML submodule's tests, so the module owns its own test surface rather
+// than root.zig enumerating each file. `editor_helper.zig` holds the TOML editor
+// tests; conformance is gated by a build option and stays in root.zig.
+test {
+    _ = @import("tokenizer.zig");
+    _ = @import("parser.zig");
+    _ = @import("printer.zig");
+    _ = @import("editor_helper.zig");
+}
