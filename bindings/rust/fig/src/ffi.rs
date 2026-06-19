@@ -21,6 +21,10 @@ pub enum FigFormat {
     Yaml = 3,
     Toml = 4,
     Zon = 5,
+    // `Xml = 6` in the C ABI is reader-only and has no writable `Format`
+    // variant, so it is intentionally omitted here; the discriminant gap is
+    // deliberate to keep JSON5 at its stable ABI value.
+    Json5 = 7,
 }
 
 pub enum FigDocument {}

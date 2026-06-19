@@ -41,17 +41,19 @@ pub use ser::{to_string, to_value};
 
 use ffi::{FIG_NODE_NONE, FigNodeId, FigNodeKind};
 
-/// A config format. Parsing and editing support `Json`/`Jsonc`/`Yaml`;
+/// A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`;
 /// [`Value::serialize`] additionally supports `Toml`/`Zon`.
 ///
 /// Every variant is always present, but the non-JSON formats are gated by the
 /// crate features of the same name (`yaml`, `toml`, `zon`; all on by default).
 /// Disabling a feature compiles that format out of the bundled native library,
 /// so selecting it then fails with [`Error::UnsupportedFormat`] at runtime.
+/// (`Json`/`Jsonc`/`Json5` are always compiled in — they share the JSON core.)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     Json,
     Jsonc,
+    Json5,
     Yaml,
     Toml,
     Zon,
@@ -62,6 +64,7 @@ impl From<Format> for ffi::FigFormat {
         match format {
             Format::Json => ffi::FigFormat::Json,
             Format::Jsonc => ffi::FigFormat::Jsonc,
+            Format::Json5 => ffi::FigFormat::Json5,
             Format::Yaml => ffi::FigFormat::Yaml,
             Format::Toml => ffi::FigFormat::Toml,
             Format::Zon => ffi::FigFormat::Zon,

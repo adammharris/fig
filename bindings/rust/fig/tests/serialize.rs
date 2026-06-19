@@ -248,3 +248,28 @@ fn zon_compact_vs_pretty() {
         ".{\n    .name = \"Ada\",\n    .xs = .{\n        1,\n        2,\n    },\n}\n"
     );
 }
+
+#[test]
+fn json5_serializes_and_parses_back() {
+    // Proves `Format::Json5` is wired through both the writer and the reader, not
+    // just the editor: serialize emits JSON5 (bare identifier keys), and the
+    // JSON5 reader round-trips it back to the same logical value.
+    let value = map(vec![("host", "localhost".into()), ("port", 8080i64.into())]);
+
+    let text = value.serialize(Format::Json5).unwrap();
+    assert!(text.contains("host:"), "JSON5 keys are bare: {text:?}");
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct Cfg {
+        host: String,
+        port: i64,
+    }
+    let back: Cfg = fig::from_slice(text.as_bytes(), Format::Json5).unwrap();
+    assert_eq!(
+        back,
+        Cfg {
+            host: "localhost".into(),
+            port: 8080,
+        },
+    );
+}

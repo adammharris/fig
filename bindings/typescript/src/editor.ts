@@ -32,7 +32,7 @@ export class Editor extends Editable {
     super(handle, EDITOR_FNS, Format.Yaml);
   }
 
-  /** Open an editor over a copy of `input` in `format` (Json/Jsonc/Yaml).
+  /** Open an editor over a copy of `input` in `format` (Json/Jsonc/Json5/Yaml).
    *  Empty input is a valid empty document. */
   static open(input: string | Uint8Array, format: Format): Editor {
     const bytes = typeof input === "string" ? encoder.encode(input) : input;

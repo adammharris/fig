@@ -103,6 +103,36 @@ fn frontmatter_delete_then_read_back() {
 }
 
 #[test]
+fn json5_editor_replaces_value_preserving_comments_and_unquoted_keys() {
+    // JSON5 routes through the JSON editor in the JSON5 dialect. The edit splices
+    // only the `8080` value node; unquoted keys, single quotes, the `//` comments,
+    // and the trailing comma all stay byte-identical.
+    let src = "{\n  // server config\n  host: 'localhost',\n  port: 8080, // default\n}\n";
+    let mut ed = Editor::open(src.as_bytes(), Format::Json5).unwrap();
+    ed.replace(&[Segment::Key("port")], &9090).unwrap();
+    assert_eq!(
+        ed.source().unwrap(),
+        "{\n  // server config\n  host: 'localhost',\n  port: 9090, // default\n}\n",
+    );
+}
+
+#[test]
+fn json5_editor_delete_keeps_owned_line_comment_with_key() {
+    let src = "{\n  host: 'localhost',\n  // the listening port\n  port: 8080,\n}\n";
+    let mut ed = Editor::open(src.as_bytes(), Format::Json5).unwrap();
+    ed.delete(&[Segment::Key("port")]).unwrap();
+    assert_eq!(ed.source().unwrap(), "{\n  host: 'localhost',\n}\n");
+}
+
+#[test]
+fn json_editor_rejects_json5_only_syntax() {
+    // Sanity: the strict JSON dialect still refuses JSON5 input, so `Format::Json5`
+    // is a real, distinct selection and not just an alias.
+    assert!(Editor::open(b"{ host: 'localhost' }", Format::Json).is_err());
+    assert!(Editor::open(b"{ host: 'localhost' }", Format::Json5).is_ok());
+}
+
+#[test]
 fn json_frontmatter_edits_in_json() {
     // The same selector opens `;;;` JSON frontmatter; values serialize as JSON.
     let md = ";;;\n{\"title\": \"Hi\", \"draft\": true}\n;;;\n# Body\n";

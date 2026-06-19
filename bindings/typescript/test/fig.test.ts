@@ -143,6 +143,37 @@ test("Editor edits an empty document", () => {
   assert.equal(ed.source(), "k: v\n");
 });
 
+test("Editor edits JSON5, preserving unquoted keys and comments", () => {
+  // Raw-text edits are the JSON-family pattern (value rendering is YAML-shaped).
+  // The splice touches only the `8080` value; the `//` comments, single-quoted
+  // string, unquoted keys, and trailing comma stay byte-identical.
+  using ed = Editor.open(
+    "{\n  // server config\n  host: 'localhost',\n  port: 8080, // default\n}\n",
+    Format.Json5,
+  );
+  ed.replaceValueRaw(["port"], "9090");
+  assert.equal(
+    ed.source(),
+    "{\n  // server config\n  host: 'localhost',\n  port: 9090, // default\n}\n",
+  );
+});
+
+test("Editor deletes a JSON5 key, carrying its owned // comment", () => {
+  using ed = Editor.open(
+    "{\n  host: 'localhost',\n  // the listening port\n  port: 8080,\n}\n",
+    Format.Json5,
+  );
+  ed.delete(["port"]);
+  assert.equal(ed.source(), "{\n  host: 'localhost',\n}\n");
+});
+
+test("Editor rejects JSON5-only syntax under strict Json", () => {
+  assert.throws(
+    () => Editor.open("{ host: 'localhost' }", Format.Json),
+    (err: unknown) => err instanceof FigError && err.status === Status.ParseError,
+  );
+});
+
 test("Embed edits YAML frontmatter, fences and body intact", () => {
   using fm = Embed.frontmatter("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n");
   fm.insertValue([], "author", "me");

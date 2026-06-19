@@ -55,7 +55,7 @@ pub const FigStatus = enum(c_int) {
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
 /// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
-/// `json`/`jsonc`/`yaml` only (others return `unsupported_format`); the
+/// `json`/`jsonc`/`json5`/`yaml` only (others return `unsupported_format`); the
 /// serializer (`fig_value_serialize`) accepts `json`/`json5`/`yaml`/`toml`/`zon`
 /// and treats `jsonc` as `json`.
 pub const FigFormat = enum(c_int) {
@@ -67,8 +67,8 @@ pub const FigFormat = enum(c_int) {
     /// Reader-only: accepted by `fig_parse`; rejected by `fig_editor_*` and
     /// `fig_value_serialize` (no XML writer yet) with `unsupported_format`.
     xml = 6,
-    /// JSON5: read and written. Appended (not inserted) to keep the ABI values
-    /// of the existing members stable.
+    /// JSON5: read, written, and edited (via `fig_editor_*`). Appended (not
+    /// inserted) to keep the ABI values of the existing members stable.
     json5 = 7,
 };
 
@@ -133,6 +133,7 @@ pub export fn fig_parse(
     const fig_format: FigFormat = switch (format) {
         @intFromEnum(FigFormat.json) => .json,
         @intFromEnum(FigFormat.jsonc) => .jsonc,
+        @intFromEnum(FigFormat.json5) => .json5,
         @intFromEnum(FigFormat.yaml) => .yaml,
         @intFromEnum(FigFormat.toml) => .toml,
         @intFromEnum(FigFormat.zon) => .zon,
@@ -604,6 +605,7 @@ pub export fn fig_editor_create(
     const fig_format: FigFormat = switch (format) {
         @intFromEnum(FigFormat.json) => .json,
         @intFromEnum(FigFormat.jsonc) => .jsonc,
+        @intFromEnum(FigFormat.json5) => .json5,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
         else => return .unsupported_format,
     };
@@ -615,8 +617,13 @@ pub export fn fig_editor_create(
         .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
         .json => .{ .json = .{ .allocator = allocator } },
         .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
+        // JSON5 edits route through the same generic JSON editor, just in the
+        // JSON5 dialect (unquoted keys, trailing commas, `//` comments). The
+        // editor splices source in place, so all of that survives untouched
+        // outside the edited span.
+        .json5 => .{ .json = .{ .allocator = allocator, .format = .JSON5 } },
         // Filtered out by the format switch above; editing these is not yet wired.
-        .toml, .zon, .xml, .json5 => unreachable,
+        .toml, .zon, .xml => unreachable,
     };
 
     switch (handle.inner) {
@@ -1519,6 +1526,24 @@ test "parse c abi reads toml and zon" {
         const root = fig_document_root(out_doc);
         try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, root));
     }
+}
+
+test "parse c abi reads json5 and rejects it under strict json" {
+    // Regression: the `fig_parse` format switch once dropped `json5`, so the
+    // `.json5` reader arm was dead and every JSON5 parse returned
+    // `unsupported_format`. JSON5-only syntax (unquoted keys, trailing comma,
+    // `//` comment) must parse under `.json5` and fail under strict `.json`.
+    const src = "{\n  // c\n  host: 'localhost',\n  port: 8080,\n}\n";
+
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json5), &out_doc));
+    defer fig_document_destroy(out_doc);
+    const root = fig_document_root(out_doc);
+    try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, root));
+    try std.testing.expectEqual(@as(usize, 2), fig_node_child_count(out_doc, root));
+
+    var strict_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.parse_error, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json), &strict_doc));
 }
 
 test "fig_node_extended recovers datetime and char-literal scalars" {

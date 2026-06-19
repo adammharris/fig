@@ -13,6 +13,13 @@ pub fn Editor(comptime Language: type) type {
     return struct {
         const Self = @This();
 
+        // Which leading-comment syntax this language uses, so the owned-comment
+        // scan in delete/move (`commentBlockStart`) recognizes the right marker.
+        // JSON/JSONC/JSON5 use `//` and `/* */`; YAML and TOML use `#`. Plain
+        // JSON has no comments, but `.slashes` is harmless there since no `//`
+        // line can exist.
+        const comment_style: CommentStyle = if (Language == json.Language) .slashes else .hash;
+
         allocator: std.mem.Allocator,
         source: std.ArrayList(u8) = .empty,
         document: ?Document = null,
@@ -193,7 +200,8 @@ pub fn Editor(comptime Language: type) type {
 
         /// Delete the mapping entry at `path` (which must name a key). Removes the
         /// entry's full line(s) plus any owned leading comment block (a run of
-        /// `#` lines with no intervening blank line), leaving no blank gap.
+        /// comment lines — `#` for YAML/TOML, `//` or `/* */` for JSON5/JSONC —
+        /// with no intervening blank line), leaving no blank gap.
         pub fn deleteKey(self: *Self, path: []const AST.PathSegment) !void {
             const parsed = try self.getParsed();
             const node = parsed.ast.getNodeByPath(path) catch |err| {
@@ -218,7 +226,7 @@ pub fn Editor(comptime Language: type) type {
                 if (fns < source.len and source[fns] == '[') return error.CannotDeleteTable;
             }
             const line_start = lineStartBefore(source, span.start);
-            const del_start = commentBlockStart(source, line_start);
+            const del_start = commentBlockStart(source, line_start, comment_style);
             const del_end = lineEndAfter(source, span.end -| 1);
             try self.replaceAtSpan(Span.init(del_start, del_end), "");
         }
@@ -279,7 +287,7 @@ pub fn Editor(comptime Language: type) type {
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
-            const line_start = commentBlockStart(source, lineStartBefore(source, item_span.start));
+            const line_start = commentBlockStart(source, lineStartBefore(source, item_span.start), comment_style);
             const del_end = lineEndAfter(source, item_span.end -| 1);
             try self.replaceAtSpan(Span.init(line_start, del_end), "");
         }
@@ -310,9 +318,9 @@ pub fn Editor(comptime Language: type) type {
             if (dest.kind != .keyvalue) return error.NotAMapping;
             const source = self.source.items;
             try self.moveBlock(
-                entryBlockStart(source, parsed.span(src)),
+                entryBlockStart(source, parsed.span(src), comment_style),
                 entryBlockEnd(source, parsed.span(src)),
-                entryBlockStart(source, parsed.span(dest)),
+                entryBlockStart(source, parsed.span(dest), comment_style),
             );
         }
 
@@ -374,7 +382,7 @@ pub fn Editor(comptime Language: type) type {
                     else => return error.InvalidDocument,
                 };
                 try entry_keys.append(self.allocator, key);
-                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, parsed.span(cur)), .end = 0 });
+                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, parsed.span(cur), comment_style), .end = 0 });
                 last_end = entryBlockEnd(source, parsed.span(cur));
                 cur = parsed.ast.next(&cur) orelse break;
             }
@@ -434,7 +442,7 @@ pub fn Editor(comptime Language: type) type {
             var blocks: std.ArrayList(Block) = .empty;
             defer blocks.deinit(self.allocator);
             for (spans.items) |s| {
-                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, s), .end = 0 });
+                try blocks.append(self.allocator, .{ .start = entryBlockStart(source, s, comment_style), .end = 0 });
             }
             const last_end = entryBlockEnd(source, spans.items[spans.items.len - 1]);
             tileBlocks(blocks.items, last_end);
@@ -836,17 +844,45 @@ fn isFlow(source: []const u8, span: Span) bool {
     return i < source.len and (source[i] == '{' or source[i] == '[');
 }
 
-/// Grow `line_start` upward to absorb an owned comment block: a contiguous run
-/// of `#` comment lines immediately above, with no intervening blank line
-/// (trivia policy "comment-above-belongs-to-key"). A blank line or any
-/// non-comment content stops the scan.
-fn commentBlockStart(source: []const u8, line_start: usize) usize {
+/// Comment syntax for the owned-comment scan: `#` line comments (YAML/TOML) vs
+/// `//` line comments and `/* */` blocks (JSON5/JSONC).
+const CommentStyle = enum { hash, slashes };
+
+/// Grow `line_start` upward to absorb an entry's owned comment block: the
+/// contiguous run of comment lines immediately above, with no intervening blank
+/// line (trivia policy "comment-above-belongs-to-key"). A blank line or any
+/// non-comment content stops the scan. With `.slashes`, multi-line `/* ... */`
+/// blocks are walked as a unit so a delete/move carries the whole block, not
+/// just its closing line.
+fn commentBlockStart(source: []const u8, line_start: usize, style: CommentStyle) usize {
     var ls = line_start;
+    // `.slashes` only: set while scanning upward through the interior of a
+    // `/* ... */` block whose opener `/*` has not been reached yet.
+    var in_block = false;
     while (ls > 0) {
         const prev_start = lineStartBefore(source, ls - 1);
         const line = source[prev_start..ls];
         const trimmed = std.mem.trimStart(u8, std.mem.trimEnd(u8, line, "\r\n"), " \t");
-        if (trimmed.len > 0 and trimmed[0] == '#') {
+        const is_comment = switch (style) {
+            .hash => trimmed.len > 0 and trimmed[0] == '#',
+            .slashes => blk: {
+                if (in_block) {
+                    // Inside a block comment, moving up: every line belongs to it
+                    // until we reach the line bearing the `/*` opener.
+                    if (std.mem.indexOf(u8, trimmed, "/*") != null) in_block = false;
+                    break :blk true;
+                }
+                if (std.mem.startsWith(u8, trimmed, "//")) break :blk true;
+                // A line ending a `/* */` block: enter block-scan mode unless it is
+                // a self-contained single-line `/* ... */`.
+                if (std.mem.endsWith(u8, trimmed, "*/")) {
+                    if (!std.mem.startsWith(u8, trimmed, "/*")) in_block = true;
+                    break :blk true;
+                }
+                break :blk false;
+            },
+        };
+        if (is_comment) {
             ls = prev_start;
         } else break;
     }
@@ -856,8 +892,8 @@ fn commentBlockStart(source: []const u8, line_start: usize) usize {
 /// Start of a mapping entry's full block: its owned leading comment block
 /// (`commentBlockStart`) at the start of the key's line. Mirrors the span math
 /// `deleteKey` uses, factored out for move/reorder.
-fn entryBlockStart(source: []const u8, kv_span: Span) usize {
-    return commentBlockStart(source, lineStartBefore(source, kv_span.start));
+fn entryBlockStart(source: []const u8, kv_span: Span, style: CommentStyle) usize {
+    return commentBlockStart(source, lineStartBefore(source, kv_span.start), style);
 }
 
 /// End of a mapping entry's full block: just past the newline ending its last
@@ -1042,6 +1078,105 @@ test "simple value edit" {
 
 test "simple key edit" {
     try testEditor("[{\"hello\":\"world\"}]", &[_]AST.PathSegment{ .{ .index = 0 }, .{ .key = "hello" } }, .key, "\"greetings\"", "[{\"greetings\":\"world\"}]");
+}
+
+// --- JSON5 editing ---
+//
+// JSON5 is a dialect of the JSON language, so it routes through the same generic
+// editor. The editor splices source bytes in place (it never reprints), so every
+// JSON5-ism outside the edited span — unquoted keys, trailing commas, single
+// quotes, `//` and `/* */` comments — survives byte-for-byte. The owned-comment
+// scan on delete is `//`/`/* */`-aware so a deleted key carries its own comment.
+
+fn newJson5Editor(input: []const u8) !Editor(json.Language) {
+    var ed: Editor(json.Language) = .{ .allocator = std.testing.allocator, .format = .JSON5 };
+    try ed.init(input);
+    return ed;
+}
+
+fn expectJson5Source(ed: *const Editor(json.Language), expected: []const u8) !void {
+    errdefer log.err("actual:   \"{s}\"", .{ed.source.items});
+    errdefer log.err("expected: \"{s}\"", .{expected});
+    try std.testing.expectEqualStrings(expected, ed.source.items);
+}
+
+test "json5 value edit preserves unquoted keys, comments, trailing comma" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  // server config
+        \\  host: 'localhost',
+        \\  port: 8080, // default
+        \\}
+    );
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "port" }}, "9090");
+    try expectJson5Source(&ed,
+        \\{
+        \\  // server config
+        \\  host: 'localhost',
+        \\  port: 9090, // default
+        \\}
+    );
+}
+
+test "json5 key rename keeps it unquoted" {
+    var ed = try newJson5Editor("{ host: 'localhost', port: 8080 }");
+    defer ed.deinit();
+    try ed.replaceKeyAtPath(&.{.{ .key = "port" }}, "listen");
+    try expectJson5Source(&ed, "{ host: 'localhost', listen: 8080 }");
+}
+
+test "json5 delete key carries its owned // comment" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  host: 'localhost',
+        \\  // the listening port
+        \\  port: 8080,
+        \\}
+    );
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "port" }});
+    try expectJson5Source(&ed,
+        \\{
+        \\  host: 'localhost',
+        \\}
+    );
+}
+
+test "json5 delete key carries an owned /* */ block comment" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  host: 'localhost',
+        \\  /* the listening
+        \\     port number */
+        \\  port: 8080,
+        \\}
+    );
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "port" }});
+    try expectJson5Source(&ed,
+        \\{
+        \\  host: 'localhost',
+        \\}
+    );
+}
+
+test "json5 delete leaves an unrelated earlier comment intact" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  // host comment
+        \\  host: 'localhost',
+        \\  port: 8080,
+        \\}
+    );
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "port" }});
+    try expectJson5Source(&ed,
+        \\{
+        \\  // host comment
+        \\  host: 'localhost',
+        \\}
+    );
 }
 
 // --- TOML value/key replacement (point edits on contiguous spans) ---
