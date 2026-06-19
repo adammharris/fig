@@ -40,8 +40,15 @@ fn kind_of(value: &Value) -> &'static str {
 }
 
 /// A "wrong kind" error, e.g. expected a string but found a sequence.
-fn type_err(expected: &str, found: &Value) -> Error {
-    Error::Message(format!("expected {expected}, found {}", kind_of(found)))
+///
+/// `#[cold]`/`#[inline(never)]`: keeps the error-build code out of the many
+/// monomorphized integer/collection conversion paths that call it, and routes
+/// through the structured `TypeMismatch` variant so no `format!`/`String`
+/// machinery lands on these paths at all.
+#[cold]
+#[inline(never)]
+fn type_err(expected: &'static str, found: &Value) -> Error {
+    Error::type_mismatch(expected, kind_of(found))
 }
 
 /// Look up `name` in a mapping's entries, last-wins (so later duplicate keys
@@ -56,6 +63,35 @@ pub fn map_get<'a>(entries: &'a [(Value, Value)], name: &str) -> Option<&'a Valu
         Value::Str(s) if s == name => Some(v),
         _ => None,
     })
+}
+
+/// Extract a required field from a mapping's entries. Used by `#[derive(FromValue)]`
+/// for the common case (no alias / no `deserialize_with` / no custom default):
+/// the lookup-and-convert scaffold is compiled once per field *type* `T` and
+/// shared across every field of that type, instead of inlined at each site.
+#[doc(hidden)]
+pub fn field<T: FromValue>(
+    entries: &[(Value, Value)],
+    key: &'static str,
+    ty: &'static str,
+) -> Result<T, Error> {
+    match map_get(entries, key) {
+        Some(v) => T::from_value(v),
+        None => Err(Error::missing_field(key, ty)),
+    }
+}
+
+/// Like [`field`], but a missing key yields `T::default()` instead of an error.
+/// Covers `#[fig(default)]` and `Option<_>` fields (whose default is `None`).
+#[doc(hidden)]
+pub fn field_or_default<T: FromValue + Default>(
+    entries: &[(Value, Value)],
+    key: &str,
+) -> Result<T, Error> {
+    match map_get(entries, key) {
+        Some(v) => T::from_value(v),
+        None => Ok(T::default()),
+    }
 }
 
 // --- Passthrough --------------------------------------------------------------
@@ -139,9 +175,7 @@ macro_rules! int_from_value {
         impl FromValue for $t {
             fn from_value(value: &Value) -> Result<Self, Error> {
                 let n = as_i128(value).ok_or_else(|| type_err("integer", value))?;
-                <$t>::try_from(n).map_err(|_| {
-                    Error::Message(format!("{n} is out of range for {}", stringify!($t)))
-                })
+                <$t>::try_from(n).map_err(|_| Error::int_out_of_range(stringify!($t)))
             }
         }
     )*};
@@ -212,9 +246,7 @@ impl FromValue for char {
                 let mut chars = s.chars();
                 match (chars.next(), chars.next()) {
                     (Some(c), None) => Ok(c),
-                    _ => Err(Error::Message(format!(
-                        "expected a single-character string, found {s:?}"
-                    ))),
+                    _ => Err(Error::msg_static("expected a single-character string")),
                 }
             }
             other => Err(type_err("char (single-character string)", other)),
@@ -307,10 +339,7 @@ macro_rules! string_map_impls {
                             let key = match k {
                                 Value::Str(s) => s.clone(),
                                 other => {
-                                    return Err(Error::Message(format!(
-                                        "map key must be a string, found {}",
-                                        kind_of(other)
-                                    )));
+                                    return Err(type_err("string (map key)", other));
                                 }
                             };
                             out.insert(key, T::from_value(v)?);

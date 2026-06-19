@@ -751,12 +751,24 @@ fn from_map_named(
             };
         }
         let key = &f.key;
+
+        // Common case — no alias, no custom `deserialize_with`, no custom
+        // default path — routes through the shared `fig::field`/`field_or_default`
+        // helpers. The lookup/convert/error scaffold is then compiled once per
+        // field *type* and shared, instead of inlined at every field site (the
+        // bulk of large derived `from_value` bodies, e.g. `Command`).
+        if f.aliases.is_empty() && f.deserialize_with.is_none() && f.default_path.is_none() {
+            if f.use_default {
+                return quote! { let #ident: #ty = fig::field_or_default(__entries, #key)?; };
+            }
+            return quote! { let #ident: #ty = fig::field(__entries, #key, #type_label)?; };
+        }
+
         let missing = match &f.default_path {
             Some(path) => quote! { #path() },
             None if f.use_default => quote! { ::core::default::Default::default() },
             None => {
-                let msg = format!("missing field `{key}` while building `{type_label}`");
-                quote! { return ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#msg))) }
+                quote! { return ::core::result::Result::Err(fig::Error::missing_field(#key, #type_label)) }
             }
         };
         let present = match &f.deserialize_with {
@@ -775,13 +787,12 @@ fn from_map_named(
     });
 
     let field_names = infos.iter().map(|f| f.ident);
-    let expected_msg = format!("expected a mapping to build `{type_label}`");
 
     Ok(quote! {{
         let __entries = match #map_value {
             fig::Value::Map(__e) => __e,
             _ => return ::core::result::Result::Err(
-                fig::Error::Message(::std::string::String::from(#expected_msg)),
+                fig::Error::expected_mapping(#type_label),
             ),
         };
         let _ = &__entries;
@@ -813,17 +824,16 @@ fn build_variant(
             let idxs: Vec<usize> = (0..tys.len()).collect();
             let n = tys.len();
             let seq_msg = format!("expected a sequence for tuple variant `{label}`");
-            let len_msg = format!("expected {n} element(s) for `{label}`, found {{}}");
             Ok(quote! {{
                 let __items = match #value_expr {
                     fig::Value::Seq(__s) => __s,
                     _ => return ::core::result::Result::Err(
-                        fig::Error::Message(::std::string::String::from(#seq_msg)),
+                        fig::Error::msg_static(#seq_msg),
                     ),
                 };
                 if __items.len() != #n {
                     return ::core::result::Result::Err(
-                        fig::Error::Message(format!(#len_msg, __items.len())),
+                        fig::Error::wrong_seq_len(#label, #n, __items.len()),
                     );
                 }
                 ::core::result::Result::Ok(Self::#vident(
@@ -874,28 +884,27 @@ fn from_value_external(
             map_arms.push(quote! { #key => #body, });
         }
     }
-    let unknown = format!("unknown variant `{{}}` for enum `{enum_name}`");
     let expected = format!("expected a string or single-key mapping for enum `{enum_name}`");
     Ok(quote! {
         match value {
             fig::Value::Str(__s) => match __s.as_str() {
                 #(#unit_arms)*
-                __other => ::core::result::Result::Err(fig::Error::Message(format!(#unknown, __other))),
+                __other => ::core::result::Result::Err(fig::Error::unknown_variant(#enum_name, __other)),
             },
             fig::Value::Map(__entries) if __entries.len() == 1 => {
                 let (__k, __v) = &__entries[0];
                 let __name = match __k {
                     fig::Value::Str(__s) => __s.as_str(),
                     _ => return ::core::result::Result::Err(
-                        fig::Error::Message(::std::string::String::from("enum variant key must be a string")),
+                        fig::Error::msg_static("enum variant key must be a string"),
                     ),
                 };
                 match __name {
                     #(#map_arms)*
-                    __other => ::core::result::Result::Err(fig::Error::Message(format!(#unknown, __other))),
+                    __other => ::core::result::Result::Err(fig::Error::unknown_variant(#enum_name, __other)),
                 }
             }
-            _ => ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#expected))),
+            _ => ::core::result::Result::Err(fig::Error::msg_static(#expected)),
         }
     })
 }
@@ -910,7 +919,7 @@ fn tag_prologue(enum_name: &str, tag: &str) -> TokenStream2 {
         let __entries = match value {
             fig::Value::Map(__e) => __e,
             _ => return ::core::result::Result::Err(
-                fig::Error::Message(::std::string::String::from(#not_map)),
+                fig::Error::msg_static(#not_map),
             ),
         };
         let __tag = match __entries.iter().rev().find_map(|(__k, __v)| match __k {
@@ -919,10 +928,10 @@ fn tag_prologue(enum_name: &str, tag: &str) -> TokenStream2 {
         }) {
             ::std::option::Option::Some(fig::Value::Str(__s)) => __s.as_str(),
             ::std::option::Option::Some(_) => return ::core::result::Result::Err(
-                fig::Error::Message(::std::string::String::from(#tag_kind)),
+                fig::Error::msg_static(#tag_kind),
             ),
             ::std::option::Option::None => return ::core::result::Result::Err(
-                fig::Error::Message(::std::string::String::from(#missing_tag)),
+                fig::Error::msg_static(#missing_tag),
             ),
         };
     }
@@ -981,12 +990,11 @@ fn from_value_internal(
         arms.push(arm);
     }
     let prologue = tag_prologue(enum_name, tag);
-    let unknown = format!("unknown variant `{{}}` for enum `{enum_name}`");
     Ok(quote! {
         #prologue
         match __tag {
             #(#arms)*
-            __other => ::core::result::Result::Err(fig::Error::Message(format!(#unknown, __other))),
+            __other => ::core::result::Result::Err(fig::Error::unknown_variant(#enum_name, __other)),
         }
     })
 }
@@ -1013,7 +1021,7 @@ fn from_value_adjacent(
                     let __content_val = match __content {
                         ::std::option::Option::Some(__c) => __c,
                         ::std::option::Option::None => return ::core::result::Result::Err(
-                            fig::Error::Message(::std::string::String::from(#missing)),
+                            fig::Error::msg_static(#missing),
                         ),
                     };
                     #body
@@ -1022,7 +1030,6 @@ fn from_value_adjacent(
         }
     }
     let prologue = tag_prologue(enum_name, tag);
-    let unknown = format!("unknown variant `{{}}` for enum `{enum_name}`");
     Ok(quote! {
         #prologue
         let __content: ::std::option::Option<&fig::Value> =
@@ -1032,7 +1039,7 @@ fn from_value_adjacent(
             });
         match __tag {
             #(#arms)*
-            __other => ::core::result::Result::Err(fig::Error::Message(format!(#unknown, __other))),
+            __other => ::core::result::Result::Err(fig::Error::unknown_variant(#enum_name, __other)),
         }
     })
 }
@@ -1062,6 +1069,6 @@ fn from_value_untagged(data: &syn::DataEnum, enum_name: &str) -> syn::Result<Tok
     let none = format!("no variant of enum `{enum_name}` matched the value");
     Ok(quote! {
         #(#attempts)*
-        ::core::result::Result::Err(fig::Error::Message(::std::string::String::from(#none)))
+        ::core::result::Result::Err(fig::Error::msg_static(#none))
     })
 }

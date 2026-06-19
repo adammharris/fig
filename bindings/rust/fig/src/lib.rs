@@ -25,10 +25,11 @@ pub use value::{ExtKind, Value};
 
 #[cfg(feature = "derive")]
 pub use convert::{FromValue, ToValue};
-// Shared helper the derive macros call instead of inlining a lookup per field.
+// Shared helpers the derive macros call instead of inlining a lookup, convert,
+// and error per field.
 #[cfg(feature = "derive")]
 #[doc(hidden)]
-pub use convert::map_get;
+pub use convert::{field, field_or_default, map_get};
 // The derive macros share the trait names (trait vs. macro namespace), mirroring
 // `serde::Serialize`. Glob users get both with one import.
 #[cfg(feature = "derive")]
