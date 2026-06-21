@@ -370,6 +370,9 @@ fn link(out: *std.ArrayList(AST.Node), container: Id, last: *?Id, child: Id, com
 const testing = std.testing;
 const JsonParser = @import("json/parser.zig");
 const JsonPrinter = @import("json/printer.zig");
+// The native parser is the AST-literal syntax for tests whose subject isn't a
+// particular format (here: null-stripping), so they don't depend on JSON reading.
+const NativeParser = @import("native/parser.zig");
 const TomlParser = @import("toml/parser.zig");
 const TomlPrinter = @import("toml/printer.zig");
 const ZonParser = @import("zon/parser.zig");
@@ -468,7 +471,7 @@ test "lossyStrip drops nulls for a TOML target and reports paths" {
     defer a.deinit();
     const arena = a.allocator();
 
-    var ast = try JsonParser.parseAbstract(arena, "{\"a\": 1, \"b\": null, \"c\": [1, null, 2]}", .JSON);
+    var ast = try NativeParser.parseAbstract(arena, "{\"a\": 1, \"b\": null, \"c\": [1, null, 2]}");
     const result = try lossyStrip(arena, &ast, ast.root, .toml);
     try testing.expect(result.ast != null);
 
@@ -486,7 +489,7 @@ test "lossyStrip reports a bare-null root and yields no AST" {
     defer a.deinit();
     const arena = a.allocator();
 
-    var ast = try JsonParser.parseAbstract(arena, "null", .JSON);
+    var ast = try NativeParser.parseAbstract(arena, "null");
     const result = try lossyStrip(arena, &ast, ast.root, .toml);
     try testing.expect(result.ast == null);
     try testing.expectEqual(@as(usize, 1), result.dropped.len);
@@ -497,7 +500,7 @@ test "lossyStrip on a nested null reports a dotted path" {
     defer a.deinit();
     const arena = a.allocator();
 
-    var ast = try JsonParser.parseAbstract(arena, "{\"outer\": {\"inner\": null, \"keep\": 2}}", .JSON);
+    var ast = try NativeParser.parseAbstract(arena, "{\"outer\": {\"inner\": null, \"keep\": 2}}");
     const result = try lossyStrip(arena, &ast, ast.root, .toml);
     try testing.expect(result.ast != null);
     try testing.expectEqual(@as(usize, 1), result.dropped.len);

@@ -364,9 +364,11 @@ fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
 }
 
 test "prints YAML document" {
-    const Parser = @import("../json/parser.zig");
+    // Native is the AST-literal syntax here — this test's subject is YAML
+    // printing, not JSON reading.
+    const Parser = @import("../native/parser.zig");
     const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}";
-    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON);
+    var doc = try Parser.parseAbstract(std.testing.allocator, input);
     defer doc.deinit();
 
     var output: Writer.Allocating = .init(std.testing.allocator);

@@ -1,6 +1,7 @@
 const Printer = @This();
 const std = @import("std");
 const AST = @import("../ast.zig");
+const json_string = @import("../util/json_string.zig");
 const Writer = std.Io.Writer;
 
 /// JSON cannot represent a YAML alias. A materialized AST contains none (aliases
@@ -64,10 +65,10 @@ fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
             .number_special => if (self.dialect == .json5)
                 try self.writer.writeAll(value.text)
             else
-                try writeJsonString(self.writer, value.text),
-            else => try writeJsonString(self.writer, value.text),
+                try json_string.writeQuoted(self.writer, value.text),
+            else => try json_string.writeQuoted(self.writer, value.text),
         },
-        .string => |value| try writeJsonString(self.writer, value),
+        .string => |value| try json_string.writeQuoted(self.writer, value),
         .sequence => |first_child| try self.sequence(first_child, depth),
         .mapping => |first_child| try self.mapping(first_child, depth),
         .keyvalue => |kv| {
@@ -212,31 +213,6 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
 
 fn writeIndent(self: *Printer, depth: usize) Writer.Error!void {
     for (0..depth * self.options.indent) |_| try self.writer.writeByte(' ');
-}
-
-fn writeJsonString(writer: *Writer, value: []const u8) Writer.Error!void {
-    try writer.writeByte('"');
-    for (value) |char| {
-        switch (char) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            0x08 => try writer.writeAll("\\b"),
-            0x0c => try writer.writeAll("\\f"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x07, 0x0b, 0x0e...0x1f => try writeControlEscape(writer, char),
-            else => try writer.writeByte(char),
-        }
-    }
-    try writer.writeByte('"');
-}
-
-fn writeControlEscape(writer: *Writer, char: u8) Writer.Error!void {
-    const hex = "0123456789abcdef";
-    try writer.writeAll("\\u00");
-    try writer.writeByte(hex[char >> 4]);
-    try writer.writeByte(hex[char & 0x0f]);
 }
 
 test "prints JSON document" {

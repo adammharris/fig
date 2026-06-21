@@ -1273,7 +1273,7 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
 /// other failure is allocation, surfaced as `WriteFailed`.
 fn serializeStatus(err: AST.SerializeError) FigStatus {
     return switch (err) {
-        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey, error.FormatDisabled => .unsupported_format,
+        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey, error.FormatDisabled, error.NestingTooDeep => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };
 }

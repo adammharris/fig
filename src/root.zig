@@ -8,6 +8,8 @@ pub const Document = @import("document.zig");
 pub const AST = @import("ast.zig");
 pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
+/// The native "fig" format: the AST's own 1:1 canonical text encoding.
+pub const Native = @import("native/native.zig");
 
 /// Reflection-based deserialization into native Zig types (à la `std.json`).
 pub const deserialize = @import("deserialize.zig");
@@ -24,8 +26,10 @@ test {
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
+    _ = @import("native/native.zig");
     _ = @import("deserialize.zig");
     _ = @import("c_api.zig");
+    _ = @import("util/util.zig");
     if (build_options.json_conformance) {
         _ = @import("json/conformance.zig");
     }

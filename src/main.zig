@@ -12,7 +12,7 @@ const version = "0.0.0-alpha";
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml };
+const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, native };
 
 const CliAction = enum {
     help,
@@ -100,9 +100,11 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|json5|yaml|toml|zon] [--output json|json5|yaml|toml|zon] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon|native] [--output json|json5|yaml|toml|zon|native] <file> [path]
             \\  -i, --input: input format of file (defaults to matching the file extension)
             \\  -o, --output:   output format (defaults to the input format)
+            \\  native ("fig"): the AST's 1:1 canonical text encoding (.fig files);
+            \\    usable as input or output, e.g. to inspect how any document parses.
             \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
             \\  --pretty: multi-line, indented output (the default).
             \\  --indent N: spaces per indent level for pretty JSON (default 2).
@@ -211,6 +213,9 @@ pub fn main(init: std.process.Init) !void {
                 // JSON5 is read/serialize only so far; comment-preserving
                 // in-place editing of it is not wired yet.
                 .json5 => return error.UnsupportedJson5Edit,
+                // The native format is a parse/print pair with no span-splicing
+                // editor; convert via `get` instead of editing in place.
+                .native => return error.UnsupportedNativeEdit,
             }
         },
         .get => {
@@ -238,6 +243,7 @@ pub fn main(init: std.process.Init) !void {
                 .toml => if (comptime build_options.lang_toml) try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input) else return error.FormatDisabled,
                 .zon => if (comptime build_options.lang_zon) try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input) else return error.FormatDisabled,
                 .xml => if (comptime build_options.lang_xml) try parseFromFile(fig.Language.XML, init.arena.allocator(), io, input) else return error.FormatDisabled,
+                .native => try parseNativeFromFile(init.arena.allocator(), io, input),
             };
 
             // Converting YAML to a non-YAML format resolves the reference layer
@@ -263,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
             // losslessly already. The passes operate on a core AST, so any
             // non-YAML source (or a materialized YAML source) is safe.
             const ast: *const fig.AST = if (opts.lossless and !(src_is_yaml and dst_is_yaml)) blk: {
-                const target: fig.Lossless.Target = switch (opts.to) {
+                const maybe_target: ?fig.Lossless.Target = switch (opts.to) {
                     // JSON5 reuses the JSON envelope target. It could hold
                     // Infinity/NaN natively, so this is conservative (those ride
                     // in a `$fig` envelope) but still fully lossless.
@@ -271,10 +277,14 @@ pub fn main(init: std.process.Init) !void {
                     .yaml, .yml => .yaml,
                     .toml => .toml,
                     .zon => .zon,
+                    // Native encodes every node kind directly, so no envelope is
+                    // needed on output — only decode envelopes found in the input.
+                    .native => null,
                     .xml => unreachable, // rejected up front (reader-only)
                 };
                 const decoded = try init.arena.allocator().create(fig.AST);
                 decoded.* = try fig.Lossless.decode(init.arena.allocator(), base_ast);
+                const target = maybe_target orelse break :blk decoded;
                 const encoded = try init.arena.allocator().create(fig.AST);
                 encoded.* = try fig.Lossless.encode(init.arena.allocator(), decoded, target);
                 break :blk encoded;
@@ -288,6 +298,7 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => .yaml,
                 .toml => .toml,
                 .zon => .zon,
+                .native => .native,
                 .xml => unreachable, // rejected up front (reader-only)
             };
 
@@ -326,6 +337,13 @@ fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
 fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
     const content = try readAll(allocator, io, file);
     return try Lang.Parser.parse(allocator, content, Lang.default_type);
+}
+
+/// Parse a native ("fig") document. The native parser isn't a `Language` (it has
+/// no `Type`/`default_type` — its grammar is fixed), so it needs its own helper.
+fn parseNativeFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
+    const content = try readAll(allocator, io, file);
+    return try fig.Native.parse(allocator, content);
 }
 
 /// Parse a JSON-family file with an explicit dialect (the JSON `Language`'s
@@ -503,6 +521,9 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
         return .{ .format = .yaml, .embed = .FrontmatterYaml };
     }
 
+    // `.fig` is the native format's file extension (`.native` maps via the enum).
+    if (std.mem.eql(u8, ext, "fig")) return .{ .format = .native, .embed = null };
+
     const format = std.meta.stringToEnum(Format, ext) orelse {
         const recognized_file_format = if (dot) |d| file_path[d..file_path.len] else "(none)";
         std.log.scoped(.detectLanguage).err("File `{s}` had ending: {s}", .{ file_path, recognized_file_format });
@@ -621,6 +642,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .zon;
                 } else if (std.mem.eql(u8, fmt, "xml")) {
                     input_override = .xml;
+                } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
+                    input_override = .native;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
@@ -640,6 +663,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .toml;
                 } else if (std.mem.eql(u8, fmt, "zon")) {
                     output_override = .zon;
+                } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
+                    output_override = .native;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
