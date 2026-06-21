@@ -35,4 +35,5 @@ test {
     _ = @import("parser.zig");
     _ = @import("printer.zig");
     _ = @import("materialize.zig");
+    _ = @import("editor_helper.zig");
 }

@@ -14,14 +14,23 @@ const AST = @import("../ast.zig");
 const Document = @import("../document.zig");
 const Span = @import("../util/span.zig");
 const editor = @import("../editor.zig");
+const Toml = @import("toml.zig").Language;
 const log = std.log.scoped(.editor);
 
-// Shared source-coordinate utilities (defined in editor.zig).
+/// The concrete editor these structural ops drive. All functions below take a
+/// `*TomlEditor`: they are the TOML arm of the generic engine, factored out so
+/// `editor.zig` stays format-agnostic and every TOML edit lives in one file. The
+/// public methods on `editor.Editor(Toml)` are thin wrappers that call these.
+const TomlEditor = editor.Editor(Toml);
+
+// Shared source-coordinate / rendering utilities (defined in editor.zig).
 const lineStartBefore = editor.lineStartBefore;
 const lineEndAfter = editor.lineEndAfter;
 const firstNonSpace = editor.firstNonSpace;
 const commentBlockStart = editor.commentBlockStart;
 const CommentStyle = editor.CommentStyle;
+const isFlow = editor.isFlow;
+const appendBlockSep = editor.appendBlockSep;
 
 /// Largest source `end` over the subtree rooted at `id` — the textual end of an
 /// AoT element including any nested `[header]`/`[[header]]` sub-tables (whose own
@@ -309,6 +318,432 @@ pub fn isTomlBareKey(name: []const u8) bool {
     return true;
 }
 
+// ============================================================================
+// STRUCTURAL EDITING — the TOML arm of `editor.Editor`
+// ============================================================================
+//
+// These drive the editor's splice engine (`self.replaceAtSpan`, which reparses
+// and rolls back on failure) using the region helpers above. `editor.zig` keeps
+// only thin public wrappers (`Editor(Toml).deleteTable` etc.) that forward here,
+// plus the comptime `if (Language == Toml)` branches that call into these for
+// the shared ops (e.g. `insertKey`).
+
+// --- TOML structural inserts ---
+//
+// TOML splits a logical table across `[header]`…dotted-key…lines, so an insert
+// must land where the new entry attaches to the *intended* table. A scalar
+// `key = value` is placed at the end of the table's own header region — after
+// its last direct (non-`[header]`) entry, before any sub-table header opens —
+// never after a sub-table, which would silently reparent it. `key_text`/
+// `value_text` are verbatim TOML literals.
+pub fn tomlInsertKey(self: *TomlEditor, parsed: Document, node: AST.Node, span: Span, is_root: bool, key_text: []const u8, value_text: []const u8) !void {
+    if (node.kind != .mapping) return error.NotAMapping;
+    const source = self.source.items;
+    // Inline table `{ … }`: splice a `key = value` inside the braces.
+    if (isFlow(source, span))
+        return tomlInsertFlowEntry(self, parsed, node, span, key_text, value_text);
+
+    // Block table: scan its direct children for the in-region ones (those whose
+    // line does not start with `[` — i.e. scalars, arrays, inline tables, and
+    // dotted sub-tables, all of which live under this table's header). The last
+    // such child's line is where the new entry goes; its column sets the indent.
+    var last_end: ?usize = null;
+    var col: usize = 0;
+    var col_set = false;
+    var cur = node.kind.mapping;
+    while (cur) |id| : (cur = parsed.ast.nodes[id].next_sibling) {
+        const kv_span = parsed.span(parsed.ast.nodes[id]);
+        const ls = lineStartBefore(source, kv_span.start);
+        const fns = firstNonSpace(source, ls);
+        if (fns < source.len and source[fns] == '[') continue; // sub-table header: out of region
+        last_end = kv_span.end;
+        if (!col_set) {
+            col = fns - ls;
+            col_set = true;
+        }
+    }
+
+    const insert_at = if (last_end) |e|
+        lineEndAfter(source, e -| 1)
+    else if (is_root)
+        0 // empty document: top of file
+    else
+        lineEndAfter(source, span.end -| 1); // header-only table: just past its `[header]` line
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
+    try out.appendNTimes(self.allocator, ' ', col);
+    try out.appendSlice(self.allocator, key_text);
+    try out.appendSlice(self.allocator, " = ");
+    try out.appendSlice(self.allocator, value_text);
+    try out.append(self.allocator, '\n');
+    try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+}
+
+/// Splice `key = value` into an inline table, keeping the conventional
+/// `{ a = 1, b = 2 }` spacing: into a non-empty table the entry is inserted
+/// right after the last entry's value (`…1` → `…1, key = value`); into an
+/// empty `{}` it is padded with surrounding spaces (`{ key = value }`).
+pub fn tomlInsertFlowEntry(self: *TomlEditor, parsed: Document, node: AST.Node, span: Span, key_text: []const u8, value_text: []const u8) !void {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    const at = if (node.kind.mapping) |first| blk: {
+        var last = first;
+        while (parsed.ast.nodes[last].next_sibling) |n| last = n;
+        try out.appendSlice(self.allocator, ", ");
+        break :blk parsed.span(parsed.ast.nodes[last]).end;
+    } else blk: {
+        try out.append(self.allocator, ' ');
+        break :blk span.start + 1; // just after '{'
+    };
+    try out.appendSlice(self.allocator, key_text);
+    try out.appendSlice(self.allocator, " = ");
+    try out.appendSlice(self.allocator, value_text);
+    if (node.kind.mapping == null) try out.append(self.allocator, ' ');
+    try self.replaceAtSpan(Span.init(at, at), out.items);
+}
+
+/// Append a new `[[header]]` element to the array-of-tables at `path`, with
+/// `body_text` (verbatim TOML `key = value` lines, possibly empty) as its
+/// contents. The element is spliced after the AoT's current last element — past
+/// every line of that element's subtree, so a nested sub-table inside it is not
+/// split.
+pub fn appendTableToArray(self: *TomlEditor, path: []const AST.PathSegment, body_text: []const u8) !void {
+    const parsed = try self.getParsed();
+    const node = try parsed.ast.getValByPath(path);
+    if (node.kind != .sequence) return error.NotAnArrayOfTables;
+    var elem = node.kind.sequence orelse return error.NotAnArrayOfTables;
+    var last_elem = elem;
+    while (true) {
+        if (parsed.ast.nodes[elem].kind != .mapping) return error.NotAnArrayOfTables;
+        last_elem = elem;
+        elem = parsed.ast.nodes[elem].next_sibling orelse break;
+    }
+    const source = self.source.items;
+    const end = subtreeMaxEnd(parsed, last_elem);
+    const insert_at = lineEndAfter(source, end -| 1);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
+    try out.append(self.allocator, '\n'); // blank line before the new header
+    try out.appendSlice(self.allocator, "[[");
+    try appendTomlHeaderPath(&out, self.allocator, path);
+    try out.appendSlice(self.allocator, "]]\n");
+    if (body_text.len > 0) {
+        try out.appendSlice(self.allocator, body_text);
+        if (body_text[body_text.len - 1] != '\n') try out.append(self.allocator, '\n');
+    }
+    try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+}
+
+// --- TOML whole-table structural editing ---
+//
+// A logical TOML table spans scattered source lines, so these ops gather the
+// table's disjoint regions (see `gatherTableRegions`) and rebuild the source in
+// a *single* splice. Foreign tables interleaved between the gathered regions are
+// left in place. Library-level (not CLI/C-ABI wired), matching the rest of TOML
+// editing.
+
+/// Rebuild the source with `regions` (disjoint, ascending) removed, in one
+/// `replaceAtSpan` so the reparse/rollback runs once. `regions` is the slice
+/// actually used (caller passes the coalesced prefix).
+pub fn spliceOutRegions(self: *TomlEditor, regions: []const Region) !void {
+    const source = self.source.items;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    var pos: usize = 0;
+    for (regions) |r| {
+        try out.appendSlice(self.allocator, source[pos..r.start]);
+        pos = r.end;
+    }
+    try out.appendSlice(self.allocator, source[pos..]);
+    try self.replaceAtSpan(Span.init(0, source.len), out.items);
+}
+
+/// Delete the whole table, array-of-tables, or single AoT element named by
+/// `path` — including every scattered region of its subtree — leaving any
+/// interleaved foreign tables untouched. A path ending in an index targets one
+/// AoT element; otherwise the path's value must be a `[table]` (`.mapping`) or a
+/// `[[aot]]` array (`.sequence`). A scalar key is refused with `error.NotATable`
+/// (use `deleteKey`).
+pub fn deleteTable(self: *TomlEditor, path: []const AST.PathSegment) !void {
+    if (path.len == 0) return error.NotATable;
+    const parsed = try self.getParsed();
+    const node = try parsed.ast.getValByPath(path);
+    const source = self.source.items;
+
+    var regions: std.ArrayList(Region) = .empty;
+    defer regions.deinit(self.allocator);
+
+    switch (node.kind) {
+        .mapping => {
+            if (path[path.len - 1] == .index) {
+                // A single AoT element: span is shared across elements, so
+                // recover its header by scanning. Search anchor = end of the
+                // preceding element (or 0 for the first).
+                const search_from = try aotElementSearchFrom(self, parsed, path);
+                try gatherElementRegions(parsed, source, self.allocator, node, search_from, &regions);
+            } else {
+                try gatherTableRegions(parsed, source, self.allocator, node, true, &regions);
+            }
+        },
+        .sequence => try gatherAotRegions(parsed, source, self.allocator, node, &regions),
+        else => return error.NotATable,
+    }
+    const n = normalizeRegions(regions.items);
+    try spliceOutRegions(self, regions.items[0..n]);
+}
+
+/// Search anchor for the AoT element at `path` (which ends in an index): the
+/// source end of the previous element, or 0 when it is the first. Lets
+/// `gatherElementRegions` locate an empty element's header.
+pub fn aotElementSearchFrom(self: *TomlEditor, parsed: Document, path: []const AST.PathSegment) !usize {
+    const idx = path[path.len - 1].index;
+    if (idx == 0) return 0;
+    const seq = try parsed.ast.getValByPath(path[0 .. path.len - 1]);
+    if (seq.kind != .sequence) return 0;
+    var prev = seq.kind.sequence;
+    var i: usize = 0;
+    while (prev) |pid| : (prev = parsed.ast.nodes[pid].next_sibling) {
+        if (i + 1 == idx) return lineEndAfter(self.source.items, subtreeMaxEnd(parsed, pid) -| 1);
+        i += 1;
+    }
+    return 0;
+}
+
+/// Create a new `[path]` table (or sub-table) whose body is `body_text`
+/// (verbatim TOML `key = value` lines, possibly empty). The header is spliced
+/// *after* the parent table's entire subtree — or at end-of-file for a
+/// root-level table — so no existing key is reparented. Refuses
+/// `error.TableExists` if the table already exists.
+pub fn insertTable(self: *TomlEditor, path: []const AST.PathSegment, body_text: []const u8) !void {
+    if (path.len == 0) return error.NotATable;
+    const parsed = try self.getParsed();
+    if (parsed.ast.getValByPath(path)) |_| {
+        return error.TableExists;
+    } else |_| {}
+    const source = self.source.items;
+
+    // Insertion point: just past the parent table's whole subtree, else EOF.
+    const insert_at = blk: {
+        if (path.len > 1) {
+            if (parsed.ast.getValByPath(path[0 .. path.len - 1])) |parent| {
+                if (parent.kind == .mapping)
+                    break :blk lineEndAfter(source, subtreeMaxEnd(parsed, parent.id) -| 1);
+            } else |_| {}
+        }
+        break :blk source.len;
+    };
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
+    if (insert_at > 0) try out.append(self.allocator, '\n'); // blank line before the header
+    try out.appendSlice(self.allocator, "[");
+    try appendTomlHeaderPath(&out, self.allocator, path);
+    try out.appendSlice(self.allocator, "]\n");
+    if (body_text.len > 0) {
+        try out.appendSlice(self.allocator, body_text);
+        if (body_text[body_text.len - 1] != '\n') try out.append(self.allocator, '\n');
+    }
+    try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+}
+
+/// Rename the leaf key of the table at `path` to `new_leaf`, rewriting the
+/// table's own header and every descendant sub-header that shares the prefix
+/// (`[a.b]`, `[a.b.c]`, `[[a.b]]` → `[q.b]`, `[q.b.c]`, `[[q.b]]` when renaming
+/// `a`→`q`). Format-preserving: only the renamed segment of each affected header
+/// changes. A collision with an existing sibling is rejected via the reparse
+/// rollback (`error.DuplicateKey`).
+pub fn renameTable(self: *TomlEditor, path: []const AST.PathSegment, new_leaf: []const u8) !void {
+    if (path.len == 0) return error.NotATable;
+    const parsed = try self.getParsed();
+    const node = try parsed.ast.getValByPath(path);
+    if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
+    const source = self.source.items;
+
+    // Depth of the renamed segment within each header (count of key segments
+    // before the leaf; AoT indices don't appear in headers).
+    var depth: usize = 0;
+    for (path[0 .. path.len - 1]) |seg| switch (seg) {
+        .key => depth += 1,
+        .index => {},
+    };
+
+    // Gather every header line belonging to this table's subtree, then rewrite
+    // the segment at `depth` in each. Rebuild once.
+    var regions: std.ArrayList(Region) = .empty;
+    defer regions.deinit(self.allocator);
+    switch (node.kind) {
+        .mapping => try gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
+        .sequence => try gatherAotRegions(parsed, source, self.allocator, node, &regions),
+        else => unreachable,
+    }
+    const n = normalizeRegions(regions.items);
+
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(self.allocator);
+    try appendTomlHeaderPath(&rendered, self.allocator, &.{.{ .key = new_leaf }});
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    var pos: usize = 0;
+    for (regions.items[0..n]) |r| {
+        // Only header regions carry the renamed segment; a region may begin with
+        // an owned comment block, so locate the `[`-line within it.
+        const seg = headerSegmentSpan(source, r, depth) orelse continue;
+        try out.appendSlice(self.allocator, source[pos..seg.start]);
+        try out.appendSlice(self.allocator, rendered.items);
+        pos = seg.end;
+    }
+    try out.appendSlice(self.allocator, source[pos..]);
+    try self.replaceAtSpan(Span.init(0, source.len), out.items);
+}
+
+/// Move the whole table at `src_path` to sit immediately before the table at
+/// `dest_path` (a top-level/header table), or to end-of-file when `dest_path` is
+/// null. The table's scattered fragments are removed from their original
+/// positions and re-emitted **contiguously** at the destination (comments ride
+/// along); foreign tables stay put. A no-op when the destination falls inside
+/// the source's own region.
+pub fn moveTable(self: *TomlEditor, src_path: []const AST.PathSegment, dest_path: ?[]const AST.PathSegment) !void {
+    if (src_path.len == 0) return error.NotATable;
+    const parsed = try self.getParsed();
+    const node = try parsed.ast.getValByPath(src_path);
+    if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
+    const source = self.source.items;
+
+    var regions: std.ArrayList(Region) = .empty;
+    defer regions.deinit(self.allocator);
+    switch (node.kind) {
+        .mapping => try gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
+        .sequence => try gatherAotRegions(parsed, source, self.allocator, node, &regions),
+        else => unreachable,
+    }
+    const n = normalizeRegions(regions.items);
+    const used = regions.items[0..n];
+    if (n == 0) return;
+
+    // Destination: start of the dest table's header line, or EOF.
+    const dest_at = blk: {
+        if (dest_path) |dp| {
+            const dn = try parsed.ast.getValByPath(dp);
+            const hr = headerLineRegion(source, parsed.span(dn), .hash) orelse return error.NotATable;
+            break :blk hr.start;
+        }
+        break :blk source.len;
+    };
+    // No-op only if the destination lands strictly inside a moved region (a
+    // boundary at a fragment's edge — e.g. EOF coinciding with the last fragment
+    // — is still a real relocation that collapses the fragments).
+    for (used) |r| if (dest_at > r.start and dest_at < r.end) return;
+
+    // Capture the table's bytes (document order, gaps dropped) — this is the
+    // contiguous re-emission spliced at the destination.
+    var moved: std.ArrayList(u8) = .empty;
+    defer moved.deinit(self.allocator);
+    for (used) |r| try moved.appendSlice(self.allocator, source[r.start..r.end]);
+
+    // Build the source with the table removed, tracking where `dest_at` lands in
+    // the result; then splice `moved` there with one blank line of separation
+    // from preceding content.
+    var kept: std.ArrayList(u8) = .empty;
+    defer kept.deinit(self.allocator);
+    var insert_pos: ?usize = null;
+    var pos: usize = 0;
+    for (used) |r| {
+        if (insert_pos == null and dest_at >= pos and dest_at <= r.start) {
+            try kept.appendSlice(self.allocator, source[pos..dest_at]);
+            insert_pos = kept.items.len;
+            try kept.appendSlice(self.allocator, source[dest_at..r.start]);
+        } else {
+            try kept.appendSlice(self.allocator, source[pos..r.start]);
+        }
+        pos = r.end;
+    }
+    if (insert_pos == null) {
+        try kept.appendSlice(self.allocator, source[pos..dest_at]);
+        insert_pos = kept.items.len;
+        try kept.appendSlice(self.allocator, source[dest_at..]);
+    } else {
+        try kept.appendSlice(self.allocator, source[pos..]);
+    }
+
+    const ip = insert_pos.?;
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    try out.appendSlice(self.allocator, kept.items[0..ip]);
+    try appendWithBlankBefore(&out, self.allocator, moved.items);
+    try out.appendSlice(self.allocator, kept.items[ip..]);
+    try self.replaceAtSpan(Span.init(0, source.len), out.items);
+}
+
+/// Reorder a set of top-level tables (named by `order`, the keys in their
+/// desired final order) among themselves. Each named table's scattered fragments
+/// are removed and re-emitted contiguously, in `order`, at the position the
+/// earliest of them currently occupies. Tables not named are untouched. Each
+/// name must resolve to a `[table]` or `[[aot]]`.
+pub fn reorderTables(self: *TomlEditor, order: []const []const u8) !void {
+    if (order.len == 0) return;
+    const parsed = try self.getParsed();
+    const source = self.source.items;
+
+    // Per-table region bundles, plus the global removal set.
+    var all: std.ArrayList(Region) = .empty;
+    defer all.deinit(self.allocator);
+    // Captured bytes for each named table, in `order`.
+    var bundles: std.ArrayList([]u8) = .empty;
+    defer {
+        for (bundles.items) |b| self.allocator.free(b);
+        bundles.deinit(self.allocator);
+    }
+
+    for (order) |name| {
+        const path: [1]AST.PathSegment = .{.{ .key = name }};
+        const node = try parsed.ast.getValByPath(&path);
+        if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
+        var regions: std.ArrayList(Region) = .empty;
+        defer regions.deinit(self.allocator);
+        switch (node.kind) {
+            .mapping => try gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
+            .sequence => try gatherAotRegions(parsed, source, self.allocator, node, &regions),
+            else => unreachable,
+        }
+        const n = normalizeRegions(regions.items);
+        var bytes: std.ArrayList(u8) = .empty;
+        for (regions.items[0..n]) |r| {
+            try bytes.appendSlice(self.allocator, source[r.start..r.end]);
+            try all.append(self.allocator, r);
+        }
+        try bundles.append(self.allocator, try bytes.toOwnedSlice(self.allocator));
+    }
+    const total = normalizeRegions(all.items);
+    const used = all.items[0..total];
+    if (total == 0) return;
+    const anchor = used[0].start;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    var pos: usize = 0;
+    for (used) |r| {
+        if (anchor >= pos and anchor <= r.start) {
+            try out.appendSlice(self.allocator, source[pos..anchor]);
+            for (bundles.items) |b| {
+                try appendBlockSep(&out, self.allocator, b);
+                if (b.len > 0 and b[b.len - 1] != '\n') try out.append(self.allocator, '\n');
+            }
+            try out.appendSlice(self.allocator, source[anchor..r.start]);
+        } else {
+            try out.appendSlice(self.allocator, source[pos..r.start]);
+        }
+        pos = r.end;
+    }
+    try out.appendSlice(self.allocator, source[pos..]);
+    try self.replaceAtSpan(Span.init(0, source.len), out.items);
+}
+
 // =======
 // TESTS
 // =======
@@ -319,8 +754,6 @@ pub fn isTomlBareKey(name: []const u8) bool {
 // contiguous spans every node keeps even in a scattered table), scalar/inline
 // insert+delete, and the whole-table structural ops (delete/insert/rename/move/
 // reorder) built on the multi-region gather above.
-
-const Toml = @import("toml.zig").Language;
 
 fn newTomlEditor(input: []const u8) !editor.Editor(Toml) {
     var ed: editor.Editor(Toml) = .{ .allocator = std.testing.allocator };

@@ -8,13 +8,16 @@ const Span = @import("util/span.zig");
 const json = @import("json/json.zig");
 const log = std.log.scoped(.editor);
 
-// TOML-specific editing helpers (multi-region gather, header rendering). The
-// generic engine below delegates to these from its `if (Language == Toml)`
-// branches; see that module's header for the split rationale.
+// Format-specific editing logic the generic engine delegates to from its
+// `if (Language == Toml/Yaml)` branches: TOML's multi-region gather + whole-table
+// ops, and YAML's reference-layer / block-framing helpers. See each module's
+// header for the split rationale. These modules also hold that language's editor
+// tests, so editor-test code lives next to the concern it exercises.
 const toml_edit = @import("toml/editor_helper.zig");
-// The Language tag used by the `if (Language == Toml)` comptime branches (also
-// needed now that the TOML editor tests, which defined their own, moved out).
+const yaml_edit = @import("yaml/editor_helper.zig");
+// Language tags used by the comptime branches above.
 const Toml = @import("toml/toml.zig").Language;
+const Yaml = @import("yaml/yaml.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("language.zig").validate(Language);
@@ -33,7 +36,7 @@ pub fn Editor(comptime Language: type) type {
         document: ?Document = null,
         format: Language.Type = Language.default_type,
 
-        fn getParsed(self: *const Self) !Document {
+        pub fn getParsed(self: *const Self) !Document {
             return self.document orelse {
                 log.err("Not initialized!", .{});
                 return error.NotInitialized;
@@ -79,7 +82,7 @@ pub fn Editor(comptime Language: type) type {
                 // A merge-only key surfaces as NotFound (default nav doesn't follow
                 // `<<`); COW it by inserting a local `key: value` that shadows the
                 // merge.
-                if (Language == Yaml and err == error.NotFound and try self.mergeSuppliesKey(parsed, path)) {
+                if (Language == Yaml and err == error.NotFound and try yaml_edit.mergeSuppliesKey(parsed, path)) {
                     try self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, replacement);
                     return;
                 }
@@ -93,34 +96,10 @@ pub fn Editor(comptime Language: type) type {
             // change inline<->block (e.g. `k: []` -> a block list). JSON has no
             // block style, so it keeps the direct splice.
             if (Language == Yaml and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .key) {
-                try self.reframeMappingValue(parsed, path, span, replacement);
+                try yaml_edit.reframeMappingValue(self, parsed, path, span, replacement);
                 return;
             }
             try self.replaceAtSpan(span, replacement);
-        }
-
-        /// Replace a mapping key's value, re-emitting `: value` through
-        /// `writeMapValue` so the new value's framing (inline scalar vs block
-        /// collection on following lines) is always valid regardless of the old
-        /// value's shape.
-        fn reframeMappingValue(self: *Self, parsed: Document, path: []const AST.PathSegment, val_span: Span, replacement: []const u8) !void {
-            const source = self.source.items;
-            const key_node = try parsed.ast.getKeyByPath(path);
-            const key_span = parsed.span(key_node);
-            const col = columnOf(source, key_span.start);
-            // The `:` indicator sits just past the key (a plain key cannot
-            // contain `:`, and a quoted key's `:` is inside `key_span`).
-            const colon = std.mem.indexOfScalarPos(u8, source, key_span.end, ':') orelse
-                return error.InvalidDocument;
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            // writeMapValue emits the `:` itself, so replace from the existing
-            // colon through the old value's end (a null value is a zero-width
-            // span at the colon, hence the `@max`).
-            try self.writeMapValue(&out, col, replacement);
-            const end = @max(val_span.end, colon + 1);
-            try self.replaceAtSpan(Span.init(colon, end), out.items);
         }
 
         /// Like `replaceValAtPath`, but follow into the reference layer: when the
@@ -135,33 +114,10 @@ pub fn Editor(comptime Language: type) type {
             };
             if (Language == Yaml and node.kind == .alias) {
                 const target = parsed.ast.nodes[try parsed.ast.resolveAlias(node)];
-                try self.replaceAtSpan(self.valueSpanWithoutProps(parsed, target), replacement);
+                try self.replaceAtSpan(yaml_edit.valueSpanWithoutProps(self, parsed, target), replacement);
                 return;
             }
             try self.replaceValAtPath(path, replacement);
-        }
-
-        /// True when `path`'s final `.key` segment is not a physical entry of its
-        /// parent mapping but is supplied by a `<<` merge.
-        fn mergeSuppliesKey(self: *Self, parsed: Document, path: []const AST.PathSegment) !bool {
-            _ = self;
-            if (path.len == 0 or std.meta.activeTag(path[path.len - 1]) != .key) return false;
-            const parent = parsed.ast.getValByPath(path[0 .. path.len - 1]) catch return false;
-            if (parent.kind != .mapping) return false;
-            return (parsed.ast.mergedChild(parent, path[path.len - 1].key) catch return false) != null;
-        }
-
-        /// The span of `node`'s value bytes, excluding any leading `&anchor`/`!tag`
-        /// property prefix (the node's stored span starts at the property). Used by
-        /// follow-mode so editing the anchored value keeps the anchor intact.
-        fn valueSpanWithoutProps(self: *Self, parsed: Document, node: AST.Node) Span {
-            const source = self.source.items;
-            const full = parsed.span(node);
-            var start = full.start;
-            if (parsed.anchorSpan(node)) |a| start = @max(start, a.end);
-            if (parsed.tagSpan(node)) |t| start = @max(start, t.end);
-            while (start < full.end and (source[start] == ' ' or source[start] == '\t')) start += 1;
-            return Span.init(start, full.end);
         }
 
         pub fn replaceKeyAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
@@ -192,7 +148,7 @@ pub fn Editor(comptime Language: type) type {
             const span = parsed.span(node);
             const source = self.source.items;
             if (Language == Toml)
-                return self.tomlInsertKey(parsed, node, span, path.len == 0, key_text, value_text);
+                return toml_edit.tomlInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -216,7 +172,7 @@ pub fn Editor(comptime Language: type) type {
                 // A key that exists only via a `<<` merge has no physical line to
                 // delete, and there is no YAML syntax to un-inherit it — deleting
                 // the merge source is a different operation. Refuse explicitly.
-                if (Language == Yaml and err == error.NotFound and try self.mergeSuppliesKey(parsed, path))
+                if (Language == Yaml and err == error.NotFound and try yaml_edit.mergeSuppliesKey(parsed, path))
                     return error.MergeOnlyKey;
                 return err;
             };
@@ -530,437 +486,55 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
         }
 
-        // --- TOML structural inserts ---
+        // --- TOML whole-table structural editing (TOML-only) ---
         //
-        // TOML splits a logical table across `[header]`…dotted-key…lines, so an
-        // insert must land where the new entry attaches to the *intended* table.
-        // A scalar `key = value` is placed at the end of the table's own header
-        // region — after its last direct (non-`[header]`) entry, before any
-        // sub-table header opens — never after a sub-table, which would silently
-        // reparent it. `key_text`/`value_text` are verbatim TOML literals.
+        // The implementations live in `toml/editor_helper.zig`, next to the
+        // region helpers they build on, so this generic engine stays
+        // format-agnostic. These wrappers are the public `Editor(Toml)` surface;
+        // each guards with a comptime error so the method does not exist for
+        // other formats. See the helper module for the per-op contract.
 
-        fn tomlInsertKey(self: *Self, parsed: Document, node: AST.Node, span: Span, is_root: bool, key_text: []const u8, value_text: []const u8) !void {
-            if (node.kind != .mapping) return error.NotAMapping;
-            const source = self.source.items;
-            // Inline table `{ … }`: splice a `key = value` inside the braces.
-            if (isFlow(source, span))
-                return self.tomlInsertFlowEntry(parsed, node, span, key_text, value_text);
-
-            // Block table: scan its direct children for the in-region ones (those
-            // whose line does not start with `[` — i.e. scalars, arrays, inline
-            // tables, and dotted sub-tables, all of which live under this table's
-            // header). The last such child's line is where the new entry goes; its
-            // column sets the indentation.
-            var last_end: ?usize = null;
-            var col: usize = 0;
-            var col_set = false;
-            var cur = node.kind.mapping;
-            while (cur) |id| : (cur = parsed.ast.nodes[id].next_sibling) {
-                const kv_span = parsed.span(parsed.ast.nodes[id]);
-                const ls = lineStartBefore(source, kv_span.start);
-                const fns = firstNonSpace(source, ls);
-                if (fns < source.len and source[fns] == '[') continue; // sub-table header: out of region
-                last_end = kv_span.end;
-                if (!col_set) {
-                    col = fns - ls;
-                    col_set = true;
-                }
-            }
-
-            const insert_at = if (last_end) |e|
-                lineEndAfter(source, e -| 1)
-            else if (is_root)
-                0 // empty document: top of file
-            else
-                lineEndAfter(source, span.end -| 1); // header-only table: just past its `[header]` line
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
-            try out.appendNTimes(self.allocator, ' ', col);
-            try out.appendSlice(self.allocator, key_text);
-            try out.appendSlice(self.allocator, " = ");
-            try out.appendSlice(self.allocator, value_text);
-            try out.append(self.allocator, '\n');
-            try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
-        }
-
-        /// Splice `key = value` into an inline table, keeping the conventional
-        /// `{ a = 1, b = 2 }` spacing: into a non-empty table the entry is inserted
-        /// right after the last entry's value (`…1` → `…1, key = value`); into an
-        /// empty `{}` it is padded with surrounding spaces (`{ key = value }`).
-        fn tomlInsertFlowEntry(self: *Self, parsed: Document, node: AST.Node, span: Span, key_text: []const u8, value_text: []const u8) !void {
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            const at = if (node.kind.mapping) |first| blk: {
-                var last = first;
-                while (parsed.ast.nodes[last].next_sibling) |n| last = n;
-                try out.appendSlice(self.allocator, ", ");
-                break :blk parsed.span(parsed.ast.nodes[last]).end;
-            } else blk: {
-                try out.append(self.allocator, ' ');
-                break :blk span.start + 1; // just after '{'
-            };
-            try out.appendSlice(self.allocator, key_text);
-            try out.appendSlice(self.allocator, " = ");
-            try out.appendSlice(self.allocator, value_text);
-            if (node.kind.mapping == null) try out.append(self.allocator, ' ');
-            try self.replaceAtSpan(Span.init(at, at), out.items);
-        }
-
-        /// Append a new `[[header]]` element to the array-of-tables at `path`,
-        /// with `body_text` (verbatim TOML `key = value` lines, possibly empty) as
-        /// its contents. The element is spliced after the AoT's current last
-        /// element — past every line of that element's subtree, so a nested
-        /// sub-table inside it is not split. TOML-only.
+        /// Append a `[[header]]` element (body `body_text`) to the AoT at `path`.
         pub fn appendTableToArray(self: *Self, path: []const AST.PathSegment, body_text: []const u8) !void {
             if (Language != Toml) @compileError("appendTableToArray is TOML-only");
-            const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
-            if (node.kind != .sequence) return error.NotAnArrayOfTables;
-            var elem = node.kind.sequence orelse return error.NotAnArrayOfTables;
-            var last_elem = elem;
-            while (true) {
-                if (parsed.ast.nodes[elem].kind != .mapping) return error.NotAnArrayOfTables;
-                last_elem = elem;
-                elem = parsed.ast.nodes[elem].next_sibling orelse break;
-            }
-            const source = self.source.items;
-            const end = toml_edit.subtreeMaxEnd(parsed, last_elem);
-            const insert_at = lineEndAfter(source, end -| 1);
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
-            try out.append(self.allocator, '\n'); // blank line before the new header
-            try out.appendSlice(self.allocator, "[[");
-            try toml_edit.appendTomlHeaderPath(&out, self.allocator, path);
-            try out.appendSlice(self.allocator, "]]\n");
-            if (body_text.len > 0) {
-                try out.appendSlice(self.allocator, body_text);
-                if (body_text[body_text.len - 1] != '\n') try out.append(self.allocator, '\n');
-            }
-            try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+            return toml_edit.appendTableToArray(self, path, body_text);
         }
 
-        // ============
-        // TOML WHOLE-TABLE STRUCTURAL EDITING
-        // ============
-        //
-        // A logical TOML table spans scattered source lines, so these ops gather
-        // the table's disjoint regions (see `toml_edit.gatherTableRegions`) and rebuild the
-        // source in a *single* splice. Foreign tables interleaved between the
-        // gathered regions are left in place. Library-level (not CLI/C-ABI wired),
-        // matching the rest of TOML editing.
-
-        /// Rebuild the source with `regions` (disjoint, ascending) removed, in one
-        /// `replaceAtSpan` so the reparse/rollback runs once. `regions` is the
-        /// slice actually used (caller passes the coalesced prefix).
-        fn spliceOutRegions(self: *Self, regions: []const toml_edit.Region) !void {
-            const source = self.source.items;
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            var pos: usize = 0;
-            for (regions) |r| {
-                try out.appendSlice(self.allocator, source[pos..r.start]);
-                pos = r.end;
-            }
-            try out.appendSlice(self.allocator, source[pos..]);
-            try self.replaceAtSpan(Span.init(0, source.len), out.items);
-        }
-
-        /// Delete the whole table, array-of-tables, or single AoT element named by
-        /// `path` — including every scattered region of its subtree — leaving any
-        /// interleaved foreign tables untouched. A path ending in an index targets
-        /// one AoT element; otherwise the path's value must be a `[table]`
-        /// (`.mapping`) or a `[[aot]]` array (`.sequence`). A scalar key is refused
-        /// with `error.NotATable` (use `deleteKey`).
+        /// Delete the table / array-of-tables / AoT element named by `path`.
         pub fn deleteTable(self: *Self, path: []const AST.PathSegment) !void {
             if (Language != Toml) @compileError("deleteTable is TOML-only");
-            if (path.len == 0) return error.NotATable;
-            const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
-            const source = self.source.items;
-
-            var regions: std.ArrayList(toml_edit.Region) = .empty;
-            defer regions.deinit(self.allocator);
-
-            switch (node.kind) {
-                .mapping => {
-                    if (path[path.len - 1] == .index) {
-                        // A single AoT element: span is shared across elements, so
-                        // recover its header by scanning. Search anchor = end of
-                        // the preceding element (or 0 for the first).
-                        const search_from = try self.aotElementSearchFrom(parsed, path);
-                        try toml_edit.gatherElementRegions(parsed, source, self.allocator, node, search_from, &regions);
-                    } else {
-                        try toml_edit.gatherTableRegions(parsed, source, self.allocator, node, true, &regions);
-                    }
-                },
-                .sequence => try toml_edit.gatherAotRegions(parsed, source, self.allocator, node, &regions),
-                else => return error.NotATable,
-            }
-            const n = toml_edit.normalizeRegions(regions.items);
-            try self.spliceOutRegions(regions.items[0..n]);
+            return toml_edit.deleteTable(self, path);
         }
 
-        /// Search anchor for the AoT element at `path` (which ends in an index):
-        /// the source end of the previous element, or 0 when it is the first.
-        /// Lets `toml_edit.gatherElementRegions` locate an empty element's header.
-        fn aotElementSearchFrom(self: *Self, parsed: Document, path: []const AST.PathSegment) !usize {
-            const idx = path[path.len - 1].index;
-            if (idx == 0) return 0;
-            const seq = try parsed.ast.getValByPath(path[0 .. path.len - 1]);
-            if (seq.kind != .sequence) return 0;
-            var prev = seq.kind.sequence;
-            var i: usize = 0;
-            while (prev) |pid| : (prev = parsed.ast.nodes[pid].next_sibling) {
-                if (i + 1 == idx) return lineEndAfter(self.source.items, toml_edit.subtreeMaxEnd(parsed, pid) -| 1);
-                i += 1;
-            }
-            return 0;
-        }
-
-        /// Create a new `[path]` table (or sub-table) whose body is `body_text`
-        /// (verbatim TOML `key = value` lines, possibly empty). The header is
-        /// spliced *after* the parent table's entire subtree — or at end-of-file
-        /// for a root-level table — so no existing key is reparented. Refuses
-        /// `error.TableExists` if the table already exists.
+        /// Create a new `[path]` table with body `body_text`.
         pub fn insertTable(self: *Self, path: []const AST.PathSegment, body_text: []const u8) !void {
             if (Language != Toml) @compileError("insertTable is TOML-only");
-            if (path.len == 0) return error.NotATable;
-            const parsed = try self.getParsed();
-            if (parsed.ast.getValByPath(path)) |_| {
-                return error.TableExists;
-            } else |_| {}
-            const source = self.source.items;
-
-            // Insertion point: just past the parent table's whole subtree, else EOF.
-            const insert_at = blk: {
-                if (path.len > 1) {
-                    if (parsed.ast.getValByPath(path[0 .. path.len - 1])) |parent| {
-                        if (parent.kind == .mapping)
-                            break :blk lineEndAfter(source, toml_edit.subtreeMaxEnd(parsed, parent.id) -| 1);
-                    } else |_| {}
-                }
-                break :blk source.len;
-            };
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
-            if (insert_at > 0) try out.append(self.allocator, '\n'); // blank line before the header
-            try out.appendSlice(self.allocator, "[");
-            try toml_edit.appendTomlHeaderPath(&out, self.allocator, path);
-            try out.appendSlice(self.allocator, "]\n");
-            if (body_text.len > 0) {
-                try out.appendSlice(self.allocator, body_text);
-                if (body_text[body_text.len - 1] != '\n') try out.append(self.allocator, '\n');
-            }
-            try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
+            return toml_edit.insertTable(self, path, body_text);
         }
 
-        /// Rename the leaf key of the table at `path` to `new_leaf`, rewriting the
-        /// table's own header and every descendant sub-header that shares the
-        /// prefix (`[a.b]`, `[a.b.c]`, `[[a.b]]` → `[q.b]`, `[q.b.c]`, `[[q.b]]`
-        /// when renaming `a`→`q`). Format-preserving: only the renamed segment of
-        /// each affected header changes. A collision with an existing sibling is
-        /// rejected via the reparse rollback (`error.DuplicateKey`).
+        /// Rename the leaf segment of the table at `path` to `new_leaf`.
         pub fn renameTable(self: *Self, path: []const AST.PathSegment, new_leaf: []const u8) !void {
             if (Language != Toml) @compileError("renameTable is TOML-only");
-            if (path.len == 0) return error.NotATable;
-            const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
-            if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
-            const source = self.source.items;
-
-            // Depth of the renamed segment within each header (count of key
-            // segments before the leaf; AoT indices don't appear in headers).
-            var depth: usize = 0;
-            for (path[0 .. path.len - 1]) |seg| switch (seg) {
-                .key => depth += 1,
-                .index => {},
-            };
-
-            // Gather every header line belonging to this table's subtree, then
-            // rewrite the segment at `depth` in each. Rebuild once.
-            var regions: std.ArrayList(toml_edit.Region) = .empty;
-            defer regions.deinit(self.allocator);
-            switch (node.kind) {
-                .mapping => try toml_edit.gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
-                .sequence => try toml_edit.gatherAotRegions(parsed, source, self.allocator, node, &regions),
-                else => unreachable,
-            }
-            const n = toml_edit.normalizeRegions(regions.items);
-
-            var rendered: std.ArrayList(u8) = .empty;
-            defer rendered.deinit(self.allocator);
-            try toml_edit.appendTomlHeaderPath(&rendered, self.allocator, &.{.{ .key = new_leaf }});
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            var pos: usize = 0;
-            for (regions.items[0..n]) |r| {
-                // Only header regions carry the renamed segment; a region may begin
-                // with an owned comment block, so locate the `[`-line within it.
-                const seg = toml_edit.headerSegmentSpan(source, r, depth) orelse continue;
-                try out.appendSlice(self.allocator, source[pos..seg.start]);
-                try out.appendSlice(self.allocator, rendered.items);
-                pos = seg.end;
-            }
-            try out.appendSlice(self.allocator, source[pos..]);
-            try self.replaceAtSpan(Span.init(0, source.len), out.items);
+            return toml_edit.renameTable(self, path, new_leaf);
         }
 
-        /// Move the whole table at `src_path` to sit immediately before the table
-        /// at `dest_path` (a top-level/header table), or to end-of-file when
-        /// `dest_path` is null. The table's scattered fragments are removed from
-        /// their original positions and re-emitted **contiguously** at the
-        /// destination (comments ride along); foreign tables stay put. A no-op when
-        /// the destination falls inside the source's own region.
+        /// Move the table at `src_path` before `dest_path` (or to EOF if null).
         pub fn moveTable(self: *Self, src_path: []const AST.PathSegment, dest_path: ?[]const AST.PathSegment) !void {
             if (Language != Toml) @compileError("moveTable is TOML-only");
-            if (src_path.len == 0) return error.NotATable;
-            const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(src_path);
-            if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
-            const source = self.source.items;
-
-            var regions: std.ArrayList(toml_edit.Region) = .empty;
-            defer regions.deinit(self.allocator);
-            switch (node.kind) {
-                .mapping => try toml_edit.gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
-                .sequence => try toml_edit.gatherAotRegions(parsed, source, self.allocator, node, &regions),
-                else => unreachable,
-            }
-            const n = toml_edit.normalizeRegions(regions.items);
-            const used = regions.items[0..n];
-            if (n == 0) return;
-
-            // Destination: start of the dest table's header line, or EOF.
-            const dest_at = blk: {
-                if (dest_path) |dp| {
-                    const dn = try parsed.ast.getValByPath(dp);
-                    const hr = toml_edit.headerLineRegion(source, parsed.span(dn), .hash) orelse return error.NotATable;
-                    break :blk hr.start;
-                }
-                break :blk source.len;
-            };
-            // No-op only if the destination lands strictly inside a moved region
-            // (a boundary at a fragment's edge — e.g. EOF coinciding with the last
-            // fragment — is still a real relocation that collapses the fragments).
-            for (used) |r| if (dest_at > r.start and dest_at < r.end) return;
-
-            // Capture the table's bytes (document order, gaps dropped) — this is
-            // the contiguous re-emission spliced at the destination.
-            var moved: std.ArrayList(u8) = .empty;
-            defer moved.deinit(self.allocator);
-            for (used) |r| try moved.appendSlice(self.allocator, source[r.start..r.end]);
-
-            // Build the source with the table removed, tracking where `dest_at`
-            // lands in the result; then splice `moved` there with one blank line
-            // of separation from preceding content.
-            var kept: std.ArrayList(u8) = .empty;
-            defer kept.deinit(self.allocator);
-            var insert_pos: ?usize = null;
-            var pos: usize = 0;
-            for (used) |r| {
-                if (insert_pos == null and dest_at >= pos and dest_at <= r.start) {
-                    try kept.appendSlice(self.allocator, source[pos..dest_at]);
-                    insert_pos = kept.items.len;
-                    try kept.appendSlice(self.allocator, source[dest_at..r.start]);
-                } else {
-                    try kept.appendSlice(self.allocator, source[pos..r.start]);
-                }
-                pos = r.end;
-            }
-            if (insert_pos == null) {
-                try kept.appendSlice(self.allocator, source[pos..dest_at]);
-                insert_pos = kept.items.len;
-                try kept.appendSlice(self.allocator, source[dest_at..]);
-            } else {
-                try kept.appendSlice(self.allocator, source[pos..]);
-            }
-
-            const ip = insert_pos.?;
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            try out.appendSlice(self.allocator, kept.items[0..ip]);
-            try toml_edit.appendWithBlankBefore(&out, self.allocator, moved.items);
-            try out.appendSlice(self.allocator, kept.items[ip..]);
-            try self.replaceAtSpan(Span.init(0, source.len), out.items);
+            return toml_edit.moveTable(self, src_path, dest_path);
         }
 
-        /// Reorder a set of top-level tables (named by `order`, the keys in their
-        /// desired final order) among themselves. Each named table's scattered
-        /// fragments are removed and re-emitted contiguously, in `order`, at the
-        /// position the earliest of them currently occupies. Tables not named are
-        /// untouched. Each name must resolve to a `[table]` or `[[aot]]`.
+        /// Reorder top-level tables to the order given by `order` (their keys).
         pub fn reorderTables(self: *Self, order: []const []const u8) !void {
             if (Language != Toml) @compileError("reorderTables is TOML-only");
-            if (order.len == 0) return;
-            const parsed = try self.getParsed();
-            const source = self.source.items;
-
-            // Per-table region bundles, plus the global removal set.
-            var all: std.ArrayList(toml_edit.Region) = .empty;
-            defer all.deinit(self.allocator);
-            // Captured bytes for each named table, in `order`.
-            var bundles: std.ArrayList([]u8) = .empty;
-            defer {
-                for (bundles.items) |b| self.allocator.free(b);
-                bundles.deinit(self.allocator);
-            }
-
-            for (order) |name| {
-                const path: [1]AST.PathSegment = .{.{ .key = name }};
-                const node = try parsed.ast.getValByPath(&path);
-                if (node.kind != .mapping and node.kind != .sequence) return error.NotATable;
-                var regions: std.ArrayList(toml_edit.Region) = .empty;
-                defer regions.deinit(self.allocator);
-                switch (node.kind) {
-                    .mapping => try toml_edit.gatherTableRegions(parsed, source, self.allocator, node, true, &regions),
-                    .sequence => try toml_edit.gatherAotRegions(parsed, source, self.allocator, node, &regions),
-                    else => unreachable,
-                }
-                const n = toml_edit.normalizeRegions(regions.items);
-                var bytes: std.ArrayList(u8) = .empty;
-                for (regions.items[0..n]) |r| {
-                    try bytes.appendSlice(self.allocator, source[r.start..r.end]);
-                    try all.append(self.allocator, r);
-                }
-                try bundles.append(self.allocator, try bytes.toOwnedSlice(self.allocator));
-            }
-            const total = toml_edit.normalizeRegions(all.items);
-            const used = all.items[0..total];
-            if (total == 0) return;
-            const anchor = used[0].start;
-
-            var out: std.ArrayList(u8) = .empty;
-            defer out.deinit(self.allocator);
-            var pos: usize = 0;
-            for (used) |r| {
-                if (anchor >= pos and anchor <= r.start) {
-                    try out.appendSlice(self.allocator, source[pos..anchor]);
-                    for (bundles.items) |b| {
-                        try appendBlockSep(&out, self.allocator, b);
-                        if (b.len > 0 and b[b.len - 1] != '\n') try out.append(self.allocator, '\n');
-                    }
-                    try out.appendSlice(self.allocator, source[anchor..r.start]);
-                } else {
-                    try out.appendSlice(self.allocator, source[pos..r.start]);
-                }
-                pos = r.end;
-            }
-            try out.appendSlice(self.allocator, source[pos..]);
-            try self.replaceAtSpan(Span.init(0, source.len), out.items);
+            return toml_edit.reorderTables(self, order);
         }
 
         /// Append `: value` for a mapping entry whose key is already written at
         /// column `col`. Scalars and block scalars stay inline (`key: value`);
         /// a multi-line block collection goes on the following lines, indented
         /// (a nested mapping at `col + 2`, an indentless sequence at `col`).
-        fn writeMapValue(self: *Self, out: *std.ArrayList(u8), col: usize, value_text: []const u8) !void {
+        pub fn writeMapValue(self: *Self, out: *std.ArrayList(u8), col: usize, value_text: []const u8) !void {
             const v = stripTrailingNewline(value_text);
             const nl = std.mem.indexOfScalar(u8, v, '\n');
             const first_line = std.mem.trimStart(u8, if (nl) |i| v[0..i] else v, " ");
@@ -1146,7 +720,7 @@ pub fn firstNonSpace(source: []const u8, from: usize) usize {
 }
 
 /// Column (0-based) of the byte at `at` within its line.
-fn columnOf(source: []const u8, at: usize) usize {
+pub fn columnOf(source: []const u8, at: usize) usize {
     return at - lineStartBefore(source, at);
 }
 
@@ -1160,7 +734,7 @@ fn dashColumn(source: []const u8, item_content_start: usize) usize {
 
 /// Whether the container at `span` is written in flow style (`{...}`/`[...]`).
 /// The AST records no flow/block flag, so we sniff the first content byte.
-fn isFlow(source: []const u8, span: Span) bool {
+pub fn isFlow(source: []const u8, span: Span) bool {
     const i = firstNonSpace(source, span.start);
     return i < source.len and (source[i] == '{' or source[i] == '[');
 }
@@ -1227,7 +801,7 @@ fn entryBlockEnd(source: []const u8, kv_span: Span) usize {
 /// separator from whatever precedes it. The block's own bytes are appended
 /// verbatim (its trailing newline, if any, is preserved), so concatenating
 /// blocks in a new order never welds two entries onto one line.
-fn appendBlockSep(out: *std.ArrayList(u8), allocator: std.mem.Allocator, block: []const u8) !void {
+pub fn appendBlockSep(out: *std.ArrayList(u8), allocator: std.mem.Allocator, block: []const u8) !void {
     if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
         try out.append(allocator, '\n');
     }
@@ -1307,662 +881,4 @@ fn reindentInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value_tex
         try out.appendSlice(allocator, line);
         first = false;
     }
-}
-
-// =======
-// TESTING
-// =======
-
-fn testEditor(input: []const u8, path: []const AST.PathSegment, key_or_val: enum { key, val }, text: []const u8, expected: []const u8) !void {
-    var editor: Editor(json.Language) = .{ .allocator = std.testing.allocator };
-    try editor.init(input);
-    defer editor.deinit();
-    switch (key_or_val) {
-        .key => try editor.replaceKeyAtPath(path, text),
-        .val => try editor.replaceValAtPath(path, text),
-    }
-    const actual = editor.source.items;
-    errdefer log.err("actual: {s}", .{actual});
-    errdefer log.err("expected: {s}", .{expected});
-    try std.testing.expect(std.mem.eql(u8, expected, actual));
-}
-
-test "simple value edit" {
-    try testEditor(
-        "[{\"hello\":\"world\"}]",
-        &[_]AST.PathSegment{ .{ .index = 0 }, .{ .key = "hello" } },
-        .val,
-        "\"person!\"",
-        "[{\"hello\":\"person!\"}]",
-    );
-}
-
-test "simple key edit" {
-    try testEditor("[{\"hello\":\"world\"}]", &[_]AST.PathSegment{ .{ .index = 0 }, .{ .key = "hello" } }, .key, "\"greetings\"", "[{\"greetings\":\"world\"}]");
-}
-
-// --- JSON5 editing ---
-//
-// JSON5 is a dialect of the JSON language, so it routes through the same generic
-// editor. The editor splices source bytes in place (it never reprints), so every
-// JSON5-ism outside the edited span — unquoted keys, trailing commas, single
-// quotes, `//` and `/* */` comments — survives byte-for-byte. The owned-comment
-// scan on delete is `//`/`/* */`-aware so a deleted key carries its own comment.
-
-fn newJson5Editor(input: []const u8) !Editor(json.Language) {
-    var ed: Editor(json.Language) = .{ .allocator = std.testing.allocator, .format = .JSON5 };
-    try ed.init(input);
-    return ed;
-}
-
-fn expectJson5Source(ed: *const Editor(json.Language), expected: []const u8) !void {
-    errdefer log.err("actual:   \"{s}\"", .{ed.source.items});
-    errdefer log.err("expected: \"{s}\"", .{expected});
-    try std.testing.expectEqualStrings(expected, ed.source.items);
-}
-
-test "json5 value edit preserves unquoted keys, comments, trailing comma" {
-    var ed = try newJson5Editor(
-        \\{
-        \\  // server config
-        \\  host: 'localhost',
-        \\  port: 8080, // default
-        \\}
-    );
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "port" }}, "9090");
-    try expectJson5Source(&ed,
-        \\{
-        \\  // server config
-        \\  host: 'localhost',
-        \\  port: 9090, // default
-        \\}
-    );
-}
-
-test "json5 key rename keeps it unquoted" {
-    var ed = try newJson5Editor("{ host: 'localhost', port: 8080 }");
-    defer ed.deinit();
-    try ed.replaceKeyAtPath(&.{.{ .key = "port" }}, "listen");
-    try expectJson5Source(&ed, "{ host: 'localhost', listen: 8080 }");
-}
-
-test "json5 delete key carries its owned // comment" {
-    var ed = try newJson5Editor(
-        \\{
-        \\  host: 'localhost',
-        \\  // the listening port
-        \\  port: 8080,
-        \\}
-    );
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "port" }});
-    try expectJson5Source(&ed,
-        \\{
-        \\  host: 'localhost',
-        \\}
-    );
-}
-
-test "json5 delete key carries an owned /* */ block comment" {
-    var ed = try newJson5Editor(
-        \\{
-        \\  host: 'localhost',
-        \\  /* the listening
-        \\     port number */
-        \\  port: 8080,
-        \\}
-    );
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "port" }});
-    try expectJson5Source(&ed,
-        \\{
-        \\  host: 'localhost',
-        \\}
-    );
-}
-
-test "json5 delete leaves an unrelated earlier comment intact" {
-    var ed = try newJson5Editor(
-        \\{
-        \\  // host comment
-        \\  host: 'localhost',
-        \\  port: 8080,
-        \\}
-    );
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "port" }});
-    try expectJson5Source(&ed,
-        \\{
-        \\  // host comment
-        \\  host: 'localhost',
-        \\}
-    );
-}
-
-const Yaml = @import("yaml/yaml.zig").Language;
-
-fn newYamlEditor(input: []const u8) !Editor(Yaml) {
-    var ed: Editor(Yaml) = .{ .allocator = std.testing.allocator };
-    try ed.init(input);
-    return ed;
-}
-
-fn expectSource(ed: *const Editor(Yaml), expected: []const u8) !void {
-    errdefer log.err("actual:   \"{s}\"", .{ed.source.items});
-    errdefer log.err("expected: \"{s}\"", .{expected});
-    try std.testing.expectEqualStrings(expected, ed.source.items);
-}
-
-// --- reference layer: COW + opt-in follow ---
-
-test "yaml edit through alias is copy-on-write (severs only that alias)" {
-    var ed = try newYamlEditor("a: &x 1\nb: *x\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "b" }}, "5");
-    try expectSource(&ed, "a: &x 1\nb: 5\n"); // anchor + value of `a` untouched
-}
-
-test "yaml follow-mode edits the anchored value, keeping the anchor" {
-    var ed = try newYamlEditor("a: &x 1\nb: *x\n");
-    defer ed.deinit();
-    try ed.replaceValAtPathFollowing(&.{.{ .key = "b" }}, "5");
-    try expectSource(&ed, "a: &x 5\nb: *x\n"); // shared source changed; alias intact
-}
-
-test "yaml COW materializes a merge-only key locally" {
-    var ed = try newYamlEditor("base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{ .{ .key = "d" }, .{ .key = "x" } }, "5");
-    try expectSource(&ed, "base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n  x: 5\n");
-}
-
-test "yaml deleting a merge-only key is refused" {
-    var ed = try newYamlEditor("base: &b\n  x: 1\nd:\n  <<: *b\n  y: 2\n");
-    defer ed.deinit();
-    try std.testing.expectError(error.MergeOnlyKey, ed.deleteKey(&.{ .{ .key = "d" }, .{ .key = "x" } }));
-}
-
-// --- insert key, block ---
-
-test "yaml insert key block" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{}, "c", "3");
-    try expectSource(&ed, "a: 1\nb: 2\nc: 3\n");
-}
-
-test "yaml insert key no trailing newline" {
-    var ed = try newYamlEditor("a: 1\nb: 2");
-    defer ed.deinit();
-    try ed.insertKey(&.{}, "c", "3");
-    try expectSource(&ed, "a: 1\nb: 2\nc: 3\n");
-}
-
-test "yaml insert key nested column inheritance" {
-    var ed = try newYamlEditor("root:\n  x: 1\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{.{ .key = "root" }}, "y", "2");
-    try expectSource(&ed, "root:\n  x: 1\n  y: 2\n");
-}
-
-test "yaml insert key multiline block scalar" {
-    var ed = try newYamlEditor("a: 1\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{}, "desc", "|\n  line one\n  line two\n");
-    try expectSource(&ed, "a: 1\ndesc: |\n  line one\n  line two\n");
-}
-
-// --- insert key, flow / empty ---
-
-test "yaml insert key empty flow map" {
-    var ed = try newYamlEditor("env: {}\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{.{ .key = "env" }}, "X", "1");
-    try expectSource(&ed, "env: {X: 1}\n");
-}
-
-test "yaml insert key nonempty flow map" {
-    var ed = try newYamlEditor("env: {a: 1}\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{.{ .key = "env" }}, "b", "2");
-    try expectSource(&ed, "env: {a: 1, b: 2}\n");
-}
-
-test "yaml insert key promotes null value" {
-    var ed = try newYamlEditor("k:\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{.{ .key = "k" }}, "n", "1");
-    try expectSource(&ed, "k:\n  n: 1\n");
-}
-
-test "yaml insert key with nested mapping value" {
-    var ed = try newYamlEditor("a: 1\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{}, "meta", "x: 1\ny: 2\n");
-    try expectSource(&ed, "a: 1\nmeta:\n  x: 1\n  y: 2\n");
-}
-
-test "yaml insert key with indentless sequence value" {
-    var ed = try newYamlEditor("a: 1\n");
-    defer ed.deinit();
-    try ed.insertKey(&.{}, "tags", "- x\n- y\n");
-    try expectSource(&ed, "a: 1\ntags:\n- x\n- y\n");
-}
-
-// --- delete key + trivia ---
-
-test "yaml delete middle key" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "a: 1\nc: 3\n");
-}
-
-test "yaml delete key with owned comment" {
-    var ed = try newYamlEditor("a: 1\n# note\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "a: 1\nc: 3\n");
-}
-
-test "yaml delete key preserves comment across blank line" {
-    var ed = try newYamlEditor("a: 1\n# orphan\n\nb: 2\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "a: 1\n# orphan\n\n");
-}
-
-test "yaml delete key with multiline comment block" {
-    var ed = try newYamlEditor("# l1\n# l2\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "c: 3\n");
-}
-
-test "yaml delete last key" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "a: 1\n");
-}
-
-test "yaml delete sole key" {
-    var ed = try newYamlEditor("a: 1\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "a" }});
-    try expectSource(&ed, "");
-}
-
-test "yaml delete key trailing same-line comment" {
-    var ed = try newYamlEditor("a: 1\nb: 2 # gone\nc: 3\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "b" }});
-    try expectSource(&ed, "a: 1\nc: 3\n");
-}
-
-test "yaml delete key with block scalar value" {
-    var ed = try newYamlEditor("a: |\n  x\n  y\nb: 2\n");
-    defer ed.deinit();
-    try ed.deleteKey(&.{.{ .key = "a" }});
-    try expectSource(&ed, "b: 2\n");
-}
-
-// --- sequences ---
-
-test "yaml append block seq" {
-    var ed = try newYamlEditor("- a\n- b\n");
-    defer ed.deinit();
-    try ed.appendToSeq(&.{}, "c");
-    try expectSource(&ed, "- a\n- b\n- c\n");
-}
-
-test "yaml append indentless seq" {
-    var ed = try newYamlEditor("one:\n- 2\n- 3\n");
-    defer ed.deinit();
-    try ed.appendToSeq(&.{.{ .key = "one" }}, "4");
-    try expectSource(&ed, "one:\n- 2\n- 3\n- 4\n");
-}
-
-test "yaml append indented nested seq" {
-    var ed = try newYamlEditor("k:\n  - a\n  - b\n");
-    defer ed.deinit();
-    try ed.appendToSeq(&.{.{ .key = "k" }}, "c");
-    try expectSource(&ed, "k:\n  - a\n  - b\n  - c\n");
-}
-
-test "yaml prepend block seq" {
-    var ed = try newYamlEditor("- a\n- b\n");
-    defer ed.deinit();
-    try ed.prependToSeq(&.{}, "z");
-    try expectSource(&ed, "- z\n- a\n- b\n");
-}
-
-test "yaml append flow seq" {
-    var ed = try newYamlEditor("t: [a, b]\n");
-    defer ed.deinit();
-    try ed.appendToSeq(&.{.{ .key = "t" }}, "c");
-    try expectSource(&ed, "t: [a, b, c]\n");
-}
-
-test "yaml append empty flow seq" {
-    var ed = try newYamlEditor("t: []\n");
-    defer ed.deinit();
-    try ed.appendToSeq(&.{.{ .key = "t" }}, "a");
-    try expectSource(&ed, "t: [a]\n");
-}
-
-test "yaml remove block seq middle" {
-    var ed = try newYamlEditor("- a\n- b\n- c\n");
-    defer ed.deinit();
-    try ed.removeSeqItem(&.{}, 1);
-    try expectSource(&ed, "- a\n- c\n");
-}
-
-test "yaml remove flow seq middle" {
-    var ed = try newYamlEditor("t: [a, b, c]\n");
-    defer ed.deinit();
-    try ed.removeSeqItem(&.{.{ .key = "t" }}, 1);
-    try expectSource(&ed, "t: [a, c]\n");
-}
-
-test "yaml remove flow seq first" {
-    var ed = try newYamlEditor("t: [a, b]\n");
-    defer ed.deinit();
-    try ed.removeSeqItem(&.{.{ .key = "t" }}, 0);
-    try expectSource(&ed, "t: [b]\n");
-}
-
-// --- atomicity ---
-
-test "yaml failed edit rolls back source and keeps editor usable" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-
-    // Splice an unterminated flow sequence as a's value: the reparse fails
-    // (the specific error is the parser's concern; we only require failure).
-    if (ed.replaceValAtPath(&.{.{ .key = "a" }}, "[oops")) |_| {
-        return error.TestExpectedFailedEdit;
-    } else |_| {}
-    // Source is byte-identical to before the failed edit...
-    try expectSource(&ed, "a: 1\nb: 2\n");
-    // ...and the document still matches it, so a later valid edit works.
-    try ed.replaceValAtPath(&.{.{ .key = "a" }}, "9");
-    try expectSource(&ed, "a: 9\nb: 2\n");
-}
-
-// --- value reframing on replace (inline <-> block) ---
-
-test "yaml replace inline empty seq with a block list" {
-    var ed = try newYamlEditor("t: []\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "t" }}, "- a\n- b");
-    try expectSource(&ed, "t:\n- a\n- b\n");
-}
-
-test "yaml replace block list with an inline empty seq" {
-    var ed = try newYamlEditor("t:\n- a\n- b\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "t" }}, "[]");
-    try expectSource(&ed, "t: []\n");
-}
-
-test "yaml replace scalar with a single-item block list" {
-    var ed = try newYamlEditor("k: old\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "k" }}, "- a");
-    try expectSource(&ed, "k:\n- a\n");
-}
-
-test "yaml replace null value with a block list" {
-    var ed = try newYamlEditor("k:\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "k" }}, "- a");
-    try expectSource(&ed, "k:\n- a\n");
-}
-
-test "yaml replace scalar with a nested mapping" {
-    var ed = try newYamlEditor("m: x\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "m" }}, "a: 1\nb: 2");
-    try expectSource(&ed, "m:\n  a: 1\n  b: 2\n");
-}
-
-test "yaml replace scalar with scalar keeps it inline" {
-    var ed = try newYamlEditor("title: Hello\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "title" }}, "Hi");
-    try expectSource(&ed, "title: Hi\n");
-}
-
-test "yaml replace preserves a trailing line comment" {
-    var ed = try newYamlEditor("title: Hello # note\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{.{ .key = "title" }}, "Hi");
-    try expectSource(&ed, "title: Hi # note\n");
-}
-
-test "yaml reframe a nested mapping value" {
-    var ed = try newYamlEditor("root:\n  c: []\n");
-    defer ed.deinit();
-    try ed.replaceValAtPath(&.{ .{ .key = "root" }, .{ .key = "c" } }, "- x");
-    try expectSource(&ed, "root:\n  c:\n  - x\n");
-}
-
-// --- move key ---
-
-test "yaml move key forward (src before dest)" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    // Move a to before c: a lands between b and c.
-    try ed.moveKey(&.{.{ .key = "a" }}, &.{.{ .key = "c" }});
-    try expectSource(&ed, "b: 2\na: 1\nc: 3\n");
-}
-
-test "yaml move key backward (dest before src)" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    // Move c to before a.
-    try ed.moveKey(&.{.{ .key = "c" }}, &.{.{ .key = "a" }});
-    try expectSource(&ed, "c: 3\na: 1\nb: 2\n");
-}
-
-test "yaml move key carries owned comment" {
-    var ed = try newYamlEditor("a: 1\n# note for c\nc: 3\nb: 2\n");
-    defer ed.deinit();
-    try ed.moveKey(&.{.{ .key = "c" }}, &.{.{ .key = "a" }});
-    try expectSource(&ed, "# note for c\nc: 3\na: 1\nb: 2\n");
-}
-
-test "yaml move key carries trailing same-line comment" {
-    var ed = try newYamlEditor("a: 1\nb: 2 # keep\nc: 3\n");
-    defer ed.deinit();
-    try ed.moveKey(&.{.{ .key = "b" }}, &.{.{ .key = "a" }});
-    try expectSource(&ed, "b: 2 # keep\na: 1\nc: 3\n");
-}
-
-test "yaml move key with block scalar value" {
-    var ed = try newYamlEditor("a: |\n  x\n  y\nb: 2\n");
-    defer ed.deinit();
-    try ed.moveKey(&.{.{ .key = "b" }}, &.{.{ .key = "a" }});
-    try expectSource(&ed, "b: 2\na: |\n  x\n  y\n");
-}
-
-test "yaml move key to itself is a no-op" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-    try ed.moveKey(&.{.{ .key = "a" }}, &.{.{ .key = "a" }});
-    try expectSource(&ed, "a: 1\nb: 2\n");
-}
-
-// --- reorder keys ---
-
-test "yaml reorder keys full order" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{ "c", "a", "b" });
-    try expectSource(&ed, "c: 3\na: 1\nb: 2\n");
-}
-
-test "yaml reorder keys partial appends rest in original order" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\nd: 4\n");
-    defer ed.deinit();
-    // Only c, a listed; b and d keep their original relative order after.
-    try ed.reorderKeys(&.{}, &.{ "c", "a" });
-    try expectSource(&ed, "c: 3\na: 1\nb: 2\nd: 4\n");
-}
-
-test "yaml reorder keys preserves owned comments" {
-    var ed = try newYamlEditor("# about a\na: 1\nb: 2\n# about c\nc: 3\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{ "c", "b", "a" });
-    try expectSource(&ed, "# about c\nc: 3\nb: 2\n# about a\na: 1\n");
-}
-
-test "yaml reorder keys preserves interleaved blank line with preceding entry" {
-    var ed = try newYamlEditor("a: 1\n\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    // The blank line rides with a (its preceding entry).
-    try ed.reorderKeys(&.{}, &.{ "c", "a", "b" });
-    try expectSource(&ed, "c: 3\na: 1\n\nb: 2\n");
-}
-
-test "yaml reorder keys unknown key ignored" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{ "z", "b", "a" });
-    try expectSource(&ed, "b: 2\na: 1\n");
-}
-
-test "yaml reorder keys no-op when order matches" {
-    var ed = try newYamlEditor("a: 1\nb: 2\nc: 3\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{ "a", "b", "c" });
-    try expectSource(&ed, "a: 1\nb: 2\nc: 3\n");
-}
-
-test "yaml reorder keys empty list keeps original order" {
-    var ed = try newYamlEditor("a: 1\nb: 2\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{});
-    try expectSource(&ed, "a: 1\nb: 2\n");
-}
-
-test "yaml reorder keys nested mapping" {
-    var ed = try newYamlEditor("root:\n  x: 1\n  y: 2\n  z: 3\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{.{ .key = "root" }}, &.{ "z", "x" });
-    try expectSource(&ed, "root:\n  z: 3\n  x: 1\n  y: 2\n");
-}
-
-test "yaml reorder keys with block scalar entry" {
-    var ed = try newYamlEditor("a: 1\nbody: |\n  line one\n  line two\nb: 2\n");
-    defer ed.deinit();
-    try ed.reorderKeys(&.{}, &.{ "body", "b", "a" });
-    try expectSource(&ed, "body: |\n  line one\n  line two\nb: 2\na: 1\n");
-}
-
-// --- move sequence item ---
-
-test "yaml move item block forward" {
-    var ed = try newYamlEditor("- a\n- b\n- c\n");
-    defer ed.deinit();
-    // Move item 0 (a) to index 2: remove a, reinsert -> b, c, a.
-    try ed.moveItem(&.{}, 0, 2);
-    try expectSource(&ed, "- b\n- c\n- a\n");
-}
-
-test "yaml move item block backward" {
-    var ed = try newYamlEditor("- a\n- b\n- c\n");
-    defer ed.deinit();
-    try ed.moveItem(&.{}, 2, 0);
-    try expectSource(&ed, "- c\n- a\n- b\n");
-}
-
-test "yaml move item carries owned comment" {
-    var ed = try newYamlEditor("- a\n# note for c\n- c\n- b\n");
-    defer ed.deinit();
-    // Items: a(0), c(1), b(2). Move c to the front.
-    try ed.moveItem(&.{}, 1, 0);
-    try expectSource(&ed, "# note for c\n- c\n- a\n- b\n");
-}
-
-test "yaml move item to itself is a no-op" {
-    var ed = try newYamlEditor("- a\n- b\n");
-    defer ed.deinit();
-    try ed.moveItem(&.{}, 1, 1);
-    try expectSource(&ed, "- a\n- b\n");
-}
-
-test "yaml move flow item" {
-    var ed = try newYamlEditor("t: [a, b, c]\n");
-    defer ed.deinit();
-    try ed.moveItem(&.{.{ .key = "t" }}, 0, 2);
-    try expectSource(&ed, "t: [b, c, a]\n");
-}
-
-// --- reorder sequence items ---
-
-test "yaml reorder items block partial" {
-    var ed = try newYamlEditor("- a\n- b\n- c\n");
-    defer ed.deinit();
-    // Bring index 2 then 0 to the front; the rest (b) follows in order.
-    try ed.reorderItems(&.{}, &.{ 2, 0 });
-    try expectSource(&ed, "- c\n- a\n- b\n");
-}
-
-test "yaml reorder items nested under key" {
-    var ed = try newYamlEditor("tags:\n- x\n- y\n- z\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{.{ .key = "tags" }}, &.{ 2, 1, 0 });
-    try expectSource(&ed, "tags:\n- z\n- y\n- x\n");
-}
-
-test "yaml reorder items indented nested seq" {
-    var ed = try newYamlEditor("k:\n  - a\n  - b\n  - c\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{.{ .key = "k" }}, &.{1});
-    try expectSource(&ed, "k:\n  - b\n  - a\n  - c\n");
-}
-
-test "yaml reorder items preserves owned comment" {
-    var ed = try newYamlEditor("- a\n# note for b\n- b\n- c\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{}, &.{ 1, 0 });
-    try expectSource(&ed, "# note for b\n- b\n- a\n- c\n");
-}
-
-test "yaml reorder flow items keeps spaced separators" {
-    var ed = try newYamlEditor("t: [a, b, c]\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{.{ .key = "t" }}, &.{ 2, 0 });
-    try expectSource(&ed, "t: [c, a, b]\n");
-}
-
-test "yaml reorder flow items keeps tight separators" {
-    var ed = try newYamlEditor("t: [a,b,c]\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{.{ .key = "t" }}, &.{ 2, 1, 0 });
-    try expectSource(&ed, "t: [c,b,a]\n");
-}
-
-test "yaml reorder items out of range index ignored" {
-    var ed = try newYamlEditor("- a\n- b\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{}, &.{ 9, 1 });
-    try expectSource(&ed, "- b\n- a\n");
-}
-
-test "yaml reorder items no-op when order matches" {
-    var ed = try newYamlEditor("- a\n- b\n- c\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{}, &.{ 0, 1, 2 });
-    try expectSource(&ed, "- a\n- b\n- c\n");
-}
-
-test "yaml reorder items empty list keeps original order" {
-    var ed = try newYamlEditor("- a\n- b\n");
-    defer ed.deinit();
-    try ed.reorderItems(&.{}, &.{});
-    try expectSource(&ed, "- a\n- b\n");
 }
