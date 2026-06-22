@@ -37,6 +37,14 @@ node_anchors: std.ArrayList(?[]const u8) = .empty,
 node_tags: std.ArrayList(?[]const u8) = .empty,
 anchors: std.ArrayList(AST.Anchor) = .empty,
 ref_seen: bool = false,
+// Comment layer, also grown in lockstep with `nodes`. `pending_leading` buffers
+// own-line comments seen while skipping trivia until the next node claims them;
+// trailing comments are set directly. Materialized only when `comments_seen`.
+// Comment text borrows `src` (comments never contain escapes), so nothing here
+// is owned except the per-node `leading` slices handed off at `claimLeading`.
+node_comments: std.ArrayList(AST.NodeComments) = .empty,
+pending_leading: std.ArrayList(AST.Comment) = .empty,
+comments_seen: bool = false,
 
 pub const ParseError = error{
     UnexpectedToken,
@@ -44,6 +52,7 @@ pub const ParseError = error{
     UnclosedString,
     UnclosedArray,
     UnclosedObject,
+    UnterminatedComment,
     ExpectedColon,
     InvalidExtended,
     InvalidEscape,
@@ -77,11 +86,23 @@ pub fn deinit(self: *Parser) void {
     self.node_anchors.deinit(self.allocator);
     self.node_tags.deinit(self.allocator);
     self.anchors.deinit(self.allocator);
+    // Free any `leading` slices still owned here. After a successful
+    // `parseOnce` these moved to the AST and the list is empty; on an error
+    // path they are freed here. Comment text borrows `src`, so it is not freed.
+    for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+    self.node_comments.deinit(self.allocator);
+    self.pending_leading.deinit(self.allocator);
 }
 
 fn parseOnce(self: *Parser) ParserError!Document {
     const root = try self.parseNode();
-    self.skipWs();
+    try self.claimLeading(root);
+    // A trailing comment on the same line as the root, then the document's final
+    // trivia. Any end-of-file orphan comments are dropped in this first cut.
+    self.skipInline();
+    if (try self.tryComment()) |c| self.setTrailing(root, c);
+    try self.collectLeading();
+    self.clearPending();
     if (self.peek() != null) return error.TrailingGarbage;
 
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
@@ -118,6 +139,13 @@ fn parseOnce(self: *Parser) ParserError!Document {
         ast.anchors = try self.anchors.toOwnedSlice(self.allocator);
         self.anchors = .empty;
     }
+    // Materialized last so no fallible step follows it: hands the owned `leading`
+    // slices to the AST in one move. Done only when comments were actually seen,
+    // leaving the AST's `&.{}` default otherwise.
+    if (self.comments_seen) {
+        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
+        self.node_comments = .empty;
+    }
 
     return .{ .source = self.src, .ast = ast, .node_spans = spans };
 }
@@ -134,14 +162,18 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, start: usize) ParserError!AST.Nod
     try self.spans.append(self.allocator, .{ .start = start, .end = self.pos });
     try self.node_anchors.append(self.allocator, null);
     try self.node_tags.append(self.allocator, null);
+    try self.node_comments.append(self.allocator, .{});
     return id;
 }
 
 // ── grammar ─────────────────────────────────────────────────────────────────
 
-/// A node is any reference-layer prefixes (`&anchor`, `!tag`) followed by a value.
+/// A node is any reference-layer prefixes (`&anchor`, `!tag`) followed by a
+/// value. Leading comments encountered here accumulate in `pending_leading`;
+/// the enclosing container (or the document root) claims them onto the right
+/// node via `claimLeading` once it knows which node they belong to.
 fn parseNode(self: *Parser) ParserError!AST.Node.Id {
-    self.skipWs();
+    try self.collectLeading();
     var anchor: ?[]const u8 = null;
     var tag: ?[]const u8 = null;
     while (true) {
@@ -269,9 +301,10 @@ fn parseSequence(self: *Parser) ParserError!AST.Node.Id {
     if (self.depth > Printer.max_depth) return error.NestingTooDeep;
     defer self.depth -= 1;
     const id = try self.addNode(.{ .sequence = null }, start);
-    self.skipWs();
+    try self.collectLeading();
     if (self.peek() == ']') {
         self.pos += 1;
+        self.clearPending(); // drop any comments inside an empty `[ … ]`
         self.spans.items[id].end = self.pos;
         return id;
     }
@@ -279,24 +312,12 @@ fn parseSequence(self: *Parser) ParserError!AST.Node.Id {
     var prev: ?AST.Node.Id = null;
     while (true) {
         const child = try self.parseNode();
+        // A sequence element is its own value node: leading and trailing
+        // comments both bind directly to it.
+        try self.claimLeading(child);
         if (prev) |p| self.nodes.items[p].next_sibling = child else first = child;
         prev = child;
-        self.skipWs();
-        switch (self.peek() orelse return error.UnclosedArray) {
-            ',' => {
-                self.pos += 1;
-                self.skipWs();
-                if (self.peek() == ']') { // tolerate a trailing comma
-                    self.pos += 1;
-                    break;
-                }
-            },
-            ']' => {
-                self.pos += 1;
-                break;
-            },
-            else => return error.UnexpectedToken,
-        }
+        if (try self.finishElement(']', error.UnclosedArray, child)) break;
     }
     self.nodes.items[id].kind = .{ .sequence = first };
     self.spans.items[id].end = self.pos;
@@ -310,9 +331,10 @@ fn parseMapping(self: *Parser) ParserError!AST.Node.Id {
     if (self.depth > Printer.max_depth) return error.NestingTooDeep;
     defer self.depth -= 1;
     const id = try self.addNode(.{ .mapping = null }, start);
-    self.skipWs();
+    try self.collectLeading();
     if (self.peek() == '}') {
         self.pos += 1;
+        self.clearPending(); // drop any comments inside an empty `{ … }`
         self.spans.items[id].end = self.pos;
         return id;
     }
@@ -320,29 +342,20 @@ fn parseMapping(self: *Parser) ParserError!AST.Node.Id {
     var prev: ?AST.Node.Id = null;
     while (true) {
         const key = try self.parseNode();
+        // An entry's leading comment sits above the key; its trailing comment
+        // follows the value. This mirrors the native printer's anchors.
+        try self.claimLeading(key);
         self.skipWs();
         if (self.peek() != ':') return error.ExpectedColon;
         self.pos += 1;
         const value = try self.parseNode();
+        // Normally empty; claims any (non-canonical) comment between `:` and the
+        // value so it can't leak onto the next entry's key.
+        try self.claimLeading(value);
         const kv = try self.addNode(.{ .keyvalue = .{ .key = key, .value = value } }, self.spans.items[key].start);
         if (prev) |p| self.nodes.items[p].next_sibling = kv else first = kv;
         prev = kv;
-        self.skipWs();
-        switch (self.peek() orelse return error.UnclosedObject) {
-            ',' => {
-                self.pos += 1;
-                self.skipWs();
-                if (self.peek() == '}') { // tolerate a trailing comma
-                    self.pos += 1;
-                    break;
-                }
-            },
-            '}' => {
-                self.pos += 1;
-                break;
-            },
-            else => return error.UnexpectedToken,
-        }
+        if (try self.finishElement('}', error.UnclosedObject, value)) break;
     }
     self.nodes.items[id].kind = .{ .mapping = first };
     self.spans.items[id].end = self.pos;
@@ -446,6 +459,103 @@ fn skipWs(self: *Parser) void {
     }
 }
 
+/// Skip spaces and tabs only — never a newline, never a comment. Used to reach a
+/// same-line trailing comment or a separator without crossing into the next
+/// line's leading trivia.
+fn skipInline(self: *Parser) void {
+    while (self.peek()) |c| {
+        if (c == ' ' or c == '\t') self.pos += 1 else break;
+    }
+}
+
+/// Skip whitespace (newlines included) and comments, buffering each comment in
+/// `pending_leading` for the next node to claim. Returns at the next value byte.
+fn collectLeading(self: *Parser) ParserError!void {
+    while (true) {
+        self.skipWs();
+        const c = try self.tryComment() orelse return;
+        try self.pending_leading.append(self.allocator, c);
+        // `comments_seen` is set only once a comment actually binds to a node
+        // (in `claimLeading`/`setTrailing`), so a buffered-then-dropped orphan
+        // leaves the document comment-free.
+    }
+}
+
+/// If positioned at a comment marker, consume the whole comment and return it;
+/// otherwise leave `pos` unchanged and return null. The returned text borrows
+/// `src` (marker stripped, surrounding whitespace trimmed) — comments never
+/// contain escapes, so nothing is allocated.
+fn tryComment(self: *Parser) ParserError!?AST.Comment {
+    if (self.peek() != '/' or self.pos + 1 >= self.src.len) return null;
+    switch (self.src[self.pos + 1]) {
+        '/' => {
+            self.pos += 2;
+            const s = self.pos;
+            while (self.peek()) |c| : (self.pos += 1) {
+                if (c == '\n') break;
+            }
+            return .{ .text = std.mem.trim(u8, self.src[s..self.pos], " \t\r"), .style = .line };
+        },
+        '*' => {
+            self.pos += 2;
+            const s = self.pos;
+            const len = std.mem.indexOf(u8, self.src[self.pos..], "*/") orelse return error.UnterminatedComment;
+            self.pos += len + 2; // past the closing `*/`
+            return .{ .text = std.mem.trim(u8, self.src[s .. s + len], " \t\r\n"), .style = .block };
+        },
+        else => return null,
+    }
+}
+
+/// Hand the buffered leading comments to node `id`, transferring ownership of
+/// the slice to the comment table. No-op when nothing is buffered.
+fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.pending_leading.toOwnedSlice(self.allocator);
+    self.pending_leading = .empty;
+    self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
+}
+
+/// Bind a same-line trailing comment to node `id`.
+fn setTrailing(self: *Parser, id: AST.Node.Id, c: AST.Comment) void {
+    self.node_comments.items[id].trailing = c;
+    self.comments_seen = true;
+}
+
+/// Drop buffered leading comments that have no node to attach to (orphans inside
+/// an empty container or at end of file). First-cut policy: discard them.
+fn clearPending(self: *Parser) void {
+    self.pending_leading.clearRetainingCapacity();
+}
+
+/// After an element's value is parsed (and its leading claimed), consume an
+/// optional same-line trailing comment plus the separator. Binds the trailing
+/// comment to `trailing_target`. Returns true when the container closed (`close`
+/// consumed), false when another element follows. The canonical native form
+/// puts a trailing comment after the comma (`v, // c`); a last element carries
+/// it directly (`v // c`).
+fn finishElement(self: *Parser, close: u8, unclosed: ParseError, trailing_target: AST.Node.Id) ParserError!bool {
+    self.skipInline();
+    var had_comma = false;
+    if (self.peek() == ',') {
+        self.pos += 1;
+        had_comma = true;
+        self.skipInline();
+    }
+    if (try self.tryComment()) |c| self.setTrailing(trailing_target, c);
+    try self.collectLeading();
+    const c = self.peek() orelse return unclosed;
+    if (c == close) {
+        self.pos += 1;
+        self.clearPending(); // orphan comments before the close delimiter
+        return true;
+    }
+    // More content is only legal across a comma separator.
+    if (had_comma) return false;
+    return error.UnexpectedToken;
+}
+
 fn peek(self: *const Parser) ?u8 {
     return if (self.pos < self.src.len) self.src[self.pos] else null;
 }
@@ -487,11 +597,68 @@ fn expectRoundTrip(input: []const u8) !void {
     var reparsed = try parseAbstract(testing.allocator, out1.written());
     defer reparsed.deinit();
     try testing.expect(ast.eql(reparsed));
+    // Comments are excluded from `eql`, so assert them separately.
+    try testing.expect(ast.commentsEql(reparsed));
 
     var out2: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out2.deinit();
     try Printer.print(&out2.writer, &reparsed);
     try testing.expectEqualStrings(out1.written(), out2.written());
+}
+
+test "round-trips comments: leading, trailing, line, block" {
+    // Canonical form (what the printer emits), so the byte-identical reprint
+    // check applies in full.
+    try expectRoundTrip(
+        \\{
+        \\  // leading on first entry
+        \\  "name": "fig", // trailing on a value
+        \\  /* a block comment */
+        \\  "port": 8080,
+        \\  "nums": [
+        \\    // leading on a sequence element
+        \\    1,
+        \\    2 // trailing on the last element
+        \\  ]
+        \\}
+    );
+}
+
+test "captures comment attachment onto the right nodes" {
+    var ast = try parseAbstract(testing.allocator,
+        \\{
+        \\  // c1
+        \\  "a": 1, // c2
+        \\  "b": [2 /* c3 */]
+        \\}
+    );
+    defer ast.deinit();
+
+    const root = ast.nodes[ast.root];
+    const kv_a = ast.nodes[root.kind.mapping.?].kind.keyvalue;
+    // Leading binds to the key node, trailing to the value node.
+    try testing.expectEqualStrings("c1", ast.comments(kv_a.key).leading[0].text);
+    try testing.expect(ast.comments(kv_a.key).leading[0].style == .line);
+    try testing.expectEqualStrings("c2", ast.comments(kv_a.value).trailing.?.text);
+
+    const kv_b = ast.nodes[ast.nodes[root.kind.mapping.?].next_sibling.?].kind.keyvalue;
+    const elem = ast.nodes[ast.nodes[kv_b.value].kind.sequence.?];
+    try testing.expectEqualStrings("c3", ast.comments(elem.id).trailing.?.text);
+    try testing.expect(ast.comments(elem.id).trailing.?.style == .block);
+}
+
+test "comment-free document carries no comment table" {
+    var ast = try parseAbstract(testing.allocator, "[1, 2, 3]");
+    defer ast.deinit();
+    try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
+}
+
+test "drops orphan comments with no owning node (v1 policy)" {
+    // A comment alone in an empty container / at EOF has nothing to bind to.
+    try expectRoundTrip("[]"); // sanity: empty container still round-trips
+    var ast = try parseAbstract(testing.allocator, "[ // orphan\n]");
+    defer ast.deinit();
+    try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
 }
 
 test "round-trips scalars, containers, and node keys" {

@@ -39,7 +39,9 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
 /// `Infinity`/`NaN`.
 pub fn print5(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .json5 };
+    try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
+    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -200,15 +202,70 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
 
     var current_id = first_child;
     while (current_id) |id| {
+        try self.leadingComments(self.ast.leadingCommentAnchor(id), depth + 1);
         if (pretty) try self.writeIndent(depth + 1);
         try self.node(id, depth + 1);
         current_id = self.ast.nodes[id].next_sibling;
         if (current_id != null) try self.writer.writeByte(',');
+        try self.trailingComment(self.ast.trailingCommentAnchor(id));
         if (pretty) try self.writer.writeByte('\n');
     }
 
     if (pretty) try self.writeIndent(depth);
     try self.writer.writeByte(close);
+}
+
+// ── comments (JSON5 only) ───────────────────────────────────────────────────
+// Plain JSON has no comment syntax, so comments are emitted only in the JSON5
+// dialect and only when pretty-printing (a `//` line comment can't survive on a
+// minified single line). Both predicates are checked in the helpers, so callers
+// can invoke them unconditionally.
+
+/// True when comments may be emitted: JSON5 dialect, multi-line output.
+fn commentsOn(self: *const Printer) bool {
+    return self.dialect == .json5 and self.options.pretty;
+}
+
+/// Emit a node's leading comments, one per line at `depth`.
+fn leadingComments(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
+    if (!self.commentsOn()) return;
+    for (self.ast.comments(id).leading) |c| {
+        try self.writeIndent(depth);
+        try self.writeComment(c);
+        try self.writer.writeByte('\n');
+    }
+}
+
+/// Emit a node's trailing comment (if any) after a leading space, no newline.
+fn trailingComment(self: *Printer, id: AST.Node.Id) Error!void {
+    if (!self.commentsOn()) return;
+    if (self.ast.comments(id).trailing) |c| {
+        try self.writer.writeByte(' ');
+        try self.writeComment(c);
+    }
+}
+
+/// Render one comment in JSON5 syntax. JSON5 has both forms, so the stored
+/// `style` is honored directly with no degradation.
+fn writeComment(self: *Printer, c: AST.Comment) Error!void {
+    switch (c.style) {
+        .line => {
+            try self.writer.writeAll("//");
+            if (c.text.len != 0) {
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(c.text);
+            }
+        },
+        .block => {
+            try self.writer.writeAll("/*");
+            if (c.text.len != 0) {
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(c.text);
+                try self.writer.writeByte(' ');
+            }
+            try self.writer.writeAll("*/");
+        },
+    }
 }
 
 fn writeIndent(self: *Printer, depth: usize) Writer.Error!void {
@@ -331,6 +388,53 @@ test "json dialect degrades Infinity to a quoted string" {
     // The same extended node, rendered by the plain-JSON dialect.
     try print(&output.writer, &doc, .{ .pretty = false });
     try std.testing.expectEqualSlices(u8, "\"Infinity\"\n", output.written());
+}
+
+test "json5 emits leading and trailing comments; plain json drops them" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    // { name: "fig" } with a leading line comment on the entry, a trailing line
+    // comment on the value, and a leading block comment on the document.
+    const v = try b.addString("fig");
+    try b.setComments(v, .{ .trailing = .{ .text = "inline", .style = .line } });
+    const k = try b.addString("name");
+    try b.setComments(k, .{ .leading = &.{.{ .text = "greeting", .style = .line }} });
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+    try b.setComments(root, .{ .leading = &.{.{ .text = "doc", .style = .block }} });
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var j5: Writer.Allocating = .init(a);
+    defer j5.deinit();
+    try print5(&j5.writer, &ast, .{});
+    try std.testing.expectEqualStrings(
+        \\/* doc */
+        \\{
+        \\  // greeting
+        \\  name: "fig" // inline
+        \\}
+        \\
+    , j5.written());
+
+    // Plain JSON has no comment syntax: same AST emits clean JSON.
+    var j: Writer.Allocating = .init(a);
+    defer j.deinit();
+    try print(&j.writer, &ast, .{});
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  "name": "fig"
+        \\}
+        \\
+    , j.written());
+
+    // Compact JSON5 also drops comments (a `//` can't survive one line).
+    var c: Writer.Allocating = .init(a);
+    defer c.deinit();
+    try print5(&c.writer, &ast, .{ .pretty = false });
+    try std.testing.expectEqualStrings("{name:\"fig\"}\n", c.written());
 }
 
 test "honors custom indent width" {

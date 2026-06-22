@@ -39,6 +39,12 @@ pub fn deinit(self: *AST) void {
     self.allocator.free(self.node_tags);
     self.allocator.free(self.node_anchors);
     self.allocator.free(self.anchors);
+    // Free each entry's `leading` slice (its own allocation) then the outer
+    // table. Comment *text* aliases `self.source` or lives in `owned_strings`
+    // (already freed above), so it is not freed here — same discipline as the
+    // reference-layer tables.
+    for (self.node_comments) |nc| self.allocator.free(nc.leading);
+    self.allocator.free(self.node_comments);
 }
 
 allocator: Allocator,
@@ -70,7 +76,94 @@ node_anchors: []const ?[]const u8 = &.{},
 /// document declares no anchors.
 anchors: []const Anchor = &.{},
 
+// ── Comment layer (side-table) ─────────────────────────────────────────────
+// Comments are trivia: they ride alongside a value but are NOT part of it, so
+// (like the reference layer above) they live in a node-id-indexed side-table
+// and are excluded from `eql`. The reason to carry them in the AST at all is
+// cross-format conversion — a comment captured from YAML can be re-emitted as a
+// JSON5 `//`/`/* */`. The source marker is therefore NOT stored: only the
+// marker-stripped content and whether it was a line or block comment (a hint
+// each printer honors or downgrades). Empty (`&.{}`) for comment-free documents.
+
+/// Indexed by node id: the comments bound to that node. Empty when the document
+/// carries no comments. Read via `comments(id)`, which guards the table length.
+node_comments: []const NodeComments = &.{},
+
 pub const Anchor = struct { name: []const u8, node: Node.Id };
+
+pub const Comment = struct {
+    /// Marker-stripped content. A `block` comment may contain newlines; a `line`
+    /// comment never does.
+    text: []const u8,
+    /// The author's original form — a hint. A printer whose target format lacks
+    /// the requested form downgrades (a `block` rendered to YAML/TOML becomes a
+    /// run of `#` line comments).
+    style: Style = .line,
+
+    pub const Style = enum { line, block };
+
+    pub fn eql(self: Comment, other: Comment) bool {
+        return self.style == other.style and util.eql(u8, self.text, other.text);
+    }
+};
+
+/// Comments bound to one node: a run of own-line comments above it (in source
+/// order) and at most one same-line trailing comment.
+pub const NodeComments = struct {
+    leading: []const Comment = &.{},
+    trailing: ?Comment = null,
+
+    pub fn isEmpty(self: NodeComments) bool {
+        return self.leading.len == 0 and self.trailing == null;
+    }
+
+    pub fn eql(self: NodeComments, other: NodeComments) bool {
+        if (self.leading.len != other.leading.len) return false;
+        for (self.leading, other.leading) |a, b| if (!a.eql(b)) return false;
+        if ((self.trailing == null) != (other.trailing == null)) return false;
+        if (self.trailing) |t| if (!t.eql(other.trailing.?)) return false;
+        return true;
+    }
+};
+
+/// Read the comments bound to `id`, tolerating a short or absent `node_comments`
+/// table (returns the empty value for ids past its end).
+pub fn comments(self: *const AST, id: Node.Id) NodeComments {
+    return if (id < self.node_comments.len) self.node_comments[id] else .{};
+}
+
+/// The node a container child's *leading* comment binds to: the key of a
+/// `keyvalue` entry (so the comment renders above the key), else the child node
+/// itself (a sequence element). Shared by every printer that emits comments.
+pub fn leadingCommentAnchor(self: *const AST, id: Node.Id) Node.Id {
+    return switch (self.nodes[id].kind) {
+        .keyvalue => |kv| kv.key,
+        else => id,
+    };
+}
+
+/// The node a container child's *trailing* comment binds to: the value of a
+/// `keyvalue` entry (so the comment renders after the value), else the child
+/// node itself.
+pub fn trailingCommentAnchor(self: *const AST, id: Node.Id) Node.Id {
+    return switch (self.nodes[id].kind) {
+        .keyvalue => |kv| kv.value,
+        else => id,
+    };
+}
+
+/// Compare two ASTs' comment layers. Separate from `eql` (which ignores
+/// comments) so round-trip tests can assert comments survived.
+pub fn commentsEql(self: AST, b: AST) bool {
+    const n = @max(self.node_comments.len, b.node_comments.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const x: NodeComments = if (i < self.node_comments.len) self.node_comments[i] else .{};
+        const y: NodeComments = if (i < b.node_comments.len) b.node_comments[i] else .{};
+        if (!x.eql(y)) return false;
+    }
+    return true;
+}
 
 /// Represents a unit of data in an AST.
 pub const Node = struct {
@@ -259,6 +352,11 @@ pub const Builder = struct {
     allocator: Allocator,
     nodes: std.ArrayList(Node) = .empty,
     owned_strings: std.ArrayList([]const u8) = .empty,
+    /// Parallel to `nodes` (one entry appended per node, default-empty). Only
+    /// materialized into the finished AST when `any_comments` is set, so a build
+    /// that never calls `setComments` carries the AST's `&.{}` default.
+    comments: std.ArrayList(NodeComments) = .empty,
+    any_comments: bool = false,
 
     pub const Entry = struct { key: Node.Id, value: Node.Id };
 
@@ -270,6 +368,27 @@ pub const Builder = struct {
         for (self.owned_strings.items) |s| self.allocator.free(s);
         self.owned_strings.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
+        for (self.comments.items) |nc| self.allocator.free(nc.leading);
+        self.comments.deinit(self.allocator);
+    }
+
+    /// Attach comments to an already-added node. Every comment's text is copied
+    /// into `owned_strings` (so the finished AST owns it) and the `leading` run
+    /// is duplicated into its own allocation. Replaces any comments previously
+    /// set on `id`. Pass `.{}` to clear.
+    pub fn setComments(self: *Builder, id: Node.Id, node_comments: NodeComments) Allocator.Error!void {
+        const leading = try self.allocator.alloc(Comment, node_comments.leading.len);
+        errdefer self.allocator.free(leading);
+        for (node_comments.leading, leading) |src, *dst| {
+            dst.* = .{ .text = try self.dupe(src.text), .style = src.style };
+        }
+        var trailing: ?Comment = null;
+        if (node_comments.trailing) |t| {
+            trailing = .{ .text = try self.dupe(t.text), .style = t.style };
+        }
+        self.allocator.free(self.comments.items[id].leading);
+        self.comments.items[id] = .{ .leading = leading, .trailing = trailing };
+        self.any_comments = true;
     }
 
     pub fn addNull(self: *Builder) Allocator.Error!Node.Id {
@@ -345,12 +464,17 @@ pub const Builder = struct {
         self.nodes = .empty;
         const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
         self.owned_strings = .empty;
-        return .{
+        var ast: AST = .{
             .allocator = self.allocator,
             .owned_strings = owned_strings,
             .root = root,
             .nodes = nodes,
         };
+        if (self.any_comments) {
+            ast.node_comments = try self.comments.toOwnedSlice(self.allocator);
+            self.comments = .empty;
+        }
+        return ast;
     }
 
     /// A non-owning `AST` over the builder's current nodes, rooted at `root`.
@@ -364,6 +488,7 @@ pub const Builder = struct {
             .owned_strings = self.owned_strings.items,
             .root = root,
             .nodes = self.nodes.items,
+            .node_comments = if (self.any_comments) self.comments.items else &.{},
         };
     }
 
@@ -372,6 +497,10 @@ pub const Builder = struct {
     fn append(self: *Builder, kind: Node.Kind) Allocator.Error!Node.Id {
         const id: Node.Id = @intCast(self.nodes.items.len);
         try self.nodes.append(self.allocator, .{ .id = id, .kind = kind, .next_sibling = null });
+        errdefer _ = self.nodes.pop();
+        // Keep the comment table the same length as `nodes` so `setComments`
+        // can index it directly. Costs one empty struct per node on every build.
+        try self.comments.append(self.allocator, .{});
         return id;
     }
 

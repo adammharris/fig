@@ -51,7 +51,9 @@ const indent_width = 2;
 /// Print the whole AST to `writer`, with a trailing newline, and flush.
 pub fn print(writer: *Writer, ast: *const AST) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast };
+    try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
+    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -144,14 +146,61 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
     try self.writer.writeByte('\n');
     var current_id = first_child;
     while (current_id) |id| {
+        // A mapping child is a `keyvalue`: its leading comment sits above the
+        // key, its trailing comment after the value. A sequence child is the
+        // value node itself, so both anchors collapse to `id`.
+        try self.leadingComments(self.ast.leadingCommentAnchor(id), depth + 1);
         try self.writeIndent(depth + 1);
         try self.node(id, depth + 1);
         current_id = self.ast.nodes[id].next_sibling;
         if (current_id != null) try self.writer.writeByte(',');
+        try self.trailingComment(self.ast.trailingCommentAnchor(id));
         try self.writer.writeByte('\n');
     }
     try self.writeIndent(depth);
     try self.writer.writeByte(close);
+}
+
+/// Emit a node's leading comments, one per line at `depth`, each terminated by a
+/// newline (so the node's own indented line follows).
+fn leadingComments(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
+    for (self.ast.comments(id).leading) |c| {
+        try self.writeIndent(depth);
+        try self.writeComment(c);
+        try self.writer.writeByte('\n');
+    }
+}
+
+/// Emit a node's trailing comment (if any) after a leading space. No newline —
+/// the caller closes the line.
+fn trailingComment(self: *Printer, id: AST.Node.Id) Error!void {
+    if (self.ast.comments(id).trailing) |c| {
+        try self.writer.writeByte(' ');
+        try self.writeComment(c);
+    }
+}
+
+/// Render one comment in native syntax: `// text` for a line comment, `/* text
+/// */` for a block. Mirrors the marker set the native parser accepts.
+fn writeComment(self: *Printer, c: AST.Comment) Error!void {
+    switch (c.style) {
+        .line => {
+            try self.writer.writeAll("//");
+            if (c.text.len != 0) {
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(c.text);
+            }
+        },
+        .block => {
+            try self.writer.writeAll("/*");
+            if (c.text.len != 0) {
+                try self.writer.writeByte(' ');
+                try self.writer.writeAll(c.text);
+                try self.writer.writeByte(' ');
+            }
+            try self.writer.writeAll("*/");
+        },
+    }
 }
 
 fn writeIndent(self: *Printer, depth: usize) Error!void {
@@ -202,6 +251,36 @@ test "prints empty containers inline" {
         \\{
         \\  "a": [],
         \\  "b": {}
+        \\}
+        \\
+    , out.written());
+}
+
+test "emits leading and trailing comments" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    // { "name": "fig" } with a leading comment on the entry and a trailing
+    // comment on its value, plus a block comment leading the whole document.
+    const v_name = try b.addString("fig");
+    try b.setComments(v_name, .{ .trailing = .{ .text = "inline", .style = .line } });
+    const k_name = try b.addString("name");
+    try b.setComments(k_name, .{ .leading = &.{.{ .text = "greeting", .style = .line }} });
+    const root = try b.addMapping(&.{.{ .key = k_name, .value = v_name }});
+    try b.setComments(root, .{ .leading = &.{.{ .text = "doc", .style = .block }} });
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try print(&out.writer, &ast);
+    try std.testing.expectEqualStrings(
+        \\/* doc */
+        \\{
+        \\  // greeting
+        \\  "name": "fig" // inline
         \\}
         \\
     , out.written());

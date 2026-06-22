@@ -5,6 +5,9 @@ const Writer = std.Io.Writer;
 
 /// Prints a given document in YAML block format.
 pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
+    // Document-level leading comments (those bound to the root) sit at column 0
+    // above everything else.
+    try leadingComments(writer, ast, ast.leadingCommentAnchor(ast.root), 0);
     try printNode(writer, ast, ast.root, 0);
     try writer.flush();
 }
@@ -55,6 +58,9 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
     var current_id = first_child;
     while (current_id) |id| {
         const item = document.nodes[id];
+        // A sequence element is its own value node, so its leading comment binds
+        // directly to it; emit above the `- ` line.
+        try leadingComments(writer, document, document.leadingCommentAnchor(id), depth);
         try writeIndent(writer, depth);
         switch (item.kind) {
             .mapping => |child| {
@@ -78,6 +84,7 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
                 try writer.writeAll("- ");
                 if (!try tryWriteBlockStringValue(writer, document, id, depth + 1)) {
                     try printInlineValue(writer, document, id);
+                    try trailingComment(writer, document, id);
                     try writer.writeByte('\n');
                 }
             },
@@ -94,6 +101,7 @@ fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id
 
     var current_id = first_child;
     while (current_id) |id| {
+        try leadingComments(writer, document, document.leadingCommentAnchor(id), depth);
         try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth);
         current_id = document.nodes[id].next_sibling;
     }
@@ -104,6 +112,7 @@ fn printSequenceMapping(writer: *Writer, document: *const AST, first_pair: AST.N
 
     var current_id = document.nodes[first_pair].next_sibling;
     while (current_id) |id| {
+        try leadingComments(writer, document, document.leadingCommentAnchor(id), depth + 1);
         try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth + 1);
         current_id = document.nodes[id].next_sibling;
     }
@@ -140,6 +149,9 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
             try writer.writeAll(": ");
             if (!try tryWriteBlockStringValue(writer, document, kv.value, depth + 1)) {
                 try printInlineValue(writer, document, kv.value);
+                // Trailing comment rides the value's line (`key: value # note`).
+                // Block-scalar values omit it (no single line to ride).
+                try trailingComment(writer, document, kv.value);
                 try writer.writeByte('\n');
             }
         },
@@ -361,6 +373,90 @@ fn writeBlockScalar(writer: *Writer, s: []const u8, indent: usize) Writer.Error!
 
 fn writeIndent(writer: *Writer, depth: usize) Writer.Error!void {
     for (0..depth) |_| try writer.writeAll("  ");
+}
+
+// ── Comments ────────────────────────────────────────────────────────────────
+// YAML has only `#` line comments. A `block` comment captured from another
+// format (`/* … */`) therefore degrades to a run of `#` lines, one per content
+// line — content survives, block-ness does not (it can't, in YAML).
+
+/// Emit a node's leading comments above its line, at `depth`. Each comment (line
+/// or block) becomes one or more `# …` lines; a multi-line block yields one `#`
+/// line per content line.
+fn leadingComments(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+    for (ast.comments(id).leading) |c| {
+        var it = std.mem.splitScalar(u8, c.text, '\n');
+        while (it.next()) |line| {
+            try writeIndent(writer, depth);
+            try writeHashLine(writer, std.mem.trim(u8, line, " \t"));
+            try writer.writeByte('\n');
+        }
+    }
+}
+
+/// Emit a node's trailing comment after its value (` # …`). A multi-line block
+/// is flattened to one line (newlines → spaces) since a YAML trailing comment
+/// must stay on the value's line.
+fn trailingComment(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!void {
+    const c = ast.comments(id).trailing orelse return;
+    try writer.writeAll(" #");
+    if (c.text.len != 0) {
+        try writer.writeByte(' ');
+        for (c.text) |ch| try writer.writeByte(if (ch == '\n') ' ' else ch);
+    }
+}
+
+/// Write `# text` (or a bare `#` for an empty comment).
+fn writeHashLine(writer: *Writer, text: []const u8) Writer.Error!void {
+    try writer.writeByte('#');
+    if (text.len != 0) {
+        try writer.writeByte(' ');
+        try writer.writeAll(text);
+    }
+}
+
+test "yaml emits comments; block degrades to a # run" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    // { name: "fig", nums: [1, 2] } with assorted comments, including a block
+    // comment that must degrade to two `#` lines in YAML.
+    const v_name = try b.addString("fig");
+    try b.setComments(v_name, .{ .trailing = .{ .text = "inline", .style = .line } });
+    const k_name = try b.addString("name");
+    try b.setComments(k_name, .{ .leading = &.{.{ .text = "greeting", .style = .line }} });
+
+    const n1 = try b.addInt(1);
+    try b.setComments(n1, .{ .leading = &.{.{ .text = "first\nsecond", .style = .block }} });
+    const n2 = try b.addInt(2);
+    try b.setComments(n2, .{ .trailing = .{ .text = "two", .style = .line } });
+    const v_nums = try b.addSequence(&.{ n1, n2 });
+    const k_nums = try b.addString("nums");
+
+    const root = try b.addMapping(&.{
+        .{ .key = k_name, .value = v_name },
+        .{ .key = k_nums, .value = v_nums },
+    });
+    try b.setComments(root, .{ .leading = &.{.{ .text = "config", .style = .line }} });
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try print(&out.writer, &ast);
+    try std.testing.expectEqualStrings(
+        \\# config
+        \\# greeting
+        \\name: fig # inline
+        \\nums:
+        \\# first
+        \\# second
+        \\- 1
+        \\- 2 # two
+        \\
+    , out.written());
 }
 
 test "prints YAML document" {
