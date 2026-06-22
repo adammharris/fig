@@ -40,6 +40,19 @@ node_spans: std.ArrayList(Span) = .empty,
 container_stack: std.ArrayList(OpenContainer) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
 
+// Comment layer (JSON5/JSONC only — strict JSON never tokenizes a comment).
+// `node_comments` grows in lockstep with `nodes`. `pending_leading` buffers
+// own-line comments until the next node claims them (in `addNode`). Comment text
+// borrows `input` (comments carry no escapes). Materialized only when
+// `comments_seen`.
+node_comments: std.ArrayList(AST.NodeComments) = .empty,
+pending_leading: std.ArrayList(AST.Comment) = .empty,
+/// The most recently completed value node — the candidate a same-line trailing
+/// comment binds to. Reset to null by a newline or a comma (both close the
+/// trailing window), so a post-comma/own-line comment becomes leading instead.
+last_value_id: ?AST.Node.Id = null,
+comments_seen: bool = false,
+
 root: ?AST.Node.Id = null,
 
 // Initial fields
@@ -233,9 +246,21 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
     // Each Document.Node has an id, a kind, and a next_sibling ID.
     // We produce them from the tokens.
 
-    for (tokens) |token| {
-        if (token.kind == .whitespace) continue;
-        if (token.kind == .comment) continue;
+    for (tokens, 0..) |token, i| {
+        switch (token.kind) {
+            // A newline closes the previous value's trailing-comment window: a
+            // comment on the next line leads the next node instead.
+            .whitespace => {
+                if (std.mem.indexOfScalar(u8, input[token.span.start..token.span.end], '\n') != null)
+                    self.last_value_id = null;
+                continue;
+            },
+            .comment => {
+                try self.handleComment(input, tokens, i);
+                continue;
+            },
+            else => {},
+        }
 
         switch (self.state) {
             .ExpectValue => {
@@ -416,14 +441,22 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
     const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
     self.owned_strings = .empty;
 
+    var ast: AST = .{
+        .allocator = self.allocator,
+        .owned_strings = owned_strings,
+        .root = root,
+        .nodes = nodes,
+    };
+    // Materialized last (no fallible step follows): hand the owned `leading`
+    // slices to the AST. Only when comments were actually attached.
+    if (self.comments_seen) {
+        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
+        self.node_comments = .empty;
+    }
+
     return .{
         .source = input,
-        .ast = .{
-            .allocator = self.allocator,
-            .owned_strings = owned_strings,
-            .root = root,
-            .nodes = nodes,
-        },
+        .ast = ast,
         .node_spans = node_spans,
     };
 }
@@ -436,6 +469,11 @@ pub fn deinit(self: *Parser) void {
         self.allocator.free(string);
     }
     self.owned_strings.deinit(self.allocator);
+    // After a successful parse these `leading` slices moved to the AST and the
+    // list is empty; on an error path they are freed here. Text borrows `input`.
+    for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+    self.node_comments.deinit(self.allocator);
+    self.pending_leading.deinit(self.allocator);
 }
 
 // ===============
@@ -451,6 +489,12 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) !AST.Node.Id {
         .next_sibling = null, // Update if there is a next sibling
     });
     try self.node_spans.append(self.allocator, span);
+    try self.node_comments.append(self.allocator, .{});
+    // Buffered leading comments bind to the first node opened for the next
+    // child — a key (object entry), a value (array element / root), or a
+    // container. The keyvalue *pair* node (minted in `finishValue`) sees an
+    // already-drained buffer, so this is a no-op there.
+    try self.claimLeading(id);
     return id;
 }
 
@@ -517,6 +561,9 @@ fn attachChild(self: *Parser, parent: *OpenContainer, child_id: AST.Node.Id) voi
 }
 
 fn finishValue(self: *Parser, value_id: AST.Node.Id) !void {
+    // This value is now the trailing-comment candidate (the value node is the
+    // trailing anchor for both array elements and object entries).
+    self.last_value_id = value_id;
     // If there is no parent, the parsing is complete
     if (self.container_stack.items.len == 0) {
         self.root = value_id;
@@ -549,6 +596,69 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) !void {
             self.state = .ExpectObjectCommaOrEnd;
         },
     }
+}
+
+// ── comments ────────────────────────────────────────────────────────────────
+
+/// Classify and attach the comment at `tokens[i]`. It trails the most recently
+/// completed value when that value's trailing window is still open
+/// (`last_value_id` set — no newline since) AND the comment is the last thing on
+/// its line (`endsLine`). Otherwise it buffers as leading for the next node. The
+/// `endsLine` test is what disambiguates `1, // trail` (trailing) from
+/// `1, /*c*/ b` (leading of `b`).
+fn handleComment(self: *Parser, input: []const u8, tokens: []const Token, i: usize) !void {
+    const c = parseComment(tokens[i].source(input));
+    if (self.last_value_id != null and endsLine(input, tokens, i)) {
+        self.setTrailing(self.last_value_id.?, c);
+        self.last_value_id = null; // one trailing per value
+    } else {
+        try self.pending_leading.append(self.allocator, c);
+    }
+}
+
+/// Whether the comment at `tokens[i]` is the last content on its source line —
+/// i.e. the next significant token is a newline, a comma, or a closing
+/// delimiter / EOF. A value/key (or another comment) appearing first on the same
+/// line means this comment instead leads that following content.
+fn endsLine(input: []const u8, tokens: []const Token, i: usize) bool {
+    var j = i + 1;
+    while (j < tokens.len) : (j += 1) {
+        switch (tokens[j].kind) {
+            .whitespace => {
+                if (std.mem.indexOfScalar(u8, input[tokens[j].span.start..tokens[j].span.end], '\n') != null)
+                    return true;
+            },
+            .comma, .close_brace, .close_bracket, .end_of_file => return true,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// Strip the markers from a comment token's raw bytes (which borrow `input`) and
+/// classify line vs block.
+fn parseComment(raw: []const u8) AST.Comment {
+    if (raw.len >= 2 and raw[1] == '*') {
+        // `/* … */` — the tokenizer guarantees the closing `*/`.
+        return .{ .text = std.mem.trim(u8, raw[2 .. raw.len - 2], " \t\r\n"), .style = .block };
+    }
+    // `// …` to end of line.
+    return .{ .text = std.mem.trim(u8, raw[2..], " \t\r"), .style = .line };
+}
+
+/// Hand the buffered leading comments to node `id`, transferring ownership of
+/// the slice. No-op when nothing is buffered.
+fn claimLeading(self: *Parser, id: AST.Node.Id) !void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.pending_leading.toOwnedSlice(self.allocator);
+    self.pending_leading = .empty;
+    self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
+}
+
+fn setTrailing(self: *Parser, id: AST.Node.Id, c: AST.Comment) void {
+    self.node_comments.items[id].trailing = c;
+    self.comments_seen = true;
 }
 
 /// Pushes stack metadata for a container node that already exists in self.nodes
@@ -778,6 +888,56 @@ fn testJson5Error(input: []const u8, expected_error: anyerror) !void {
     } else |err| {
         try testing.expectEqual(expected_error, err);
     }
+}
+
+test "json5: captures leading, trailing, line and block comments" {
+    var ast = try parseJson5(
+        \\{
+        \\  // leading on a
+        \\  a: 1, // trailing on a
+        \\  /* block before b */
+        \\  b: [
+        \\    2 /* trailing block on 2 */,
+        \\    3 // trailing on 3
+        \\  ]
+        \\}
+    );
+    defer ast.deinit();
+
+    const root = ast.nodes[ast.root];
+    const kv_a = ast.nodes[root.kind.mapping.?].kind.keyvalue;
+    // Leading binds to the key, trailing to the value.
+    try testing.expectEqualStrings("leading on a", ast.comments(kv_a.key).leading[0].text);
+    try testing.expectEqualStrings("trailing on a", ast.comments(kv_a.value).trailing.?.text);
+
+    const kv_b = ast.nodes[ast.nodes[root.kind.mapping.?].next_sibling.?].kind.keyvalue;
+    try testing.expectEqualStrings("block before b", ast.comments(kv_b.key).leading[0].text);
+    try testing.expect(ast.comments(kv_b.key).leading[0].style == .block);
+
+    const seq = ast.nodes[kv_b.value];
+    const e2 = ast.nodes[seq.kind.sequence.?];
+    const e3 = ast.nodes[e2.next_sibling.?];
+    try testing.expectEqualStrings("trailing block on 2", ast.comments(e2.id).trailing.?.text);
+    try testing.expect(ast.comments(e2.id).trailing.?.style == .block);
+    try testing.expectEqualStrings("trailing on 3", ast.comments(e3.id).trailing.?.text);
+}
+
+test "json5: post-comma comment leads the next entry, not trails the previous" {
+    // The classic ambiguity: `1, /*c*/ b` — the comma closes 1's trailing window,
+    // so `c` must lead `b`.
+    var ast = try parseJson5("{ a: 1, /* c */ b: 2 }");
+    defer ast.deinit();
+    const root = ast.nodes[ast.root];
+    const kv_a = ast.nodes[root.kind.mapping.?].kind.keyvalue;
+    const kv_b = ast.nodes[ast.nodes[root.kind.mapping.?].next_sibling.?].kind.keyvalue;
+    try testing.expect(ast.comments(kv_a.value).trailing == null);
+    try testing.expectEqualStrings("c", ast.comments(kv_b.key).leading[0].text);
+}
+
+test "json5: comment-free document carries no comment table" {
+    var ast = try parseJson5("{ a: 1, b: [2, 3] }");
+    defer ast.deinit();
+    try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
 }
 
 fn countItems(ast: AST, container: AST.Node.Id) usize {

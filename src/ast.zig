@@ -262,7 +262,7 @@ pub fn eql(self: AST, b: AST) bool {
 // =============
 
 /// The canonical output format families.
-pub const SerializeFormat = enum { json, json5, yaml, toml, zon, native };
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, native };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -302,6 +302,7 @@ pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) Ser
 pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat, options: SerializeOptions) SerializeError!void {
     return switch (format) {
         .json => JsonPrinter.print(writer, self, options),
+        .jsonc => JsonPrinter.printc(writer, self, options),
         .json5 => JsonPrinter.print5(writer, self, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, self) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, self) else error.FormatDisabled,
@@ -319,6 +320,7 @@ pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat,
 pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id, options: SerializeOptions) SerializeError!void {
     return switch (format) {
         .json => JsonPrinter.printNode(writer, self, id, 0, options),
+        .jsonc => JsonPrinter.printNodec(writer, self, id, 0, options),
         .json5 => JsonPrinter.printNode5(writer, self, id, 0, options),
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,

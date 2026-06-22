@@ -237,7 +237,10 @@ pub fn main(init: std.process.Init) !void {
             const doc = if (opts.embed) |embed_type|
                 try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
             else switch (opts.from) {
-                .json, .jsonc => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
+                .json => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
+                // JSONC shares JSON's grammar plus `//` and `/* */` comments, so
+                // it needs the dialect passed through (the default is strict JSON).
+                .jsonc => try parseJsonTypeFromFile(init.arena.allocator(), io, input, .JSONC),
                 .json5 => try parseJsonTypeFromFile(init.arena.allocator(), io, input, .JSON5),
                 .yaml, .yml => if (comptime build_options.lang_yaml) try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input) else return error.FormatDisabled,
                 .toml => if (comptime build_options.lang_toml) try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input) else return error.FormatDisabled,
@@ -293,7 +296,8 @@ pub fn main(init: std.process.Init) !void {
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
             const target: fig.AST.SerializeFormat = switch (opts.to) {
-                .json, .jsonc => .json,
+                .json => .json,
+                .jsonc => .jsonc,
                 .json5 => .json5,
                 .yaml, .yml => .yaml,
                 .toml => .toml,
@@ -632,6 +636,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 };
                 if (std.mem.eql(u8, fmt, "json")) {
                     input_override = .json;
+                } else if (std.mem.eql(u8, fmt, "jsonc")) {
+                    input_override = .jsonc;
                 } else if (std.mem.eql(u8, fmt, "json5")) {
                     input_override = .json5;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
@@ -655,6 +661,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 };
                 if (std.mem.eql(u8, fmt, "json")) {
                     output_override = .json;
+                } else if (std.mem.eql(u8, fmt, "jsonc")) {
+                    output_override = .jsonc;
                 } else if (std.mem.eql(u8, fmt, "json5")) {
                     output_override = .json5;
                 } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {

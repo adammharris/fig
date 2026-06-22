@@ -100,7 +100,9 @@ fn isUnrepresentable(target: Target, kind: AST.Node.Kind) bool {
 pub fn encode(arena: Allocator, ast: *const AST, target: Target) Error!AST {
     var e = Encoder{ .src = ast, .arena = arena, .target = target };
     const root = try e.copy(ast.nodes[ast.root]);
-    return .{ .allocator = arena, .root = root, .nodes = try e.out.toOwnedSlice(arena) };
+    var result: AST = .{ .allocator = arena, .root = root, .nodes = try e.out.toOwnedSlice(arena) };
+    if (e.any_comments) result.node_comments = try e.out_comments.toOwnedSlice(arena);
+    return result;
 }
 
 /// Build a fresh AST in `arena` where every `$fig` envelope is reconstructed to
@@ -109,7 +111,9 @@ pub fn encode(arena: Allocator, ast: *const AST, target: Target) Error!AST {
 pub fn decode(arena: Allocator, ast: *const AST) Error!AST {
     var d = Decoder{ .src = ast, .arena = arena };
     const root = try d.copy(ast.nodes[ast.root]);
-    return .{ .allocator = arena, .root = root, .nodes = try d.out.toOwnedSlice(arena) };
+    var result: AST = .{ .allocator = arena, .root = root, .nodes = try d.out.toOwnedSlice(arena) };
+    if (d.any_comments) result.node_comments = try d.out_comments.toOwnedSlice(arena);
+    return result;
 }
 
 /// The result of a `lossyStrip`: a new AST with every node the target can't
@@ -133,8 +137,10 @@ pub fn lossyStrip(arena: Allocator, ast: *const AST, root_id: Id, target: Target
         return .{ .ast = null, .dropped = try s.dropped.toOwnedSlice(arena) };
     }
     const root = try s.copy(ast.nodes[root_id], "");
+    var stripped: AST = .{ .allocator = arena, .root = root, .nodes = try s.out.toOwnedSlice(arena) };
+    if (s.any_comments) stripped.node_comments = try s.out_comments.toOwnedSlice(arena);
     return .{
-        .ast = .{ .allocator = arena, .root = root, .nodes = try s.out.toOwnedSlice(arena) },
+        .ast = stripped,
         .dropped = try s.dropped.toOwnedSlice(arena),
     };
 }
@@ -146,18 +152,24 @@ const Encoder = struct {
     arena: Allocator,
     target: Target,
     out: std.ArrayList(AST.Node) = .empty,
+    out_comments: std.ArrayList(AST.NodeComments) = .empty,
+    any_comments: bool = false,
 
     fn copy(self: *Encoder, node: AST.Node) Error!Id {
-        return switch (node.kind) {
-            .sequence => |first| copySeq(self, first),
-            .mapping => |first| copyMap(self, first),
+        switch (node.kind) {
+            .sequence => return copySeq(self, node),
+            .mapping => return copyMap(self, node),
             .keyvalue => unreachable, // keyvalues are only reached inside copyMap
-            .null_, .extended => if (needsEnvelope(self.target, node.kind))
-                self.envelope(node.kind)
-            else
-                emit(self, node.kind),
-            else => emit(self, node.kind),
-        };
+            else => {},
+        }
+        // A leaf scalar. If it needs enveloping, the value's comments ride on the
+        // wrapping mapping; otherwise they ride on the copied scalar.
+        const id = if ((node.kind == .null_ or node.kind == .extended) and needsEnvelope(self.target, node.kind))
+            try self.envelope(node.kind)
+        else
+            try emit(self, node.kind);
+        try carry(self, node.id, id);
+        return id;
     }
 
     /// Emit `{ "$fig": { "t": <type>, ["v": <text>] } }` for a null/extended
@@ -195,16 +207,28 @@ const Decoder = struct {
     src: *const AST,
     arena: Allocator,
     out: std.ArrayList(AST.Node) = .empty,
+    out_comments: std.ArrayList(AST.NodeComments) = .empty,
+    any_comments: bool = false,
 
     fn copy(self: *Decoder, node: AST.Node) Error!Id {
         switch (node.kind) {
-            .mapping => |first| {
-                if (self.envelopeKind(node)) |kind| return emit(self, kind);
-                return copyMap(self, first);
+            .mapping => {
+                // A decoded envelope collapses the wrapper mapping back to a
+                // scalar; the wrapper's comments move onto that scalar.
+                if (self.envelopeKind(node)) |kind| {
+                    const id = try emit(self, kind);
+                    try carry(self, node.id, id);
+                    return id;
+                }
+                return copyMap(self, node);
             },
-            .sequence => |first| return copySeq(self, first),
+            .sequence => return copySeq(self, node),
             .keyvalue => unreachable,
-            else => return emit(self, node.kind),
+            else => {
+                const id = try emit(self, node.kind);
+                try carry(self, node.id, id);
+                return id;
+            },
         }
     }
 
@@ -255,21 +279,28 @@ const Stripper = struct {
     arena: Allocator,
     target: Target,
     out: std.ArrayList(AST.Node) = .empty,
+    out_comments: std.ArrayList(AST.NodeComments) = .empty,
+    any_comments: bool = false,
     dropped: std.ArrayList([]const u8) = .empty,
 
     fn copy(self: *Stripper, node: AST.Node, path: []const u8) Error!Id {
         switch (node.kind) {
-            .mapping => |first| return self.copyMap(first, path),
-            .sequence => |first| return self.copySeq(first, path),
+            .mapping => return self.copyMap(node, path),
+            .sequence => return self.copySeq(node, path),
             .keyvalue => unreachable,
-            else => return emit(self, node.kind),
+            else => {
+                const id = try emit(self, node.kind);
+                try carry(self, node.id, id);
+                return id;
+            },
         }
     }
 
-    fn copyMap(self: *Stripper, first: ?Id, path: []const u8) Error!Id {
+    fn copyMap(self: *Stripper, src_node: AST.Node, path: []const u8) Error!Id {
         const id = try emit(self, .{ .mapping = null });
+        try carry(self, src_node.id, id);
         var last: ?Id = null;
-        var c = first;
+        var c = src_node.kind.mapping;
         while (c) |cid| : (c = self.src.nodes[cid].next_sibling) {
             const kv = self.src.nodes[cid].kind.keyvalue;
             const child_path = try self.keyPath(path, kv.key);
@@ -285,10 +316,11 @@ const Stripper = struct {
         return id;
     }
 
-    fn copySeq(self: *Stripper, first: ?Id, path: []const u8) Error!Id {
+    fn copySeq(self: *Stripper, src_node: AST.Node, path: []const u8) Error!Id {
         const id = try emit(self, .{ .sequence = null });
+        try carry(self, src_node.id, id);
         var last: ?Id = null;
-        var c = first;
+        var c = src_node.kind.sequence;
         var i: usize = 0;
         while (c) |cid| : (c = self.src.nodes[cid].next_sibling) {
             const child_path = try indexPath(self.arena, path, i);
@@ -324,13 +356,31 @@ fn indexPath(arena: Allocator, parent: []const u8, i: usize) Error![]const u8 {
 fn emit(self: anytype, kind: AST.Node.Kind) Error!Id {
     const id: Id = @intCast(self.out.items.len);
     try self.out.append(self.arena, .{ .id = id, .kind = kind, .next_sibling = null });
+    // Keep the comment table parallel to `out`; synthetic nodes (envelope
+    // wrappers, decoded scalars) get the empty default and may be filled by a
+    // later `carry`.
+    try self.out_comments.append(self.arena, .{});
     return id;
 }
 
-fn copySeq(self: anytype, first: ?Id) Error!Id {
+/// Copy the comments bound to source node `src_id` onto the freshly emitted node
+/// `new_id`. The `leading` slice is re-duped into the arena; comment text borrows
+/// the source AST (which the arena outlives). Duck-typed over the three passes.
+fn carry(self: anytype, src_id: Id, new_id: Id) Error!void {
+    const c = self.src.comments(src_id);
+    if (c.isEmpty()) return;
+    self.out_comments.items[new_id] = .{
+        .leading = try self.arena.dupe(AST.Comment, c.leading),
+        .trailing = c.trailing,
+    };
+    self.any_comments = true;
+}
+
+fn copySeq(self: anytype, src_node: AST.Node) Error!Id {
     const id = try emit(self, .{ .sequence = null });
+    try carry(self, src_node.id, id);
     var last: ?Id = null;
-    var c = first;
+    var c = src_node.kind.sequence;
     while (c) |cid| : (c = self.src.nodes[cid].next_sibling) {
         const new_id = try self.copy(self.src.nodes[cid]);
         link(&self.out, id, &last, new_id, .sequence);
@@ -338,10 +388,11 @@ fn copySeq(self: anytype, first: ?Id) Error!Id {
     return id;
 }
 
-fn copyMap(self: anytype, first: ?Id) Error!Id {
+fn copyMap(self: anytype, src_node: AST.Node) Error!Id {
     const id = try emit(self, .{ .mapping = null });
+    try carry(self, src_node.id, id);
     var last: ?Id = null;
-    var c = first;
+    var c = src_node.kind.mapping;
     while (c) |cid| : (c = self.src.nodes[cid].next_sibling) {
         const kv = self.src.nodes[cid].kind.keyvalue;
         const new_key = try self.copy(self.src.nodes[kv.key]);

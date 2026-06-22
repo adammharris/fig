@@ -15,10 +15,11 @@ options: AST.SerializeOptions,
 /// Which dialect to emit. JSON5 differs from JSON in exactly two places:
 /// object keys print unquoted when they are bare identifiers, and the
 /// non-finite `number_special` scalars (`Infinity`/`NaN`) print verbatim
-/// rather than degrading to quoted strings. Everything else is identical.
+/// rather than degrading to quoted strings. JSONC is plain JSON syntax (quoted
+/// keys, normalized numbers) but, like JSON5, carries `//` and `/* */` comments.
 dialect: Dialect = .json,
 
-pub const Dialect = enum { json, json5 };
+pub const Dialect = enum { json, jsonc, json5 };
 
 /// Prints a given document in JSON format.
 pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
@@ -49,6 +50,22 @@ pub fn print5(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) E
 /// `printNode`, emitting JSON5.
 pub fn printNode5(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .json5 };
+    try p.node(id, depth);
+}
+
+/// `print`, emitting JSONC: plain-JSON syntax with `//`/`/* */` comments.
+pub fn printc(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .jsonc };
+    try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
+    try p.node(ast.root, 0);
+    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
+    try writer.writeByte('\n');
+    try writer.flush();
+}
+
+/// `printNode`, emitting JSONC.
+pub fn printNodec(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .jsonc };
     try p.node(id, depth);
 }
 
@@ -221,9 +238,10 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
 // minified single line). Both predicates are checked in the helpers, so callers
 // can invoke them unconditionally.
 
-/// True when comments may be emitted: JSON5 dialect, multi-line output.
+/// True when comments may be emitted: a comment-bearing dialect (JSON5 or JSONC)
+/// and multi-line output (a `//` can't survive on a minified single line).
 fn commentsOn(self: *const Printer) bool {
-    return self.dialect == .json5 and self.options.pretty;
+    return (self.dialect == .json5 or self.dialect == .jsonc) and self.options.pretty;
 }
 
 /// Emit a node's leading comments, one per line at `depth`.
@@ -435,6 +453,33 @@ test "json5 emits leading and trailing comments; plain json drops them" {
     defer c.deinit();
     try print5(&c.writer, &ast, .{ .pretty = false });
     try std.testing.expectEqualStrings("{name:\"fig\"}\n", c.written());
+}
+
+test "jsonc emits comments with quoted keys (unlike json5)" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    const v = try b.addString("fig");
+    try b.setComments(v, .{ .trailing = .{ .text = "inline", .style = .line } });
+    const k = try b.addString("name");
+    try b.setComments(k, .{ .leading = &.{.{ .text = "greeting", .style = .block }} });
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try printc(&out.writer, &ast, .{});
+    // JSON syntax (quoted key) + JSON5-style comments.
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  /* greeting */
+        \\  "name": "fig" // inline
+        \\}
+        \\
+    , out.written());
 }
 
 test "honors custom indent width" {

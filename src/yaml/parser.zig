@@ -74,6 +74,19 @@ owned_strings: std.ArrayList([]const u8) = .empty,
 tag_handles: std.ArrayList([]const u8) = .empty,
 tokens: []const Token = &.{},
 index: usize = 0,
+// Comment layer. Captured centrally in `advance` (the only place a comment
+// token is consumed) and reset on each `.newline`. `pending_leading` buffers
+// own-line comments until the next non-container node claims them (`addNode`,
+// unless `parking_container`). Comment text borrows `source`. `pending_leading`
+// is reserved to `tokens.len` once so `advance` can append without failing.
+node_comments: std.ArrayList(AST.NodeComments) = .empty,
+pending_leading: std.ArrayList(AST.Comment) = .empty,
+last_value_id: ?AST.Node.Id = null,
+comments_seen: bool = false,
+// Suppresses leading-comment claiming while a container node is built: a comment
+// above a collection belongs to the collection's first key/item (which the
+// printer renders), not to the container node (which it does not).
+parking_container: bool = false,
 force_new_container: bool = false,
 // Count of indents opened solely to hold a scalar/flow value on the line after
 // its key (`key:\n  value`). Such an indent opens no container, so its matching
@@ -135,6 +148,10 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
 
     self.tokens = try tokenizer.tokenize();
     defer self.allocator.free(self.tokens);
+
+    // Reserve once so `advance` (non-fallible) can buffer leading comments with
+    // `appendAssumeCapacity`. There can be at most one comment per token.
+    try self.pending_leading.ensureTotalCapacity(self.allocator, self.tokens.len);
 
     while (true) {
         self.skipTriviaNoNewline();
@@ -431,17 +448,22 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     self.node_anchor_spans = .empty;
     const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
     self.owned_strings = .empty;
+    var ast: AST = .{
+        .allocator = self.allocator,
+        .owned_strings = owned_strings,
+        .root = root,
+        .nodes = nodes,
+        .node_tags = node_tags,
+        .node_anchors = node_anchors,
+        .anchors = anchors,
+    };
+    if (self.comments_seen) {
+        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
+        self.node_comments = .empty;
+    }
     return .{
         .source = input,
-        .ast = .{
-            .allocator = self.allocator,
-            .owned_strings = owned_strings,
-            .root = root,
-            .nodes = nodes,
-            .node_tags = node_tags,
-            .node_anchors = node_anchors,
-            .anchors = anchors,
-        },
+        .ast = ast,
         .node_spans = node_spans,
         .node_tag_spans = node_tag_spans,
         .node_anchor_spans = node_anchor_spans,
@@ -531,6 +553,11 @@ pub fn deinit(self: *Parser) void {
     }
     self.owned_strings.deinit(self.allocator);
     self.tag_handles.deinit(self.allocator);
+    // After a successful parse these `leading` slices moved to the AST and the
+    // list is empty; on an error path they are freed here. Text borrows `source`.
+    for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+    self.node_comments.deinit(self.allocator);
+    self.pending_leading.deinit(self.allocator);
 }
 
 fn parseSequenceEntry(self: *Parser) ParserError!void {
@@ -1331,6 +1358,9 @@ fn openContainer(self: *Parser, kind: ContainerKind, start: usize) ParserError!A
     // preceded it while another property is pending for its first child); the
     // pending property is preserved for that child. With no parked property, the
     // container takes the pending one normally (a lone `&a` before a collection).
+    // A container node never carries leading comments itself (see `addNode`);
+    // keep them buffered for its first child.
+    self.parking_container = true;
     const id = if (self.container_anchor != null or self.container_tag != null) blk: {
         const child_anchor = self.pending_anchor;
         const child_tag = self.pending_tag;
@@ -1343,6 +1373,7 @@ fn openContainer(self: *Parser, kind: ContainerKind, start: usize) ParserError!A
         self.pending_tag = child_tag;
         break :blk new_id;
     } else try self.addNode(empty, .init(start, start));
+    self.parking_container = false;
 
     try self.container_stack.append(self.allocator, .{
         .id = id,
@@ -1384,6 +1415,9 @@ fn attachDeferredValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
 }
 
 fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
+    // This value is the trailing-comment candidate: in both a sequence element
+    // and a mapping entry, the value node is the trailing anchor.
+    self.last_value_id = value_id;
     if (self.container_stack.items.len == 0) {
         // A second top-level node means trailing junk after the root (or a
         // second document); reject rather than silently overwriting the root.
@@ -1814,6 +1848,12 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
     try self.node_anchors.append(self.allocator, if (anchor) |a| a.name else null);
     try self.node_anchor_spans.append(self.allocator, if (anchor) |a| a.span else null);
     if (anchor) |a| try self.anchors.append(self.allocator, .{ .name = a.name, .node = id });
+    try self.node_comments.append(self.allocator, .{});
+    // Buffered leading comments bind to the first non-container node built after
+    // them — a key, a scalar/flow value, or a sequence item. A container node
+    // (`parking_container`) is skipped so the comment falls through to its first
+    // child, which the printer actually renders.
+    if (!self.parking_container) try self.claimLeading(id);
     return id;
 }
 
@@ -1925,7 +1965,51 @@ fn peek(self: *const Parser) Token {
 fn advance(self: *Parser) Token {
     const token = self.tokens[self.index];
     self.index += 1;
+    switch (token.kind) {
+        // The single choke point for comment trivia: every skip site funnels
+        // through here, so capture once.
+        .comment => self.captureComment(token),
+        // A newline closes the current value's trailing-comment window — a
+        // comment on the next line leads the following node instead.
+        .newline => self.last_value_id = null,
+        else => {},
+    }
     return token;
+}
+
+// ── comments ────────────────────────────────────────────────────────────────
+
+/// Classify the just-advanced comment token. While the previous value's window
+/// is open (`last_value_id` set — no newline since it finished) the comment is on
+/// the same line and trails it; otherwise it buffers as leading for the next
+/// node. YAML has only line comments, so `style` is always `.line`.
+fn captureComment(self: *Parser, token: Token) void {
+    const c: AST.Comment = .{ .text = commentText(token.source(self.source)), .style = .line };
+    if (self.last_value_id) |id| {
+        self.node_comments.items[id].trailing = c;
+        self.comments_seen = true;
+        self.last_value_id = null; // one trailing per value
+    } else {
+        // Capacity reserved in `parseOnce`, so this cannot fail.
+        self.pending_leading.appendAssumeCapacity(c);
+    }
+}
+
+/// Strip the leading `#` and surrounding spaces from a comment token's bytes
+/// (which borrow `source`).
+fn commentText(raw: []const u8) []const u8 {
+    const body = if (raw.len > 0 and raw[0] == '#') raw[1..] else raw;
+    return std.mem.trim(u8, body, " \t\r");
+}
+
+/// Hand the buffered leading comments to node `id` as an owned slice, then clear
+/// the buffer (retaining its reserved capacity). No-op when nothing is buffered.
+fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
 }
 
 // =======
@@ -2135,6 +2219,49 @@ test "yaml merge: cyclic alias does not hang" {
     try testing.expect((try doc.ast.mergedChild(a, "k")) != null);
     // A missing key forces the merge to be followed → cycle detected, not a hang.
     try testing.expectError(error.AliasCycle, doc.ast.mergedChild(a, "absent"));
+}
+
+test "yaml: captures leading/trailing comments; block-scalar # stays content" {
+    const doc = try Parser.parse(testing.allocator,
+        \\# document header
+        \\name: fig # the project
+        \\nums:
+        \\# first item
+        \\- 1
+        \\- 2 # second
+        \\text: |
+        \\  # not a comment
+        \\  body
+    , .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const ast = doc.ast;
+    const root = ast.nodes[ast.root];
+
+    const kv_name = ast.nodes[root.kind.mapping.?].kind.keyvalue;
+    // The document header leads the first key (renders at column 0 above it).
+    try testing.expectEqualStrings("document header", ast.comments(kv_name.key).leading[0].text);
+    try testing.expectEqualStrings("the project", ast.comments(kv_name.value).trailing.?.text);
+
+    const kv_nums = ast.nodes[ast.nodes[root.kind.mapping.?].next_sibling.?].kind.keyvalue;
+    const seq = ast.nodes[kv_nums.value];
+    const item1 = ast.nodes[seq.kind.sequence.?];
+    const item2 = ast.nodes[item1.next_sibling.?];
+    try testing.expectEqualStrings("first item", ast.comments(item1.id).leading[0].text);
+    try testing.expectEqualStrings("second", ast.comments(item2.id).trailing.?.text);
+
+    // The `#` line inside the `|` block scalar is content, not a comment: it
+    // lives in the string value and produces no trailing comment.
+    const kv_text = ast.nodes[ast.nodes[ast.nodes[root.kind.mapping.?].next_sibling.?].next_sibling.?].kind.keyvalue;
+    const text_val = ast.nodes[kv_text.value];
+    try testing.expect(text_val.kind == .string);
+    try testing.expect(std.mem.indexOf(u8, text_val.kind.string, "# not a comment") != null);
+    try testing.expect(ast.comments(kv_text.value).trailing == null);
+}
+
+test "yaml: comment-free document carries no comment table" {
+    const doc = try Parser.parse(testing.allocator, "a: 1\nb: [2, 3]\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), doc.ast.node_comments.len);
 }
 
 test "yaml anchor: collection and its first key both anchored" {

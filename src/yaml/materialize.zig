@@ -30,12 +30,16 @@ pub const Error = error{
 pub fn materialize(arena: Allocator, ast: *const AST, mode: TagMode) Error!AST {
     var m: Materializer = .{ .src = ast, .arena = arena, .mode = mode };
     const root = try m.copy(ast.nodes[ast.root]);
-    return .{
+    var result: AST = .{
         .allocator = arena,
         .owned_strings = &.{},
         .root = root,
         .nodes = try m.out.toOwnedSlice(arena),
     };
+    // Comments ride along: `copy` carried each source node's comments onto its
+    // new id, so the parallel table just hands off (only if any were present).
+    if (m.any_comments) result.node_comments = try m.out_comments.toOwnedSlice(arena);
+    return result;
 }
 
 const Materializer = struct {
@@ -43,6 +47,10 @@ const Materializer = struct {
     arena: Allocator,
     mode: TagMode,
     out: std.ArrayList(AST.Node) = .empty,
+    /// Parallel to `out`: comments carried from each source node onto its copy.
+    /// Default-empty per node; materialized only when `any_comments`.
+    out_comments: std.ArrayList(AST.NodeComments) = .empty,
+    any_comments: bool = false,
     /// Anchor target ids currently being expanded, to catch structural cycles
     /// (`&a [*a]`) and self-merges (`&m { <<: *m }`).
     path: std.ArrayList(AST.Node.Id) = .empty,
@@ -50,7 +58,21 @@ const Materializer = struct {
     fn emit(self: *Materializer, kind: AST.Node.Kind) Error!AST.Node.Id {
         const id: AST.Node.Id = @intCast(self.out.items.len);
         try self.out.append(self.arena, .{ .id = id, .kind = kind, .next_sibling = null });
+        try self.out_comments.append(self.arena, .{});
         return id;
+    }
+
+    /// Copy the comments bound to source node `src_id` onto the freshly emitted
+    /// node `new_id`. The `leading` slice is re-duped into the arena; comment
+    /// text borrows the source AST, which the arena outlives.
+    fn carry(self: *Materializer, src_id: AST.Node.Id, new_id: AST.Node.Id) Error!void {
+        const c = self.src.comments(src_id);
+        if (c.isEmpty()) return;
+        self.out_comments.items[new_id] = .{
+            .leading = try self.arena.dupe(AST.Comment, c.leading),
+            .trailing = c.trailing,
+        };
+        self.any_comments = true;
     }
 
     fn enter(self: *Materializer, id: AST.Node.Id) Error!void {
@@ -73,10 +95,15 @@ const Materializer = struct {
             },
             // `.extended` never appears in a YAML AST, but the switch must be
             // exhaustive; treat it as a plain scalar for completeness.
-            .null_, .boolean, .number, .extended, .string => return self.emit(try self.applyScalarTag(node)),
+            .null_, .boolean, .number, .extended, .string => {
+                const id = try self.emit(try self.applyScalarTag(node));
+                try self.carry(node.id, id);
+                return id;
+            },
             .sequence => |first| {
                 try self.checkCollectionTag(node, .seq);
                 const id = try self.emit(.{ .sequence = null });
+                try self.carry(node.id, id);
                 var last: ?AST.Node.Id = null;
                 var child = first;
                 while (child) |cid| : (child = self.src.nodes[cid].next_sibling) {
@@ -106,6 +133,7 @@ const Materializer = struct {
     fn copyMapping(self: *Materializer, node: AST.Node) Error!AST.Node.Id {
         try self.checkCollectionTag(node, .map);
         const id = try self.emit(.{ .mapping = null });
+        try self.carry(node.id, id);
         var last: ?AST.Node.Id = null;
         var seen: std.ArrayList([]const u8) = .empty;
 
