@@ -2,7 +2,7 @@
 title: fig
 author: adammharris
 created: 2026-05-08
-updated: 2026-06-17T13:47:09-05:00
+updated: 2026-06-21T16:42:02-05:00
 ---
 
 # `fig`
@@ -23,7 +23,8 @@ It is currently in early alpha. Most features are not implemented yet.
 - [x] Serialization
 - [x] Standardize/document errors
 - [x] Typescript bindings
-- [ ] Serialization options
+- [x] Serialization options
+- [ ] Native `.fig` format
 - [ ] Pin C ABI surface
 
 Other planned features:
