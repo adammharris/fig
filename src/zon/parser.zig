@@ -42,6 +42,17 @@ tree: *const Ast = undefined,
 nodes: std.ArrayList(AST.Node) = .empty,
 node_spans: std.ArrayList(Span) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
+// Comment layer. `std.zig.Ast` discards `//` comments (its tokenizer treats them
+// as whitespace), so they're recovered by byte-scanning the source *gaps*
+// between nodes — `absorbCommentsUpTo(pos)` scans `[scan_pos, pos)`, which holds
+// only punctuation/whitespace/comments (never a string or char literal, since
+// those are values the walk jumps `scan_pos` over). A comment on the same line
+// as a just-finished value trails it; one on its own line buffers as leading.
+scan_pos: usize = 0,
+node_comments: std.ArrayList(AST.NodeComments) = .empty,
+pending_leading: std.ArrayList(AST.Comment) = .empty,
+last_value_id: ?AST.Node.Id = null,
+comments_seen: bool = false,
 
 pub const Error = error{ InvalidZon, UnsupportedZon } || std.mem.Allocator.Error;
 
@@ -71,7 +82,14 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) Erro
     var self: Parser = .{ .allocator = allocator, .source = input, .tree = &tree };
     errdefer self.deinit();
 
+    // A leading comment block above the whole document binds to the root (a
+    // container root passes it through to its first key inside `walk`).
+    try self.absorbCommentsUpTo(self.nodeSpan(root_decls[0]).start);
     const root = try self.walk(root_decls[0]);
+    try self.claimLeading(root);
+    self.last_value_id = root;
+    self.scan_pos = self.node_spans.items[root].end;
+    try self.absorbCommentsUpTo(input.len); // a trailing comment after the root
 
     const nodes = try self.nodes.toOwnedSlice(allocator);
     errdefer allocator.free(nodes);
@@ -84,14 +102,27 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) Erro
     const owned_strings = try self.owned_strings.toOwnedSlice(allocator);
     self.owned_strings = .empty;
 
+    var result: AST = .{
+        .allocator = allocator,
+        .owned_strings = owned_strings,
+        .root = root,
+        .nodes = nodes,
+    };
+    if (self.comments_seen) {
+        result.node_comments = try self.node_comments.toOwnedSlice(allocator);
+        self.node_comments = .empty;
+    }
+
+    // Success path: `errdefer self.deinit()` won't run, so free the comment
+    // scratch lists here (the owned `leading` slices, if any, moved into the AST
+    // above and left `node_comments` empty).
+    for (self.node_comments.items) |nc| allocator.free(nc.leading);
+    self.node_comments.deinit(allocator);
+    self.pending_leading.deinit(allocator);
+
     return .{
         .source = input,
-        .ast = .{
-            .allocator = allocator,
-            .owned_strings = owned_strings,
-            .root = root,
-            .nodes = nodes,
-        },
+        .ast = result,
         .node_spans = node_spans,
     };
 }
@@ -101,6 +132,11 @@ pub fn deinit(self: *Parser) void {
     self.node_spans.deinit(self.allocator);
     for (self.owned_strings.items) |s| self.allocator.free(s);
     self.owned_strings.deinit(self.allocator);
+    // After a successful parse the `leading` slices moved to the AST and the list
+    // is empty; on an error path they are freed here. Text borrows `source`.
+    for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+    self.node_comments.deinit(self.allocator);
+    self.pending_leading.deinit(self.allocator);
 }
 
 // =========
@@ -160,10 +196,17 @@ fn sequence(self: *Parser, node: Ast.Node.Index, elements: []const Ast.Node.Inde
     var first: ?AST.Node.Id = null;
     var prev: ?AST.Node.Id = null;
     for (elements) |elem| {
+        try self.absorbCommentsUpTo(self.tree.tokenStart(self.tree.firstToken(elem)));
         const child_id = try self.walk(elem);
+        // A scalar element claims its own leading; a container element passed it
+        // through to its first key inside `walk` (so this is then a no-op).
+        try self.claimLeading(child_id);
+        self.last_value_id = child_id;
+        self.scan_pos = self.node_spans.items[child_id].end;
         if (prev) |p| self.nodes.items[p].next_sibling = child_id else first = child_id;
         prev = child_id;
     }
+    try self.absorbCommentsUpTo(self.nodeSpan(node).end); // trailing on the last element
     self.nodes.items[seq_id].kind = .{ .sequence = first };
     return seq_id;
 }
@@ -177,8 +220,15 @@ fn mapping(self: *Parser, node: Ast.Node.Index, fields: []const Ast.Node.Index) 
         // `.name = value`: the value's first token is `value`; stepping back two
         // tokens lands on the `name` identifier (skipping the `=`).
         const name_token = tree.firstToken(field) - 2;
+        // Leading comments above the entry bind to the key.
+        try self.absorbCommentsUpTo(tree.tokenStart(name_token));
         const key_id = try self.fieldName(name_token);
+        try self.claimLeading(key_id);
+        // Don't re-scan the key name / `=` while walking the value.
+        self.scan_pos = self.node_spans.items[key_id].end;
         const value_id = try self.walk(field);
+        self.last_value_id = value_id;
+        self.scan_pos = self.node_spans.items[value_id].end;
         const key_span = self.node_spans.items[key_id];
         const value_span = self.node_spans.items[value_id];
         const kv_id = try self.addNode(
@@ -188,6 +238,7 @@ fn mapping(self: *Parser, node: Ast.Node.Index, fields: []const Ast.Node.Index) 
         if (prev) |p| self.nodes.items[p].next_sibling = kv_id else first = kv_id;
         prev = kv_id;
     }
+    try self.absorbCommentsUpTo(self.nodeSpan(node).end); // trailing on the last entry
     self.nodes.items[map_id].kind = .{ .mapping = first };
     return map_id;
 }
@@ -317,7 +368,51 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) Error!AST.Node.Id {
     const id: AST.Node.Id = @intCast(self.nodes.items.len);
     try self.nodes.append(self.allocator, .{ .id = id, .kind = kind, .next_sibling = null });
     try self.node_spans.append(self.allocator, span);
+    try self.node_comments.append(self.allocator, .{});
     return id;
+}
+
+// ── Comments ─────────────────────────────────────────────────────────────────
+
+/// Scan the source gap `[scan_pos, pos)` for `//` line comments, classifying
+/// each: one on the same line as the last value (`last_value_id` set, no newline
+/// since) trails it, others buffer as leading. Only `//` and newlines are
+/// significant; every other byte (structural punctuation, whitespace) is skipped.
+fn absorbCommentsUpTo(self: *Parser, pos: usize) Error!void {
+    var i = self.scan_pos;
+    while (i < pos) {
+        const c = self.source[i];
+        if (c == '\n') {
+            self.last_value_id = null;
+            i += 1;
+        } else if (c == '/' and i + 1 < self.source.len and self.source[i + 1] == '/') {
+            const start = i + 2;
+            var j = start;
+            while (j < self.source.len and self.source[j] != '\n') j += 1;
+            const comment: AST.Comment = .{ .text = std.mem.trim(u8, self.source[start..j], " \t\r"), .style = .line };
+            if (self.last_value_id) |id| {
+                self.node_comments.items[id].trailing = comment;
+                self.comments_seen = true;
+                self.last_value_id = null;
+            } else {
+                try self.pending_leading.append(self.allocator, comment);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    if (i > self.scan_pos) self.scan_pos = i;
+}
+
+/// Hand the buffered leading comments to node `id` as an owned slice, then clear
+/// the buffer. No-op when nothing is buffered.
+fn claimLeading(self: *Parser, id: AST.Node.Id) Error!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
 }
 
 fn nodeSpan(self: *Parser, node: Ast.Node.Index) Span {

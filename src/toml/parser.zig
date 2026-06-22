@@ -28,6 +28,16 @@ pos: usize = 0,
 nodes: std.ArrayList(AST.Node) = .empty,
 spans: std.ArrayList(Span) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
+// Comment layer. Comments are captured in `skipInline`/`skipBlank` (the trivia
+// skippers): a comment on the same line as a just-parsed value (`last_value_id`
+// set) trails it; one on its own line buffers as `pending_leading`, claimed onto
+// the next entry's key in `appendKeyValue`. A newline resets the trailing
+// window. Text borrows `source`. `pending_leading` is reserved to `tokens.len`
+// once so capture cannot fail. Materialized only when `comments_seen`.
+node_comments: std.ArrayList(AST.NodeComments) = .empty,
+pending_leading: std.ArrayList(AST.Comment) = .empty,
+last_value_id: ?AST.Node.Id = null,
+comments_seen: bool = false,
 /// The mapping that bare/dotted `key = value` lines attach to. Starts at root,
 /// repointed by each `[table]` header.
 current_table: AST.Node.Id = 0,
@@ -100,6 +110,15 @@ fn parseOnce(self: *Parser, input: []const u8, format: Type) ParserError!Documen
     self.tokens = try tokenizer.tokenize();
     defer self.allocator.free(self.tokens);
     defer self.table_meta.deinit(self.allocator);
+    // Reserve so trivia-skipping can buffer leading comments without failing.
+    try self.pending_leading.ensureTotalCapacity(self.allocator, self.tokens.len);
+    defer self.pending_leading.deinit(self.allocator);
+    // On success the table is moved into the AST and this list emptied; on any
+    // error path it (and any owned `leading` slices) are freed here.
+    defer {
+        for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+        self.node_comments.deinit(self.allocator);
+    }
 
     // Root mapping is node 0.
     const root_id = try self.addNode(.{ .mapping = null }, Span.init(0, input.len));
@@ -123,14 +142,20 @@ fn parseOnce(self: *Parser, input: []const u8, format: Type) ParserError!Documen
     errdefer self.allocator.free(spans);
     const owned = try self.owned_strings.toOwnedSlice(self.allocator);
 
+    var ast: AST = .{
+        .allocator = self.allocator,
+        .root = root_id,
+        .nodes = nodes,
+        .owned_strings = owned,
+    };
+    if (self.comments_seen) {
+        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
+        self.node_comments = .empty;
+    }
+
     return .{
         .source = input,
-        .ast = .{
-            .allocator = self.allocator,
-            .root = root_id,
-            .nodes = nodes,
-            .owned_strings = owned,
-        },
+        .ast = ast,
         .node_spans = spans,
     };
 }
@@ -139,6 +164,7 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
     const id: AST.Node.Id = @intCast(self.nodes.items.len);
     try self.nodes.append(self.allocator, .{ .id = id, .kind = kind });
     try self.spans.append(self.allocator, span);
+    try self.node_comments.append(self.allocator, .{});
     return id;
 }
 
@@ -158,17 +184,66 @@ fn atEnd(self: *Parser) bool {
     return self.peek().kind == .end_of_file;
 }
 
-/// Skip whitespace and comments (but not newlines).
+/// Skip whitespace and comments (but not newlines). A comment here is on the
+/// current line, so it can trail a just-parsed value.
 fn skipInline(self: *Parser) void {
-    while (self.peek().kind == .whitespace or self.peek().kind == .comment) self.pos += 1;
-}
-
-/// Skip whitespace, comments, and blank lines (newlines).
-fn skipBlank(self: *Parser) void {
     while (true) switch (self.peek().kind) {
-        .whitespace, .comment, .newline => self.pos += 1,
+        .whitespace => self.pos += 1,
+        .comment => {
+            self.captureComment(self.peek());
+            self.pos += 1;
+        },
         else => return,
     };
+}
+
+/// Skip whitespace, comments, and blank lines (newlines). A newline closes the
+/// trailing-comment window, so comments past it lead the next entry.
+fn skipBlank(self: *Parser) void {
+    while (true) switch (self.peek().kind) {
+        .whitespace => self.pos += 1,
+        .comment => {
+            self.captureComment(self.peek());
+            self.pos += 1;
+        },
+        .newline => {
+            self.last_value_id = null;
+            self.pos += 1;
+        },
+        else => return,
+    };
+}
+
+// ── Comments ─────────────────────────────────────────────────────────────────
+
+/// Classify a comment token: trailing the most recent value when its window is
+/// open (`last_value_id` set, no newline since), else buffered as leading.
+fn captureComment(self: *Parser, tok: Token) void {
+    const c: AST.Comment = .{ .text = commentText(self.tokenText(tok)), .style = .line };
+    if (self.last_value_id) |id| {
+        self.node_comments.items[id].trailing = c;
+        self.comments_seen = true;
+        self.last_value_id = null; // one trailing per value
+    } else {
+        self.pending_leading.appendAssumeCapacity(c); // capacity reserved in parseOnce
+    }
+}
+
+/// Strip the leading `#` and surrounding spaces from a comment token's bytes
+/// (which borrow `source`).
+fn commentText(raw: []const u8) []const u8 {
+    const body = if (raw.len > 0 and raw[0] == '#') raw[1..] else raw;
+    return std.mem.trim(u8, body, " \t\r");
+}
+
+/// Hand the buffered leading comments to node `id` as an owned slice, then clear
+/// the buffer (retaining its reserved capacity). No-op when nothing is buffered.
+fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
 }
 
 /// After a statement, only trivia then a newline or EOF may follow.
@@ -311,6 +386,9 @@ fn parseKeyValue(self: *Parser) ParserError!void {
     const final = segs.items[segs.items.len - 1];
     if (self.lookupChild(cur, final.str) != null) return error.DuplicateKey;
     const value_id = try self.parseValue();
+    // The value is now the trailing-comment candidate for the rest of this line
+    // (a `# comment` after it, captured by the upcoming `requireLineEnd`).
+    self.last_value_id = value_id;
     try self.appendKeyValue(cur, final, value_id);
 }
 
@@ -361,6 +439,9 @@ fn lookupChild(self: *Parser, map_id: AST.Node.Id, key: []const u8) ?AST.Node.Id
 /// Append a `key = value` entry to mapping `map_id`.
 fn appendKeyValue(self: *Parser, map_id: AST.Node.Id, key: KeySeg, value_id: AST.Node.Id) ParserError!void {
     const key_id = try self.addNode(.{ .string = key.str }, key.span);
+    // A leading comment block above this line (or above a `[header]`, since
+    // headers also route through here) binds to the key node.
+    try self.claimLeading(key_id);
     const value_end = self.spans.items[value_id].end;
     const kv_id = try self.addNode(
         .{ .keyvalue = .{ .key = key_id, .value = value_id } },

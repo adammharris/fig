@@ -75,9 +75,11 @@ const Ctx = struct {
     }
 
     fn kvLine(ctx: *Ctx, ast: *const AST, key_id: AST.Node.Id, value_id: AST.Node.Id) Error!void {
+        try ctx.leading(ast, key_id);
         try writeKey(ctx.w, ast, key_id);
         try ctx.w.writeAll(" = ");
         try writeInline(ctx.w, ast, value_id);
+        try ctx.trailing(ast, value_id);
         try ctx.w.writeByte('\n');
         ctx.wrote = true;
     }
@@ -87,12 +89,40 @@ const Ctx = struct {
         const first = ast.nodes[value_id].kind.mapping;
         if (needsHeader(ast, first)) {
             if (ctx.wrote) try ctx.w.writeByte('\n');
+            try ctx.leading(ast, key_id); // comments above the `[header]` line
             try ctx.w.writeByte('[');
             try writePath(ctx.w, &seg);
             try ctx.w.writeAll("]\n");
             ctx.wrote = true;
         }
         try ctx.body(ast, first, &seg);
+    }
+
+    // ── Comments ──────────────────────────────────────────────────────────
+    // TOML has only `#` line comments. A block comment carried from another
+    // format degrades to a run of `#` lines (one per content line).
+
+    /// Emit a key's leading comments above its line, at column 0.
+    fn leading(ctx: *Ctx, ast: *const AST, key_id: AST.Node.Id) Error!void {
+        for (ast.comments(key_id).leading) |c| {
+            var it = std.mem.splitScalar(u8, c.text, '\n');
+            while (it.next()) |line| {
+                try writeHashLine(ctx.w, std.mem.trim(u8, line, " \t"));
+                try ctx.w.writeByte('\n');
+            }
+            ctx.wrote = true;
+        }
+    }
+
+    /// Emit a value's trailing comment after its line (` # …`). A multi-line
+    /// block flattens to one line (newlines → spaces).
+    fn trailing(ctx: *Ctx, ast: *const AST, value_id: AST.Node.Id) Error!void {
+        const c = ast.comments(value_id).trailing orelse return;
+        try ctx.w.writeAll(" #");
+        if (c.text.len != 0) {
+            try ctx.w.writeByte(' ');
+            for (c.text) |ch| try ctx.w.writeByte(if (ch == '\n') ' ' else ch);
+        }
     }
 
     fn aot(ctx: *Ctx, ast: *const AST, key_id: AST.Node.Id, value_id: AST.Node.Id, parent: ?*const Path) Error!void {
@@ -231,6 +261,15 @@ fn writeKey(w: *Writer, ast: *const AST, key_id: AST.Node.Id) Error!void {
     }
 }
 
+/// Write `# text` (or a bare `#` for an empty comment).
+fn writeHashLine(w: *Writer, text: []const u8) Writer.Error!void {
+    try w.writeByte('#');
+    if (text.len != 0) {
+        try w.writeByte(' ');
+        try w.writeAll(text);
+    }
+}
+
 fn isBareKey(name: []const u8) bool {
     if (name.len == 0) return false;
     for (name) |c| {
@@ -336,6 +375,44 @@ fn expectRoundTrip(input: []const u8) !void {
     defer reparsed.deinit();
     errdefer std.log.err("printed:\n{s}", .{output.written()});
     try std.testing.expect(ast.eql(reparsed));
+}
+
+test "captures and re-emits comments (leading, trailing, table header)" {
+    try expectPrint(
+        \\# document header
+        \\name = "Tom" # the name
+        \\count = 42
+        \\
+        \\# the server section
+        \\[server]
+        \\host = "a" # primary host
+        \\
+    ,
+        \\# document header
+        \\name = "Tom" # the name
+        \\count = 42
+        \\
+        \\# the server section
+        \\[server]
+        \\host = "a" # primary host
+        \\
+    );
+}
+
+test "block comment carried in degrades to a # run" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+    const v = try b.addInt(1);
+    const k = try b.addString("x");
+    try b.setComments(k, .{ .leading = &.{.{ .text = "line one\nline two", .style = .block }} });
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+    var ast = try b.finish(root);
+    defer ast.deinit();
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try print(&out.writer, &ast);
+    try std.testing.expectEqualStrings("# line one\n# line two\nx = 1\n", out.written());
 }
 
 test "prints root scalars" {

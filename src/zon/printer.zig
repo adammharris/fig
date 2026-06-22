@@ -33,7 +33,9 @@ options: AST.SerializeOptions,
 
 pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
+    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -88,13 +90,59 @@ fn container(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void
     try self.writer.writeAll(".{\n");
     var current = first_child;
     while (current) |id| {
+        try self.leadingComments(self.ast.leadingCommentAnchor(id), depth + 1);
         try writeIndent(self.writer, depth + 1);
         try self.node(id, depth + 1);
-        try self.writer.writeAll(",\n");
+        try self.writer.writeByte(',');
+        try self.trailingComment(self.ast.trailingCommentAnchor(id));
+        try self.writer.writeByte('\n');
         current = self.ast.nodes[id].next_sibling;
     }
     try writeIndent(self.writer, depth);
     try self.writer.writeByte('}');
+}
+
+// ── Comments ────────────────────────────────────────────────────────────────
+// ZON has only `//` line comments (Zig's syntax), and only in multi-line output
+// (a `//` can't survive on a compact single line). A block comment carried from
+// another format degrades to a run of `//` lines.
+
+/// True when comments may be emitted: multi-line output only.
+fn commentsOn(self: *const Printer) bool {
+    return self.options.pretty;
+}
+
+/// Emit a node's leading comments above its line, at `depth`.
+fn leadingComments(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
+    if (!self.commentsOn()) return;
+    for (self.ast.comments(id).leading) |c| {
+        var it = std.mem.splitScalar(u8, c.text, '\n');
+        while (it.next()) |line| {
+            try writeIndent(self.writer, depth);
+            try writeSlashLine(self.writer, std.mem.trim(u8, line, " \t"));
+            try self.writer.writeByte('\n');
+        }
+    }
+}
+
+/// Emit a node's trailing comment after its line (` // …`), newlines flattened.
+fn trailingComment(self: *Printer, id: AST.Node.Id) Error!void {
+    if (!self.commentsOn()) return;
+    const c = self.ast.comments(id).trailing orelse return;
+    try self.writer.writeAll(" //");
+    if (c.text.len != 0) {
+        try self.writer.writeByte(' ');
+        for (c.text) |ch| try self.writer.writeByte(if (ch == '\n') ' ' else ch);
+    }
+}
+
+/// Write `// text` (or a bare `//` for an empty comment).
+fn writeSlashLine(w: *Writer, text: []const u8) Writer.Error!void {
+    try w.writeAll("//");
+    if (text.len != 0) {
+        try w.writeByte(' ');
+        try w.writeAll(text);
+    }
 }
 
 /// Emit a struct field name: `.name` if it's a bare identifier, else `.@"..."`.
@@ -210,6 +258,29 @@ fn expectPrintOpts(input: []const u8, expected: []const u8, options: AST.Seriali
     defer output.deinit();
     try print(&output.writer, &ast, options);
     try std.testing.expectEqualStrings(expected, output.written());
+}
+
+test "captures and re-emits comments (leading, trailing, nested)" {
+    try expectPrint(
+        \\.{
+        \\    // the name
+        \\    .name = "Ada", // a person
+        \\    .nums = .{
+        \\        1, // first
+        \\        2,
+        \\    },
+        \\}
+    ,
+        \\.{
+        \\    // the name
+        \\    .name = "Ada", // a person
+        \\    .nums = .{
+        \\        1, // first
+        \\        2,
+        \\    },
+        \\}
+        \\
+    );
 }
 
 test "prints a struct literal" {
