@@ -34,6 +34,13 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_toml", enable_toml);
     options.addOption(bool, "lang_zon", enable_zon);
     options.addOption(bool, "lang_xml", enable_xml);
+    // Library version surfaced through the C ABI (`fig_version` /
+    // `fig_version_string`). KEEP IN SYNC with `.version` in `build.zig.zon` —
+    // that string is the canonical package version; these components are the same
+    // value split for the ABI's packed-integer/string accessors.
+    options.addOption(u8, "version_major", 0);
+    options.addOption(u8, "version_minor", 0);
+    options.addOption(u8, "version_patch", 0);
 
     // Build the options module once and share the single instance across every
     // target. Calling `addOptions` per-module would generate a fresh module from

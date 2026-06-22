@@ -8,6 +8,52 @@
 extern "C" {
 #endif
 
+// ============================================================================
+// Version
+//
+// FIG_VERSION_* are the version of THIS header (compile-time). fig_version()
+// returns the version of the linked library at runtime, packed identically; a
+// host can compare the two to detect a header/library skew. The components are
+// also exposed as a string by fig_version_string().
+// ============================================================================
+#define FIG_VERSION_MAJOR 0
+#define FIG_VERSION_MINOR 0
+#define FIG_VERSION_PATCH 0
+#define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
+                         ((uint32_t)FIG_VERSION_MINOR << 8)  | \
+                         (uint32_t)FIG_VERSION_PATCH)
+
+// Linked-library version, packed as (major << 16) | (minor << 8) | patch.
+uint32_t fig_version(void);
+// Linked-library version as a null-terminated "major.minor.patch" string. Static
+// storage owned by the library; do not free.
+const char *fig_version_string(void);
+
+// ============================================================================
+// Threading and memory ownership
+//
+// Threading: fig keeps no shared mutable global state, so calls that touch
+// DIFFERENT handles (or no handle, e.g. fig_parse, fig_version,
+// fig_format_capabilities) may run concurrently on different threads. A SINGLE
+// handle — FigDocument, FigEditor, FigEmbed, or FigValue — is NOT internally
+// synchronized: never call two functions on the same handle concurrently;
+// serialize access externally if you must share one across threads.
+//
+// Borrowed buffers: functions that return bytes through (out_ptr, out_len) do
+// not transfer ownership — the bytes are borrowed from the handle. There are two
+// lifetime classes:
+//   * Source-borrowing reads (fig_node_string/_number/_extended,
+//     fig_keyvalue_*): valid until fig_document_destroy on that document.
+//   * Rendered-buffer borrows (fig_document_serialize, fig_value_serialize[_opts],
+//     fig_editor_source, fig_embed_render): each handle holds ONE reused output
+//     buffer, so the returned pointer is invalidated by the next call that
+//     rewrites it — the next serialize/render on that handle, or (for the editor/
+//     embed) the next mutation — and by destroying the handle. Copy the bytes
+//     out before that point if you need to keep them.
+// Buffers from fig_alloc are the only ones the caller owns; release them (only
+// them) with fig_free.
+// ============================================================================
+
 // Forward compatibility: later fig releases may add enumerators to the enums
 // below (status codes, node kinds, extended-scalar kinds, formats). Treat any
 // value you do not recognize as opaque — for FigStatus, as a generic failure;
@@ -26,10 +72,12 @@ typedef enum FigStatus {
 } FigStatus;
 
 // Not every function accepts every member. fig_parse accepts all of them; the
-// editor (fig_editor_*) supports JSON/JSONC/YAML only (others return
+// editor (fig_editor_*) supports JSON/JSONC/JSON5/YAML only (others return
 // FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts
 // JSON/JSONC/JSON5/YAML/TOML/ZON (JSONC = plain-JSON syntax with comments). XML
 // is reader-only: accepted by fig_parse, rejected by the editor and serializer.
+// To query this matrix programmatically (it also depends on which formats this
+// build compiled in), call fig_format_capabilities below.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
@@ -39,6 +87,19 @@ typedef enum FigFormat {
     FIG_FORMAT_XML = 6,
     FIG_FORMAT_JSON5 = 7,
 } FigFormat;
+
+// Capability bits, OR-combined in the return of fig_format_capabilities.
+typedef enum FigCapability {
+    FIG_CAP_READ      = 1u << 0, // fig_parse accepts this format
+    FIG_CAP_EDIT      = 1u << 1, // fig_editor_*/fig_embed_* accept this format
+    FIG_CAP_SERIALIZE = 1u << 2, // fig_*_serialize can write this format
+} FigCapability;
+
+// Bitmask of FIG_CAP_* describing what this build can do with `format`. Reflects
+// both inherent support (XML is reader-only; TOML/ZON parse and serialize but are
+// not editable) and build-time gating: a format compiled out of this build, or an
+// unknown `format` value, reports 0. JSON/JSONC/JSON5 are always fully supported.
+uint32_t fig_format_capabilities(int format);
 
 typedef struct FigDocument FigDocument;
 
@@ -133,7 +194,7 @@ bool fig_node_extended(const FigDocument *doc, FigNodeId node, int *out_kind,
 // ============================================================================
 
 typedef struct FigPathSegment {
-    int32_t kind;          // 0 = mapping key, 1 = sequence index
+    int kind;              // 0 = mapping key, 1 = sequence index
     const uint8_t *key_ptr; // key bytes when kind == 0
     size_t key_len;
     size_t index;          // element index when kind == 1

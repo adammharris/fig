@@ -78,6 +78,69 @@ pub const FigFormat = enum(c_int) {
     json5 = 7,
 };
 
+// ==================
+// VERSION + CAPABILITIES
+// ==================
+//
+// The stable query surface a host uses to interrogate the linked library before
+// trusting it: which version it is, and what it can actually do in THIS build
+// (formats can be compiled out — see `build_options.lang_*`). Both are pure
+// functions: no handle, no allocation, safe to call from any thread at any time.
+
+/// Packed library version `(major << 16) | (minor << 8) | patch`. A host can
+/// compare this against the `FIG_VERSION_*` macros it compiled with to detect a
+/// header/library skew. Sourced from `build.zig` (kept in sync with build.zig.zon).
+pub export fn fig_version() u32 {
+    return (@as(u32, build_options.version_major) << 16) |
+        (@as(u32, build_options.version_minor) << 8) |
+        @as(u32, build_options.version_patch);
+}
+
+/// Null-terminated semantic version string of the linked library (e.g. "0.0.0").
+/// Static storage — the caller must NOT free the returned pointer.
+pub export fn fig_version_string() [*:0]const u8 {
+    const s = std.fmt.comptimePrint("{d}.{d}.{d}", .{
+        build_options.version_major,
+        build_options.version_minor,
+        build_options.version_patch,
+    });
+    return s;
+}
+
+/// Capability bits returned (OR-combined) by `fig_format_capabilities`.
+pub const FigCapability = enum(u32) {
+    /// `fig_parse` accepts this format.
+    read = 1 << 0,
+    /// `fig_editor_*` / `fig_embed_*` accept this format.
+    edit = 1 << 1,
+    /// `fig_*_serialize` can write this format.
+    serialize = 1 << 2,
+    _,
+};
+
+/// Report what `fig` can do with `format` in THIS build as a bitmask of
+/// `FigCapability` (read | edit | serialize). Reflects both the format's inherent
+/// support (XML is reader-only; TOML/ZON parse and serialize but are not editable)
+/// and build-time gating: a format compiled out reports 0, as does an unknown
+/// `format` value. JSON/JSONC/JSON5 are always fully supported. Lets a host pick a
+/// working format up front instead of probing via `unsupported_format` returns.
+pub export fn fig_format_capabilities(format: c_int) u32 {
+    const read = @intFromEnum(FigCapability.read);
+    const edit = @intFromEnum(FigCapability.edit);
+    const serialize = @intFromEnum(FigCapability.serialize);
+    return switch (format) {
+        @intFromEnum(FigFormat.json),
+        @intFromEnum(FigFormat.jsonc),
+        @intFromEnum(FigFormat.json5),
+        => read | edit | serialize,
+        @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | serialize else 0,
+        @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | serialize else 0,
+        @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read else 0,
+        else => 0,
+    };
+}
+
 /// A handle to a `fig` document. (See `DocumentHandle` and `handle.*` declaration in `fig_parse`)
 pub const FigDocument = opaque {};
 const DocumentHandle = struct {
@@ -500,9 +563,12 @@ fn figExtKindOf(kind: AST.Node.Kind.Extended.ExtKind) FigExtKind {
 // of `FigPathSegment` (key string | sequence index), mirroring `AST.PathSegment`.
 
 /// One step of a path: `kind == 0` selects mapping key `key_ptr[0..key_len]`;
-/// `kind == 1` selects sequence element `index`.
+/// `kind == 1` selects sequence element `index`. `kind` is a C `int` (not a
+/// fixed-width `int32_t`), matching the other small discriminants crossing this
+/// ABI — `format`, `embed_type`, and the `kind` of `fig_value_extended` /
+/// `fig_node_extended` — so every enum-like field is the one integer type.
 pub const FigPathSegment = extern struct {
-    kind: i32,
+    kind: c_int,
     key_ptr: ?[*]const u8,
     key_len: usize,
     index: usize,
@@ -2108,4 +2174,53 @@ test "fig_document_serialize preserves comments across formats" {
     var opts: FigSerializeOptions = .{ .strip_comments = 1 };
     try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), &opts, &ptr, &len));
     try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "hello") == null);
+}
+
+test "fig_version matches build options and string form" {
+    const v = fig_version();
+    try std.testing.expectEqual(@as(u32, build_options.version_major), v >> 16);
+    try std.testing.expectEqual(@as(u32, build_options.version_minor), (v >> 8) & 0xFF);
+    try std.testing.expectEqual(@as(u32, build_options.version_patch), v & 0xFF);
+
+    const s = fig_version_string();
+    const expected = std.fmt.comptimePrint("{d}.{d}.{d}", .{
+        build_options.version_major,
+        build_options.version_minor,
+        build_options.version_patch,
+    });
+    try std.testing.expectEqualStrings(expected, std.mem.span(s));
+}
+
+test "fig_format_capabilities reports the per-format matrix" {
+    const read = @intFromEnum(FigCapability.read);
+    const edit = @intFromEnum(FigCapability.edit);
+    const serialize = @intFromEnum(FigCapability.serialize);
+
+    // JSON family: always fully supported, regardless of build options.
+    for ([_]FigFormat{ .json, .jsonc, .json5 }) |f| {
+        try std.testing.expectEqual(read | edit | serialize, fig_format_capabilities(@intFromEnum(f)));
+    }
+
+    // Gated formats: capabilities track both inherent support and the build gate.
+    try std.testing.expectEqual(
+        if (build_options.lang_yaml) read | edit | serialize else 0,
+        fig_format_capabilities(@intFromEnum(FigFormat.yaml)),
+    );
+    try std.testing.expectEqual(
+        if (build_options.lang_toml) read | serialize else 0, // no edit
+        fig_format_capabilities(@intFromEnum(FigFormat.toml)),
+    );
+    try std.testing.expectEqual(
+        if (build_options.lang_zon) read | serialize else 0, // no edit
+        fig_format_capabilities(@intFromEnum(FigFormat.zon)),
+    );
+    try std.testing.expectEqual(
+        if (build_options.lang_xml) read else 0, // reader-only
+        fig_format_capabilities(@intFromEnum(FigFormat.xml)),
+    );
+
+    // Unknown / out-of-range format values report no capabilities.
+    try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(0));
+    try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(9999));
+    try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(-1));
 }
