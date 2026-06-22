@@ -387,11 +387,28 @@ pub const Builder = struct {
     owned_strings: std.ArrayList([]const u8) = .empty,
     /// Parallel to `nodes` (one entry appended per node, default-empty). Only
     /// materialized into the finished AST when `any_comments` is set, so a build
-    /// that never calls `setComments` carries the AST's `&.{}` default.
-    comments: std.ArrayList(NodeComments) = .empty,
+    /// that never touches comments carries the AST's `&.{}` default. The runs are
+    /// growable lists (not plain slices) so the incremental comment helpers
+    /// amortize their appends instead of reallocating one element at a time;
+    /// `finish` freezes them into the AST's plain-slice `NodeComments`.
+    comments: std.ArrayList(PendingComments) = .empty,
+    /// Scratch `[]NodeComments` that `view` rebuilds on each call (borrowing the
+    /// pending runs' `.items`), reused so `view` only allocates when it must grow.
+    /// Not part of any finished AST.
+    view_comments: std.ArrayList(NodeComments) = .empty,
     any_comments: bool = false,
 
     pub const Entry = struct { key: Node.Id, value: Node.Id };
+
+    /// Builder-side mutable form of `NodeComments`: the `leading`/`dangling` runs
+    /// are growable `ArrayList`s (an empty list allocates nothing) so incremental
+    /// appends amortize. Frozen into plain-slice `NodeComments` by `finish`, or
+    /// borrowed via the `view_comments` scratch table by `view`.
+    const PendingComments = struct {
+        leading: std.ArrayList(Comment) = .empty,
+        trailing: ?Comment = null,
+        dangling: std.ArrayList(Comment) = .empty,
+    };
 
     pub fn init(allocator: Allocator) Builder {
         return .{ .allocator = allocator };
@@ -401,38 +418,69 @@ pub const Builder = struct {
         for (self.owned_strings.items) |s| self.allocator.free(s);
         self.owned_strings.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
-        for (self.comments.items) |nc| {
-            self.allocator.free(nc.leading);
-            self.allocator.free(nc.dangling);
+        for (self.comments.items) |*nc| {
+            nc.leading.deinit(self.allocator);
+            nc.dangling.deinit(self.allocator);
         }
         self.comments.deinit(self.allocator);
+        self.view_comments.deinit(self.allocator);
     }
 
-    /// Attach comments to an already-added node. Every comment's text is copied
-    /// into `owned_strings` (so the finished AST owns it) and the `leading`/
-    /// `dangling` runs are duplicated into their own allocations. Replaces any
-    /// comments previously set on `id`. Pass `.{}` to clear.
+    /// Attach comments to an already-added node, REPLACING any previously set on
+    /// `id` (pass `.{}` to clear). Every comment's text is copied into
+    /// `owned_strings` (so the finished AST owns it). For attaching comments one
+    /// at a time, prefer the amortized `addLeadingComment`/`addDanglingComment`/
+    /// `setTrailingComment` helpers.
     pub fn setComments(self: *Builder, id: Node.Id, node_comments: NodeComments) Allocator.Error!void {
-        const leading = try self.dupeComments(node_comments.leading);
-        errdefer self.allocator.free(leading);
-        const dangling = try self.dupeComments(node_comments.dangling);
-        errdefer self.allocator.free(dangling);
-        var trailing: ?Comment = null;
-        if (node_comments.trailing) |t| {
-            trailing = .{ .text = try self.dupe(t.text), .style = t.style };
-        }
-        self.allocator.free(self.comments.items[id].leading);
-        self.allocator.free(self.comments.items[id].dangling);
-        self.comments.items[id] = .{ .leading = leading, .trailing = trailing, .dangling = dangling };
+        const slot = &self.comments.items[id];
+        slot.leading.clearRetainingCapacity();
+        slot.dangling.clearRetainingCapacity();
+        try slot.leading.ensureTotalCapacity(self.allocator, node_comments.leading.len);
+        for (node_comments.leading) |c|
+            slot.leading.appendAssumeCapacity(.{ .text = try self.dupe(c.text), .style = c.style });
+        try slot.dangling.ensureTotalCapacity(self.allocator, node_comments.dangling.len);
+        for (node_comments.dangling) |c|
+            slot.dangling.appendAssumeCapacity(.{ .text = try self.dupe(c.text), .style = c.style });
+        slot.trailing = if (node_comments.trailing) |t|
+            .{ .text = try self.dupe(t.text), .style = t.style }
+        else
+            null;
         self.any_comments = true;
     }
 
-    /// Copy a comment run into a fresh slice, each text duped into owned storage.
-    fn dupeComments(self: *Builder, src: []const Comment) Allocator.Error![]Comment {
-        const out = try self.allocator.alloc(Comment, src.len);
-        errdefer self.allocator.free(out);
-        for (src, out) |s, *d| d.* = .{ .text = try self.dupe(s.text), .style = s.style };
-        return out;
+    /// Append one comment to the run rendered ABOVE `id` (its `leading` run), in
+    /// call order. The text is copied into owned storage. This is the incremental
+    /// counterpart to `setComments` (which replaces a node's whole comment set) —
+    /// reach for it when attaching comments one at a time; the backing run is a
+    /// growable list, so repeated appends amortize.
+    ///
+    /// Comments are format-agnostic: a target format without comment syntax here
+    /// (plain JSON, or compact JSON5/JSONC/ZON) drops them on serialize. That is a
+    /// reported loss, not an error — see `fig.Diagnostics.analyze` — so this never
+    /// rejects based on a format.
+    pub fn addLeadingComment(self: *Builder, id: Node.Id, comment: Comment) Allocator.Error!void {
+        const text = try self.dupe(comment.text);
+        try self.comments.items[id].leading.append(self.allocator, .{ .text = text, .style = comment.style });
+        self.any_comments = true;
+    }
+
+    /// Append one comment to `id`'s `dangling` run — comments at the END of a
+    /// container's body, after its last child (an orphan in an empty container, or
+    /// comments sitting before its closing delimiter / at end of document). Only
+    /// meaningful on a container node; see `NodeComments`.
+    pub fn addDanglingComment(self: *Builder, id: Node.Id, comment: Comment) Allocator.Error!void {
+        const text = try self.dupe(comment.text);
+        try self.comments.items[id].dangling.append(self.allocator, .{ .text = text, .style = comment.style });
+        self.any_comments = true;
+    }
+
+    /// Set `id`'s single same-line `trailing` comment (rendered to the right of
+    /// the value). Replaces any previous trailing comment on the node. The text is
+    /// copied into owned storage.
+    pub fn setTrailingComment(self: *Builder, id: Node.Id, comment: Comment) Allocator.Error!void {
+        const text = try self.dupe(comment.text);
+        self.comments.items[id].trailing = .{ .text = text, .style = comment.style };
+        self.any_comments = true;
     }
 
     pub fn addNull(self: *Builder) Allocator.Error!Node.Id {
@@ -515,8 +563,22 @@ pub const Builder = struct {
             .nodes = nodes,
         };
         if (self.any_comments) {
-            ast.node_comments = try self.comments.toOwnedSlice(self.allocator);
-            self.comments = .empty;
+            // Freeze each growable pending run into the AST's plain-slice form.
+            const table = try self.allocator.alloc(NodeComments, self.comments.items.len);
+            errdefer self.allocator.free(table);
+            var done: usize = 0;
+            errdefer for (table[0..done]) |nc| {
+                self.allocator.free(nc.leading);
+                self.allocator.free(nc.dangling);
+            };
+            for (self.comments.items, table) |*src, *dst| {
+                const leading = try src.leading.toOwnedSlice(self.allocator);
+                errdefer self.allocator.free(leading);
+                const dangling = try src.dangling.toOwnedSlice(self.allocator);
+                dst.* = .{ .leading = leading, .trailing = src.trailing, .dangling = dangling };
+                done += 1;
+            }
+            ast.node_comments = table;
         }
         return ast;
     }
@@ -526,13 +588,29 @@ pub const Builder = struct {
     /// the builder lives and stays unmodified, and must NOT be `deinit`ed (the
     /// builder owns the memory). Use it to serialize or inspect an in-progress
     /// build without consuming it; use `finish` when you want an owned AST.
-    pub fn view(self: *const Builder, root: Node.Id) AST {
+    ///
+    /// Takes `*Builder` (not `*const`) and may fail: when the build carries
+    /// comments it rebuilds the `view_comments` scratch table (borrowing each
+    /// pending run's `.items`) so the AST sees plain `[]const NodeComments`.
+    pub fn view(self: *Builder, root: Node.Id) Allocator.Error!AST {
+        var node_comments: []const NodeComments = &.{};
+        if (self.any_comments) {
+            self.view_comments.clearRetainingCapacity();
+            try self.view_comments.ensureTotalCapacity(self.allocator, self.comments.items.len);
+            for (self.comments.items) |*c|
+                self.view_comments.appendAssumeCapacity(.{
+                    .leading = c.leading.items,
+                    .trailing = c.trailing,
+                    .dangling = c.dangling.items,
+                });
+            node_comments = self.view_comments.items;
+        }
         return .{
             .allocator = self.allocator,
             .owned_strings = self.owned_strings.items,
             .root = root,
             .nodes = self.nodes.items,
-            .node_comments = if (self.any_comments) self.comments.items else &.{},
+            .node_comments = node_comments,
         };
     }
 
@@ -649,6 +727,44 @@ test "strip_comments drops carried comments across formats" {
         try ast.serializeWith(&y.writer, .yaml, .{ .strip_comments = true });
         try std.testing.expectEqualStrings("name: fig\n", y.written());
     }
+}
+
+test "Builder incremental comment helpers append and serialize" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+
+    const v = try b.addNumberRaw("1", false);
+    const k = try b.addString("a");
+    // Two leading comments accumulate in call order; a trailing rides the value.
+    try b.addLeadingComment(k, .{ .text = "first" });
+    try b.addLeadingComment(k, .{ .text = "second" });
+    try b.setTrailingComment(v, .{ .text = "tail" });
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+    // A dangling comment sits at the end of the mapping body.
+    try b.addDanglingComment(root, .{ .text = "end" });
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    // The leading run kept insertion order and the trailing/dangling bound too.
+    const kc = ast.comments(k);
+    try std.testing.expectEqual(@as(usize, 2), kc.leading.len);
+    try std.testing.expectEqualStrings("first", kc.leading[0].text);
+    try std.testing.expectEqualStrings("second", kc.leading[1].text);
+    try std.testing.expectEqualStrings("tail", ast.comments(v).trailing.?.text);
+    try std.testing.expectEqualStrings("end", ast.comments(root).dangling[0].text);
+
+    // setTrailingComment replaces rather than appends.
+
+    // A comment-bearing format renders them; this also proves the runs are valid.
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try ast.serializeWith(&out.writer, .json5, .{});
+    const text = out.written();
+    try std.testing.expect(std.mem.indexOf(u8, text, "// first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "// second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "// tail") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "// end") != null);
 }
 
 // ==================

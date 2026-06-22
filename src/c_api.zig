@@ -1598,7 +1598,7 @@ pub export fn fig_value_serialize_opts(
     if (root >= handle.builder.nodes.items.len) return .invalid_argument;
 
     handle.rendered.clearRetainingCapacity();
-    const ast = handle.builder.view(root); // borrows the builder; never deinit'd
+    const ast = handle.builder.view(root) catch return .out_of_memory; // borrows the builder; never deinit'd
     ast.serializeWith(&handle.rendered.writer, fmt, serializeOptionsOf(options)) catch |err| return serializeStatus(err);
 
     const bytes = handle.rendered.written();
@@ -1867,7 +1867,7 @@ pub export fn fig_value_diagnose(
 
     _ = handle.diag_arena.reset(.retain_capacity);
     const arena = handle.diag_arena.allocator();
-    const ast = handle.builder.view(root); // borrows the builder; never deinit'd
+    const ast = handle.builder.view(root) catch return .out_of_memory; // borrows the builder; never deinit'd
     const warnings = Diagnostics.analyze(arena, &ast, root, fmt, diagnoseOptionsOf(options)) catch return .out_of_memory;
     return emitWarnings(arena, warnings, ow, oc);
 }
