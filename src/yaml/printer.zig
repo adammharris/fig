@@ -9,6 +9,8 @@ pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
     // above everything else.
     try leadingComments(writer, ast, ast.leadingCommentAnchor(ast.root), 0);
     try printNode(writer, ast, ast.root, 0);
+    // End-of-document comments dangling off the root, at column 0.
+    try danglingComments(writer, ast, ast.root, 0);
     try writer.flush();
 }
 
@@ -58,9 +60,10 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
     var current_id = first_child;
     while (current_id) |id| {
         const item = document.nodes[id];
-        // A sequence element is its own value node, so its leading comment binds
-        // directly to it; emit above the `- ` line.
-        try leadingComments(writer, document, document.leadingCommentAnchor(id), depth);
+        // A scalar element owns its leading directly. A block-mapping element
+        // (`- key: val`) parked its leading on its first key (the parser's
+        // `parking_container`), which still renders above the `- ` line.
+        try leadingComments(writer, document, seqItemLeadAnchor(document, id), depth);
         try writeIndent(writer, depth);
         switch (item.kind) {
             .mapping => |child| {
@@ -91,6 +94,16 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
         }
         current_id = item.next_sibling;
     }
+}
+
+/// Where a sequence item's leading comment lives. A block-mapping item parks it
+/// on the item-mapping's first key (so it sits above the `- ` line); every other
+/// item owns its leading on the item node itself.
+fn seqItemLeadAnchor(ast: *const AST, id: AST.Node.Id) AST.Node.Id {
+    return switch (ast.nodes[id].kind) {
+        .mapping => |first| if (first) |kv| ast.nodes[kv].kind.keyvalue.key else id,
+        else => id,
+    };
 }
 
 fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Writer.Error!void {
@@ -130,6 +143,8 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
             if (child == null) {
                 try writer.writeAll(" {}\n");
             } else {
+                // A comment on the `key:` line rides here, above the block value.
+                try trailingComment(writer, document, kv.value);
                 try writer.writeByte('\n');
                 try printMapping(writer, document, child, depth + 1);
             }
@@ -140,6 +155,7 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
             if (child == null) {
                 try writer.writeAll(" []\n");
             } else {
+                try trailingComment(writer, document, kv.value);
                 try writer.writeByte('\n');
                 // Indentless: a sequence value's dashes sit at the key's column.
                 try printSequence(writer, document, child, depth);
@@ -406,6 +422,19 @@ fn trailingComment(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Err
     }
 }
 
+/// Emit a container's dangling comments (orphans at the end of its body) at
+/// `depth`, each as one or more `#` lines.
+fn danglingComments(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+    for (ast.comments(id).dangling) |c| {
+        var it = std.mem.splitScalar(u8, c.text, '\n');
+        while (it.next()) |line| {
+            try writeIndent(writer, depth);
+            try writeHashLine(writer, std.mem.trim(u8, line, " \t"));
+            try writer.writeByte('\n');
+        }
+    }
+}
+
 /// Write `# text` (or a bare `#` for an empty comment).
 fn writeHashLine(writer: *Writer, text: []const u8) Writer.Error!void {
     try writer.writeByte('#');
@@ -457,6 +486,23 @@ test "yaml emits comments; block degrades to a # run" {
         \\- 2 # two
         \\
     , out.written());
+}
+
+test "a comment on a key: line with a block value rides the key line" {
+    const Parser = @import("parser.zig");
+    // The comment trails the entry (`contents:`), not the first sequence item.
+    const cases = [_][]const u8{
+        "contents: # note\n- a\n- b\n",
+        "outer: # note\n  inner: 1\n",
+    };
+    for (cases) |src| {
+        const doc = try Parser.parse(std.testing.allocator, src, .v1_2_2);
+        defer doc.deinit(std.testing.allocator);
+        var out: Writer.Allocating = .init(std.testing.allocator);
+        defer out.deinit();
+        try print(&out.writer, &doc.ast);
+        try std.testing.expectEqualStrings(src, out.written());
+    }
 }
 
 test "prints YAML document" {

@@ -360,6 +360,27 @@ fn rootKind(doc: Document) AST.Node.Kind {
     return doc.ast.nodes[doc.ast.root].kind;
 }
 
+test "extract: YAML frontmatter comments survive into the parsed AST" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // The embed layer slices the source and hands it to the real YAML parser
+    // (no AST rebuild), so captured comments must ride through on `node_comments`.
+    const src =
+        \\---
+        \\# the title
+        \\title: hi # inline
+        \\---
+        \\# body
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .FrontmatterYaml);
+    defer embedded.deinit(testing.allocator);
+    const ast = embedded.document.ast;
+    try testing.expect(ast.node_comments.len > 0);
+    const kv = ast.nodes[ast.nodes[ast.root].kind.mapping.?].kind.keyvalue;
+    try testing.expectEqualStrings("the title", ast.comments(kv.key).leading[0].text);
+    try testing.expectEqualStrings("inline", ast.comments(kv.value).trailing.?.text);
+}
+
 test "extractStream: two explicit documents in a stream (JHB9)" {
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src =

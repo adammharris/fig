@@ -42,7 +42,7 @@ pub fn print5(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) E
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .json5 };
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
-    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
+    try p.rootTrailing();
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -58,9 +58,16 @@ pub fn printc(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) E
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options, .dialect = .jsonc };
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
-    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
+    try p.rootTrailing();
     try writer.writeByte('\n');
     try writer.flush();
+}
+
+/// Emit the root's trailing comment — but only when the root is a scalar. A
+/// container root already emitted its own trailing beside its opening delimiter.
+fn rootTrailing(self: *Printer) Error!void {
+    const anchor = self.ast.trailingCommentAnchor(self.ast.root);
+    if (!self.isContainer(anchor)) try self.trailingComment(anchor);
 }
 
 /// `printNode`, emitting JSONC.
@@ -88,8 +95,8 @@ fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
             else => try json_string.writeQuoted(self.writer, value.text),
         },
         .string => |value| try json_string.writeQuoted(self.writer, value),
-        .sequence => |first_child| try self.sequence(first_child, depth),
-        .mapping => |first_child| try self.mapping(first_child, depth),
+        .sequence => |first_child| try self.sequence(id, first_child, depth),
+        .mapping => |first_child| try self.mapping(id, first_child, depth),
         .keyvalue => |kv| {
             try self.key(kv.key, depth);
             // Compact output omits the space after the colon.
@@ -196,25 +203,34 @@ fn stripUnderscores(s: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-fn sequence(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    try self.container('[', ']', first_child, depth);
+fn sequence(self: *Printer, node_id: AST.Node.Id, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    try self.container(node_id, '[', ']', first_child, depth);
 }
 
-fn mapping(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    try self.container('{', '}', first_child, depth);
+fn mapping(self: *Printer, node_id: AST.Node.Id, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    try self.container(node_id, '{', '}', first_child, depth);
 }
 
 /// Sequences and mappings differ only in their delimiters and in how each child
 /// renders (a bare node vs. a `key: value`), the latter dispatched by `node`.
-fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    if (first_child == null) {
+fn container(self: *Printer, node_id: AST.Node.Id, open: u8, close: u8, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    // Dangling comments (orphans at the end of the body) force the block form so
+    // they have somewhere to print; only an empty-and-comment-free container is
+    // inline. Comments only print in pretty JSON5/JSONC, so an empty container
+    // with dangling comments in a comment-less mode still prints inline.
+    const dangling = if (self.commentsOn()) self.ast.comments(node_id).dangling else &.{};
+    if (first_child == null and dangling.len == 0) {
         try self.writer.writeByte(open);
         try self.writer.writeByte(close);
+        try self.trailingComment(node_id); // empty inline container: `[] // c`
         return;
     }
 
     const pretty = self.options.pretty;
     try self.writer.writeByte(open);
+    // A container's own trailing comment rides the line it opened on, so it sits
+    // beside the `[`/`{` (next to its key), not after the distant close.
+    try self.trailingComment(node_id);
     if (pretty) try self.writer.writeByte('\n');
 
     var current_id = first_child;
@@ -224,12 +240,25 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
         try self.node(id, depth + 1);
         current_id = self.ast.nodes[id].next_sibling;
         if (current_id != null) try self.writer.writeByte(',');
-        try self.trailingComment(self.ast.trailingCommentAnchor(id));
+        // A scalar child's trailing prints here; a container child emits its own
+        // (beside its opener, above), so skip it to avoid a double / misplacement.
+        const anchor = self.ast.trailingCommentAnchor(id);
+        if (!self.isContainer(anchor)) try self.trailingComment(anchor);
         if (pretty) try self.writer.writeByte('\n');
     }
+    try self.danglingComments(dangling, depth + 1);
 
     if (pretty) try self.writeIndent(depth);
     try self.writer.writeByte(close);
+}
+
+/// Whether `id` is a container node (whose own trailing comment is emitted beside
+/// its opening delimiter, not by its parent).
+fn isContainer(self: *const Printer, id: AST.Node.Id) bool {
+    return switch (self.ast.nodes[id].kind) {
+        .sequence, .mapping => true,
+        else => false,
+    };
 }
 
 // ── comments (JSON5 only) ───────────────────────────────────────────────────
@@ -260,6 +289,16 @@ fn trailingComment(self: *Printer, id: AST.Node.Id) Error!void {
     if (self.ast.comments(id).trailing) |c| {
         try self.writer.writeByte(' ');
         try self.writeComment(c);
+    }
+}
+
+/// Emit a container's dangling comments (end of body), one per line at `depth`.
+/// The caller has already gated on `commentsOn` via the passed slice.
+fn danglingComments(self: *Printer, dangling: []const AST.Comment, depth: usize) Error!void {
+    for (dangling) |c| {
+        try self.writeIndent(depth);
+        try self.writeComment(c);
+        try self.writer.writeByte('\n');
     }
 }
 
@@ -453,6 +492,58 @@ test "json5 emits leading and trailing comments; plain json drops them" {
     defer c.deinit();
     try print5(&c.writer, &ast, .{ .pretty = false });
     try std.testing.expectEqualStrings("{name:\"fig\"}\n", c.written());
+}
+
+test "json5: a container value's trailing comment rides its opening bracket" {
+    const Parser = @import("parser.zig");
+    // `key: [ // note` round-trips: the comment stays beside the `[` (next to its
+    // key), not after the distant `]`.
+    const input =
+        \\{
+        \\  contents: [ // the note
+        \\    "a",
+        \\    "b"
+        \\  ]
+        \\}
+    ;
+    var doc = try Parser.parseAbstract(std.testing.allocator, input, .JSON5);
+    defer doc.deinit();
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print5(&out.writer, &doc, .{});
+    try std.testing.expectEqualStrings(input ++ "\n", out.written());
+}
+
+test "json5: opening-line comment stays at top, closing-line at bottom" {
+    const Parser = @import("parser.zig");
+    // A comment on the `]` line is a bottom comment: it normalizes to the last
+    // line of the body (before the close), distinct from the opening-line one.
+    var doc = try Parser.parseAbstract(std.testing.allocator,
+        \\{
+        \\  a: [ // top
+        \\    1
+        \\  ],
+        \\  b: [
+        \\    2
+        \\  ] // bottom
+        \\}
+    , .JSON5);
+    defer doc.deinit();
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print5(&out.writer, &doc, .{});
+    try std.testing.expectEqualStrings(
+        \\{
+        \\  a: [ // top
+        \\    1
+        \\  ],
+        \\  b: [
+        \\    2
+        \\    // bottom
+        \\  ]
+        \\}
+        \\
+    , out.written());
 }
 
 test "jsonc emits comments with quoted keys (unlike json5)" {

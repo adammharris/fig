@@ -98,11 +98,11 @@ fn parseOnce(self: *Parser) ParserError!Document {
     const root = try self.parseNode();
     try self.claimLeading(root);
     // A trailing comment on the same line as the root, then the document's final
-    // trivia. Any end-of-file orphan comments are dropped in this first cut.
+    // trivia; any end-of-file orphan comments become the root's dangling run.
     self.skipInline();
     if (try self.tryComment()) |c| self.setTrailing(root, c);
     try self.collectLeading();
-    self.clearPending();
+    try self.claimDangling(root);
     if (self.peek() != null) return error.TrailingGarbage;
 
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
@@ -301,10 +301,11 @@ fn parseSequence(self: *Parser) ParserError!AST.Node.Id {
     if (self.depth > Printer.max_depth) return error.NestingTooDeep;
     defer self.depth -= 1;
     const id = try self.addNode(.{ .sequence = null }, start);
+    try self.captureOpenTrailing(id);
     try self.collectLeading();
     if (self.peek() == ']') {
         self.pos += 1;
-        self.clearPending(); // drop any comments inside an empty `[ … ]`
+        try self.claimDangling(id); // orphan comments inside an empty `[ … ]`
         self.spans.items[id].end = self.pos;
         return id;
     }
@@ -317,7 +318,10 @@ fn parseSequence(self: *Parser) ParserError!AST.Node.Id {
         try self.claimLeading(child);
         if (prev) |p| self.nodes.items[p].next_sibling = child else first = child;
         prev = child;
-        if (try self.finishElement(']', error.UnclosedArray, child)) break;
+        if (try self.finishElement(']', error.UnclosedArray, child)) {
+            try self.claimDangling(id); // orphan comments before the `]`
+            break;
+        }
     }
     self.nodes.items[id].kind = .{ .sequence = first };
     self.spans.items[id].end = self.pos;
@@ -331,10 +335,11 @@ fn parseMapping(self: *Parser) ParserError!AST.Node.Id {
     if (self.depth > Printer.max_depth) return error.NestingTooDeep;
     defer self.depth -= 1;
     const id = try self.addNode(.{ .mapping = null }, start);
+    try self.captureOpenTrailing(id);
     try self.collectLeading();
     if (self.peek() == '}') {
         self.pos += 1;
-        self.clearPending(); // drop any comments inside an empty `{ … }`
+        try self.claimDangling(id); // orphan comments inside an empty `{ … }`
         self.spans.items[id].end = self.pos;
         return id;
     }
@@ -355,7 +360,10 @@ fn parseMapping(self: *Parser) ParserError!AST.Node.Id {
         const kv = try self.addNode(.{ .keyvalue = .{ .key = key, .value = value } }, self.spans.items[key].start);
         if (prev) |p| self.nodes.items[p].next_sibling = kv else first = kv;
         prev = kv;
-        if (try self.finishElement('}', error.UnclosedObject, value)) break;
+        if (try self.finishElement('}', error.UnclosedObject, value)) {
+            try self.claimDangling(id); // orphan comments before the `}`
+            break;
+        }
     }
     self.nodes.items[id].kind = .{ .mapping = first };
     self.spans.items[id].end = self.pos;
@@ -523,10 +531,48 @@ fn setTrailing(self: *Parser, id: AST.Node.Id, c: AST.Comment) void {
     self.comments_seen = true;
 }
 
-/// Drop buffered leading comments that have no node to attach to (orphans inside
-/// an empty container or at end of file). First-cut policy: discard them.
-fn clearPending(self: *Parser) void {
-    self.pending_leading.clearRetainingCapacity();
+/// Capture a line comment immediately after an opening delimiter that ends its
+/// line (`[ // c`) as container `id`'s own trailing (the head comment). A block
+/// comment is left for `collectLeading` — it may lead the first child.
+fn captureOpenTrailing(self: *Parser, id: AST.Node.Id) ParserError!void {
+    self.skipInline();
+    if (self.peek() == '/' and self.pos + 1 < self.src.len and self.src[self.pos + 1] == '/') {
+        if (try self.tryComment()) |c| self.setTrailing(id, c);
+    }
+}
+
+/// Whether `id` is a container whose opening delimiter precedes `cpos` on an
+/// earlier line — a multi-line `[ … ]`/`{ … }` whose close is on `cpos`'s line.
+fn multilineContainer(self: *Parser, id: AST.Node.Id, cpos: usize) bool {
+    switch (self.nodes.items[id].kind) {
+        .sequence, .mapping => {},
+        else => return false,
+    }
+    const open = self.spans.items[id].start;
+    if (cpos <= open) return false;
+    return std.mem.indexOfScalar(u8, self.src[open..cpos], '\n') != null;
+}
+
+/// Append one comment to `id`'s `dangling` run (reallocating onto any orphans
+/// already claimed at the close).
+fn appendDangling(self: *Parser, id: AST.Node.Id, c: AST.Comment) ParserError!void {
+    const old = self.node_comments.items[id].dangling;
+    const grown = try self.allocator.alloc(AST.Comment, old.len + 1);
+    @memcpy(grown[0..old.len], old);
+    grown[old.len] = c;
+    self.allocator.free(old);
+    self.node_comments.items[id].dangling = grown;
+    self.comments_seen = true;
+}
+
+/// Hand buffered orphan comments (no node followed them) to container `id` as its
+/// `dangling` run — they sit at the end of its body. No-op when nothing buffered.
+fn claimDangling(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.pending_leading.toOwnedSlice(self.allocator);
+    self.pending_leading = .empty;
+    self.node_comments.items[id].dangling = owned;
+    self.comments_seen = true;
 }
 
 /// After an element's value is parsed (and its leading claimed), consume an
@@ -543,12 +589,22 @@ fn finishElement(self: *Parser, close: u8, unclosed: ParseError, trailing_target
         had_comma = true;
         self.skipInline();
     }
-    if (try self.tryComment()) |c| self.setTrailing(trailing_target, c);
+    const cpos = self.pos;
+    if (try self.tryComment()) |c| {
+        // A comment after a multi-line container's close is a bottom comment →
+        // its `dangling` run; a scalar or inline container keeps the trailing.
+        if (self.multilineContainer(trailing_target, cpos)) {
+            try self.appendDangling(trailing_target, c);
+        } else {
+            self.setTrailing(trailing_target, c);
+        }
+    }
     try self.collectLeading();
     const c = self.peek() orelse return unclosed;
     if (c == close) {
         self.pos += 1;
-        self.clearPending(); // orphan comments before the close delimiter
+        // Any orphan comments before the close stay buffered; the caller claims
+        // them as the container's `dangling` run.
         return true;
     }
     // More content is only legal across a comma separator.
@@ -653,12 +709,34 @@ test "comment-free document carries no comment table" {
     try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
 }
 
-test "drops orphan comments with no owning node (v1 policy)" {
-    // A comment alone in an empty container / at EOF has nothing to bind to.
+test "orphan comments are captured as the container's dangling run" {
     try expectRoundTrip("[]"); // sanity: empty container still round-trips
-    var ast = try parseAbstract(testing.allocator, "[ // orphan\n]");
+    // An own-line comment at the bottom of a container binds as `dangling`.
+    var ast = try parseAbstract(testing.allocator, "[\n  // orphan\n]");
     defer ast.deinit();
-    try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
+    try testing.expectEqualStrings("orphan", ast.comments(ast.root).dangling[0].text);
+    // And it round-trips (printed inside the block-form container).
+    try expectRoundTrip(
+        \\{
+        \\  "a": 1
+        \\  // dangling at end
+        \\}
+    );
+}
+
+test "container comment: opening line is head (trailing), closing line is bottom (dangling)" {
+    // `[ // head` rides the open line; `] // tail` normalizes to a bottom comment.
+    try expectRoundTrip(
+        \\{
+        \\  "a": [ // head
+        \\    1
+        \\  ],
+        \\  "b": [
+        \\    2
+        \\    // tail
+        \\  ]
+        \\}
+    );
 }
 
 test "round-trips scalars, containers, and node keys" {

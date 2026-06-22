@@ -35,7 +35,10 @@ pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Er
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
-    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
+    // A container root emitted its own trailing beside its `.{`; a scalar root's
+    // trailing is emitted here.
+    if (!p.isContainer(ast.trailingCommentAnchor(ast.root)))
+        try p.trailingComment(ast.trailingCommentAnchor(ast.root));
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -53,8 +56,8 @@ fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
         .number => |value| try self.writer.writeAll(value.raw),
         .string => |value| try writeString(self.writer, value),
         .extended => |ext| try writeExtended(self.writer, ext),
-        .sequence => |first_child| try self.container(first_child, depth),
-        .mapping => |first_child| try self.container(first_child, depth),
+        .sequence => |first_child| try self.container(id, first_child, depth),
+        .mapping => |first_child| try self.container(id, first_child, depth),
         .keyvalue => |kv| {
             try writeFieldName(self.writer, self.ast, kv.key);
             try self.writer.writeAll(" = ");
@@ -69,9 +72,14 @@ fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
 /// routine serves both. Compact output keeps everything on one line with
 /// `.{ a, b }` spacing; multi-line output is the `zig fmt` shape with a trailing
 /// comma per element.
-fn container(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    if (first_child == null) {
+fn container(self: *Printer, node_id: AST.Node.Id, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    // Dangling comments (orphans at the body's end) force the multi-line form so
+    // they have somewhere to print; only an empty, comment-free, or compact
+    // container stays inline.
+    const dangling = if (self.commentsOn()) self.ast.comments(node_id).dangling else &.{};
+    if (first_child == null and dangling.len == 0) {
         try self.writer.writeAll(".{}");
+        try self.trailingComment(node_id); // empty: `.{} // c`
         return;
     }
 
@@ -87,16 +95,31 @@ fn container(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void
         return;
     }
 
-    try self.writer.writeAll(".{\n");
+    try self.writer.writeAll(".{");
+    // The container's own trailing comment rides the line it opened on.
+    try self.trailingComment(node_id);
+    try self.writer.writeByte('\n');
     var current = first_child;
     while (current) |id| {
         try self.leadingComments(self.ast.leadingCommentAnchor(id), depth + 1);
         try writeIndent(self.writer, depth + 1);
         try self.node(id, depth + 1);
         try self.writer.writeByte(',');
-        try self.trailingComment(self.ast.trailingCommentAnchor(id));
+        // A container child emits its own trailing beside its opener; skip here.
+        const anchor = self.ast.trailingCommentAnchor(id);
+        if (!self.isContainer(anchor)) try self.trailingComment(anchor);
         try self.writer.writeByte('\n');
         current = self.ast.nodes[id].next_sibling;
+    }
+    // Comments dangling at the end of the body (after the last element, or the
+    // entire body of an otherwise-empty container).
+    for (dangling) |c| {
+        var it = std.mem.splitScalar(u8, c.text, '\n');
+        while (it.next()) |line| {
+            try writeIndent(self.writer, depth + 1);
+            try writeSlashLine(self.writer, std.mem.trim(u8, line, " \t"));
+            try self.writer.writeByte('\n');
+        }
     }
     try writeIndent(self.writer, depth);
     try self.writer.writeByte('}');
@@ -110,6 +133,15 @@ fn container(self: *Printer, first_child: ?AST.Node.Id, depth: usize) Error!void
 /// True when comments may be emitted: multi-line output only.
 fn commentsOn(self: *const Printer) bool {
     return self.options.pretty;
+}
+
+/// Whether `id` is a container node (whose own trailing comment is emitted beside
+/// its `.{`, not by its parent).
+fn isContainer(self: *const Printer, id: AST.Node.Id) bool {
+    return switch (self.ast.nodes[id].kind) {
+        .sequence, .mapping => true,
+        else => false,
+    };
 }
 
 /// Emit a node's leading comments above its line, at `depth`.
@@ -258,6 +290,32 @@ fn expectPrintOpts(input: []const u8, expected: []const u8, options: AST.Seriali
     defer output.deinit();
     try print(&output.writer, &ast, options);
     try std.testing.expectEqualStrings(expected, output.written());
+}
+
+test "container comment: opening line is head, closing line is bottom" {
+    // `.{ // head` rides the open line; `} // tail` normalizes to a bottom comment.
+    try expectPrint(
+        \\.{
+        \\    .a = .{ // head
+        \\        1,
+        \\    },
+        \\    .b = .{
+        \\        2,
+        \\        // tail
+        \\    },
+        \\}
+    ,
+        \\.{
+        \\    .a = .{ // head
+        \\        1,
+        \\    },
+        \\    .b = .{
+        \\        2,
+        \\        // tail
+        \\    },
+        \\}
+        \\
+    );
 }
 
 test "captures and re-emits comments (leading, trailing, nested)" {

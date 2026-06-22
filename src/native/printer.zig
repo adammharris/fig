@@ -53,7 +53,10 @@ pub fn print(writer: *Writer, ast: *const AST) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast };
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.node(ast.root, 0);
-    try p.trailingComment(ast.trailingCommentAnchor(ast.root));
+    // A container root emitted its own trailing beside its opening delimiter; a
+    // scalar root's trailing is emitted here.
+    if (!p.isContainer(ast.trailingCommentAnchor(ast.root)))
+        try p.trailingComment(ast.trailingCommentAnchor(ast.root));
     try writer.writeByte('\n');
     try writer.flush();
 }
@@ -83,8 +86,8 @@ fn node(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
             try self.writer.writeByte('*');
             try self.writer.writeAll(name);
         },
-        .sequence => |first_child| try self.container('[', ']', first_child, depth),
-        .mapping => |first_child| try self.container('{', '}', first_child, depth),
+        .sequence => |first_child| try self.container(id, '[', ']', first_child, depth),
+        .mapping => |first_child| try self.container(id, '{', '}', first_child, depth),
         .keyvalue => |kv| {
             try self.node(kv.key, depth);
             try self.writer.writeAll(": ");
@@ -134,15 +137,21 @@ pub fn impliedNumberKind(raw: []const u8) @TypeOf(@as(AST.Node.Kind.Number, unde
 
 /// Sequences and mappings differ only in delimiters and in how each child
 /// renders (a bare node vs. a `key: value`), the latter handled by `node`.
-fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, depth: usize) Error!void {
-    if (first_child == null) {
+fn container(self: *Printer, node_id: AST.Node.Id, open: u8, close: u8, first_child: ?AST.Node.Id, depth: usize) Error!void {
+    const dangling = self.ast.comments(node_id).dangling;
+    // Only a truly empty container (no children, no trailing orphan comments)
+    // prints inline; otherwise it opens a block so the dangling run has a home.
+    if (first_child == null and dangling.len == 0) {
         try self.writer.writeByte(open);
         try self.writer.writeByte(close);
+        try self.trailingComment(node_id); // empty inline container: `[] // c`
         return;
     }
-    // Guard the recursion below; an empty container (above) never descends.
+    // Guard the recursion below; the inline fast path above never descends.
     if (depth >= max_depth) return error.NestingTooDeep;
     try self.writer.writeByte(open);
+    // The container's own trailing comment rides the line it opened on.
+    try self.trailingComment(node_id);
     try self.writer.writeByte('\n');
     var current_id = first_child;
     while (current_id) |id| {
@@ -154,11 +163,29 @@ fn container(self: *Printer, open: u8, close: u8, first_child: ?AST.Node.Id, dep
         try self.node(id, depth + 1);
         current_id = self.ast.nodes[id].next_sibling;
         if (current_id != null) try self.writer.writeByte(',');
-        try self.trailingComment(self.ast.trailingCommentAnchor(id));
+        // A container child emits its own trailing beside its opener; skip here.
+        const anchor = self.ast.trailingCommentAnchor(id);
+        if (!self.isContainer(anchor)) try self.trailingComment(anchor);
+        try self.writer.writeByte('\n');
+    }
+    // Comments dangling at the end of the body (after the last child, or the
+    // entire body of an otherwise-empty container).
+    for (dangling) |c| {
+        try self.writeIndent(depth + 1);
+        try self.writeComment(c);
         try self.writer.writeByte('\n');
     }
     try self.writeIndent(depth);
     try self.writer.writeByte(close);
+}
+
+/// Whether `id` is a container node (whose own trailing comment is emitted beside
+/// its opening delimiter, not by its parent).
+fn isContainer(self: *const Printer, id: AST.Node.Id) bool {
+    return switch (self.ast.nodes[id].kind) {
+        .sequence, .mapping => true,
+        else => false,
+    };
 }
 
 /// Emit a node's leading comments, one per line at `depth`, each terminated by a

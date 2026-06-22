@@ -28,8 +28,8 @@ typedef enum FigStatus {
 // Not every function accepts every member. fig_parse accepts all of them; the
 // editor (fig_editor_*) supports JSON/JSONC/YAML only (others return
 // FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts
-// JSON/JSON5/YAML/TOML/ZON and treats JSONC as JSON. XML is reader-only:
-// accepted by fig_parse, rejected by the editor and serializer.
+// JSON/JSONC/JSON5/YAML/TOML/ZON (JSONC = plain-JSON syntax with comments). XML
+// is reader-only: accepted by fig_parse, rejected by the editor and serializer.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
@@ -326,6 +326,10 @@ typedef struct FigSerializeOptions {
   uint8_t pretty;
   // Spaces per indent level when `pretty` is nonzero (JSON only). 0 => default 2.
   uint8_t indent;
+  // Nonzero: drop comments carried on the value instead of emitting them. Zero
+  // (default): preserve them where the target format allows. Appended after
+  // `indent`; older callers (smaller `size`) keep the preserve default.
+  uint8_t strip_comments;
 } FigSerializeOptions;
 
 // As fig_value_serialize, but `options` (NULL => defaults) controls output style

@@ -608,9 +608,26 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) !void {
 /// `1, /*c*/ b` (leading of `b`).
 fn handleComment(self: *Parser, input: []const u8, tokens: []const Token, i: usize) !void {
     const c = parseComment(tokens[i].source(input));
+    const comment_start = tokens[i].span.start;
     if (self.last_value_id != null and endsLine(input, tokens, i)) {
-        self.setTrailing(self.last_value_id.?, c);
+        const id = self.last_value_id.?;
         self.last_value_id = null; // one trailing per value
+        // A comment on the CLOSING line of a multi-line container (`]` / `}` then
+        // `// c`) belongs at the bottom of the body, not on the value's line — so
+        // it joins the container's `dangling` run rather than its `trailing`
+        // (which is reserved for the opening line). An inline container, or a
+        // scalar, keeps the same-line `trailing`.
+        if (self.multilineContainer(input, id, comment_start)) {
+            try self.appendDangling(id, c);
+        } else {
+            self.setTrailing(id, c);
+        }
+    } else if (endsLine(input, tokens, i) and self.container_stack.items.len > 0 and
+        afterOpenDelimiter(input, tokens, i))
+    {
+        // `[ // note` / `{ // note` — the comment rides the line the container
+        // opened on, so it trails the container value (mirrors YAML's `key: #`).
+        self.setTrailing(self.container_stack.items[self.container_stack.items.len - 1].id, c);
     } else {
         try self.pending_leading.append(self.allocator, c);
     }
@@ -633,6 +650,25 @@ fn endsLine(input: []const u8, tokens: []const Token, i: usize) bool {
         }
     }
     return true;
+}
+
+/// Whether the most recent significant token before `tokens[i]`, on the same
+/// line, is a container-opening `[`/`{`. Identifies a comment that rides the
+/// line a container opened on (`[ // c`), which trails the container value.
+fn afterOpenDelimiter(input: []const u8, tokens: []const Token, i: usize) bool {
+    var j = i;
+    while (j > 0) {
+        j -= 1;
+        switch (tokens[j].kind) {
+            .whitespace => {
+                if (std.mem.indexOfScalar(u8, input[tokens[j].span.start..tokens[j].span.end], '\n') != null)
+                    return false; // crossed a newline → not the open line
+            },
+            .open_bracket, .open_brace => return true,
+            else => return false,
+        }
+    }
+    return false;
 }
 
 /// Strip the markers from a comment token's raw bytes (which borrow `input`) and
@@ -661,6 +697,41 @@ fn setTrailing(self: *Parser, id: AST.Node.Id, c: AST.Comment) void {
     self.comments_seen = true;
 }
 
+/// Whether `id` is a container whose opening delimiter is on an earlier line than
+/// `comment_start` — i.e. a multi-line `[ … ]`/`{ … }` whose close is on the
+/// comment's line. (An inline, single-line container returns false.)
+fn multilineContainer(self: *Parser, input: []const u8, id: AST.Node.Id, comment_start: usize) bool {
+    switch (self.nodes.items[id].kind) {
+        .sequence, .mapping => {},
+        else => return false,
+    }
+    const open = self.node_spans.items[id].start;
+    if (comment_start <= open) return false;
+    return std.mem.indexOfScalar(u8, input[open..comment_start], '\n') != null;
+}
+
+/// Append one comment to `id`'s existing `dangling` run (reallocating). Used for
+/// a closing-line comment that follows the orphans already claimed at the close.
+fn appendDangling(self: *Parser, id: AST.Node.Id, c: AST.Comment) !void {
+    const old = self.node_comments.items[id].dangling;
+    const grown = try self.allocator.alloc(AST.Comment, old.len + 1);
+    @memcpy(grown[0..old.len], old);
+    grown[old.len] = c;
+    self.allocator.free(old);
+    self.node_comments.items[id].dangling = grown;
+    self.comments_seen = true;
+}
+
+/// Hand buffered orphan comments (no node followed them, e.g. before a closing
+/// delimiter or at EOF) to container `id` as its `dangling` run.
+fn claimDangling(self: *Parser, id: AST.Node.Id) !void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.pending_leading.toOwnedSlice(self.allocator);
+    self.pending_leading = .empty;
+    self.node_comments.items[id].dangling = owned;
+    self.comments_seen = true;
+}
+
 /// Pushes stack metadata for a container node that already exists in self.nodes
 fn openContainer(self: *Parser, kind: ContainerKind, node_id: AST.Node.Id) !void {
     try self.container_stack.append(self.allocator, .{
@@ -670,10 +741,13 @@ fn openContainer(self: *Parser, kind: ContainerKind, node_id: AST.Node.Id) !void
 }
 
 /// Pops the current container, patches its span end, and returns the node ID.
+/// Orphan comments buffered before the close delimiter become the container's
+/// `dangling` run.
 fn closeContainer(self: *Parser, span_end: usize) !AST.Node.Id {
     if (self.container_stack.items.len == 0) return ParseError.UnexpectedToken;
     const container = self.container_stack.pop().?;
     self.node_spans.items[container.id].end = span_end;
+    try self.claimDangling(container.id);
     return container.id;
 }
 

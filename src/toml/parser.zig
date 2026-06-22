@@ -114,9 +114,12 @@ fn parseOnce(self: *Parser, input: []const u8, format: Type) ParserError!Documen
     try self.pending_leading.ensureTotalCapacity(self.allocator, self.tokens.len);
     defer self.pending_leading.deinit(self.allocator);
     // On success the table is moved into the AST and this list emptied; on any
-    // error path it (and any owned `leading` slices) are freed here.
+    // error path it (and any owned comment slices) are freed here.
     defer {
-        for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
+        for (self.node_comments.items) |nc| {
+            self.allocator.free(nc.leading);
+            self.allocator.free(nc.dangling);
+        }
         self.node_comments.deinit(self.allocator);
     }
 
@@ -135,6 +138,10 @@ fn parseOnce(self: *Parser, input: []const u8, format: Type) ParserError!Documen
         try self.requireLineEnd();
         self.skipBlank();
     }
+    // End-of-file orphan comments dangle off the table they sit in (the last one
+    // `current_table` points at). Mid-file orphans are instead claimed as the
+    // next key's / header's leading.
+    try self.claimDangling(self.current_table);
 
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(nodes);
@@ -243,6 +250,17 @@ fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
     const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
     self.pending_leading.clearRetainingCapacity();
     self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
+}
+
+/// Hand buffered orphan comments (no key/header followed them — at end of file)
+/// to table `id` as its `dangling` run. Mid-file orphans instead lead the next
+/// key/header, so this only fires at EOF.
+fn claimDangling(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].dangling = owned;
     self.comments_seen = true;
 }
 

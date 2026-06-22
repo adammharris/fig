@@ -56,12 +56,22 @@ const Ctx = struct {
     /// Emit a table's body: first every inline entry as `key = value`, then —
     /// after all of them, as TOML requires — each sub-table and array-of-tables
     /// with its own header. `path` is this table's header path (null at root).
-    fn body(ctx: *Ctx, ast: *const AST, first_child: ?AST.Node.Id, path: ?*const Path) Error!void {
+    fn body(ctx: *Ctx, ast: *const AST, node_id: AST.Node.Id, first_child: ?AST.Node.Id, path: ?*const Path) Error!void {
         var cur = first_child;
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
             const kv = ast.nodes[id].kind.keyvalue;
             if (classify(ast, kv.value) != .inline_) continue;
             try ctx.kvLine(ast, kv.key, kv.value);
+        }
+        // Comments dangling at the end of this table's own lines (after its
+        // inline entries, before any sub-tables).
+        for (ast.comments(node_id).dangling) |c| {
+            var it = std.mem.splitScalar(u8, c.text, '\n');
+            while (it.next()) |line| {
+                try writeHashLine(ctx.w, std.mem.trim(u8, line, " \t"));
+                try ctx.w.writeByte('\n');
+            }
+            ctx.wrote = true;
         }
         cur = first_child;
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
@@ -95,7 +105,7 @@ const Ctx = struct {
             try ctx.w.writeAll("]\n");
             ctx.wrote = true;
         }
-        try ctx.body(ast, first, &seg);
+        try ctx.body(ast, value_id, first, &seg);
     }
 
     // ── Comments ──────────────────────────────────────────────────────────
@@ -134,7 +144,7 @@ const Ctx = struct {
             try writePath(ctx.w, &seg);
             try ctx.w.writeAll("]]\n");
             ctx.wrote = true;
-            try ctx.body(ast, ast.nodes[eid].kind.mapping, &seg);
+            try ctx.body(ast, eid, ast.nodes[eid].kind.mapping, &seg);
         }
     }
 };
@@ -325,7 +335,7 @@ fn writeUnicodeEscape(w: *Writer, char: u8) Writer.Error!void {
 pub fn print(writer: *Writer, ast: *const AST) Error!void {
     var ctx = Ctx{ .w = writer };
     switch (ast.nodes[ast.root].kind) {
-        .mapping => |first| try ctx.body(ast, first, null),
+        .mapping => |first| try ctx.body(ast, ast.root, first, null),
         // A non-table root (e.g. converting a JSON array) has no valid TOML
         // document form; emit the inline value as a best-effort fragment.
         else => {
@@ -342,7 +352,7 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
     _ = depth;
     var ctx = Ctx{ .w = writer };
     switch (ast.nodes[id].kind) {
-        .mapping => |first| try ctx.body(ast, first, null),
+        .mapping => |first| try ctx.body(ast, id, first, null),
         else => {
             try writeInline(writer, ast, id);
             try writer.writeByte('\n');

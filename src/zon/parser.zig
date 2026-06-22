@@ -193,6 +193,7 @@ fn container(self: *Parser, node: Ast.Node.Index) Error!AST.Node.Id {
 
 fn sequence(self: *Parser, node: Ast.Node.Index, elements: []const Ast.Node.Index) Error!AST.Node.Id {
     const seq_id = try self.addNode(.{ .sequence = null }, self.nodeSpan(node));
+    try self.captureOpenTrailing(seq_id, node);
     var first: ?AST.Node.Id = null;
     var prev: ?AST.Node.Id = null;
     for (elements) |elem| {
@@ -207,6 +208,7 @@ fn sequence(self: *Parser, node: Ast.Node.Index, elements: []const Ast.Node.Inde
         prev = child_id;
     }
     try self.absorbCommentsUpTo(self.nodeSpan(node).end); // trailing on the last element
+    try self.claimDangling(seq_id); // own-line orphans before the closing brace
     self.nodes.items[seq_id].kind = .{ .sequence = first };
     return seq_id;
 }
@@ -214,6 +216,7 @@ fn sequence(self: *Parser, node: Ast.Node.Index, elements: []const Ast.Node.Inde
 fn mapping(self: *Parser, node: Ast.Node.Index, fields: []const Ast.Node.Index) Error!AST.Node.Id {
     const tree = self.tree;
     const map_id = try self.addNode(.{ .mapping = null }, self.nodeSpan(node));
+    try self.captureOpenTrailing(map_id, node);
     var first: ?AST.Node.Id = null;
     var prev: ?AST.Node.Id = null;
     for (fields) |field| {
@@ -239,6 +242,7 @@ fn mapping(self: *Parser, node: Ast.Node.Index, fields: []const Ast.Node.Index) 
         prev = kv_id;
     }
     try self.absorbCommentsUpTo(self.nodeSpan(node).end); // trailing on the last entry
+    try self.claimDangling(map_id); // own-line orphans before the closing brace
     self.nodes.items[map_id].kind = .{ .mapping = first };
     return map_id;
 }
@@ -391,8 +395,15 @@ fn absorbCommentsUpTo(self: *Parser, pos: usize) Error!void {
             while (j < self.source.len and self.source[j] != '\n') j += 1;
             const comment: AST.Comment = .{ .text = std.mem.trim(u8, self.source[start..j], " \t\r"), .style = .line };
             if (self.last_value_id) |id| {
-                self.node_comments.items[id].trailing = comment;
-                self.comments_seen = true;
+                // A comment on a multi-line container's closing line is a bottom
+                // comment → its `dangling` run; a scalar / inline container keeps
+                // the same-line `trailing`.
+                if (self.multilineContainer(id, i)) {
+                    try self.appendDangling(id, comment);
+                } else {
+                    self.node_comments.items[id].trailing = comment;
+                    self.comments_seen = true;
+                }
                 self.last_value_id = null;
             } else {
                 try self.pending_leading.append(self.allocator, comment);
@@ -412,6 +423,66 @@ fn claimLeading(self: *Parser, id: AST.Node.Id) Error!void {
     const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
     self.pending_leading.clearRetainingCapacity();
     self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
+}
+
+/// Capture a line comment immediately after a container's `.{` that ends its
+/// line (`.{ // c`) as container `id`'s own trailing (the head comment). A field
+/// or block comment on the open line is left for the per-field absorb.
+fn captureOpenTrailing(self: *Parser, id: AST.Node.Id, node: Ast.Node.Index) Error!void {
+    var brace = self.nodeSpan(node).start;
+    while (brace < self.source.len and self.source[brace] != '{') brace += 1;
+    var i = brace + 1;
+    while (i < self.source.len) : (i += 1) {
+        switch (self.source[i]) {
+            '\n' => return, // open line ended without a comment
+            ' ', '\t', '\r' => {},
+            '/' => {
+                if (i + 1 >= self.source.len or self.source[i + 1] != '/') return;
+                const start = i + 2;
+                var j = start;
+                while (j < self.source.len and self.source[j] != '\n') j += 1;
+                self.node_comments.items[id].trailing = .{ .text = std.mem.trim(u8, self.source[start..j], " \t\r"), .style = .line };
+                self.comments_seen = true;
+                if (j > self.scan_pos) self.scan_pos = j; // skip it in later absorbs
+                return;
+            },
+            else => return, // a field begins on the open line → no head comment
+        }
+    }
+}
+
+/// Whether `id` is a container whose `.{` precedes `cpos` on an earlier line — a
+/// multi-line container whose close is on `cpos`'s line.
+fn multilineContainer(self: *Parser, id: AST.Node.Id, cpos: usize) bool {
+    switch (self.nodes.items[id].kind) {
+        .sequence, .mapping => {},
+        else => return false,
+    }
+    const open = self.node_spans.items[id].start;
+    if (cpos <= open) return false;
+    return std.mem.indexOfScalar(u8, self.source[open..cpos], '\n') != null;
+}
+
+/// Append one comment to `id`'s `dangling` run (reallocating onto any orphans
+/// already claimed at the close).
+fn appendDangling(self: *Parser, id: AST.Node.Id, c: AST.Comment) Error!void {
+    const old = self.node_comments.items[id].dangling;
+    const grown = try self.allocator.alloc(AST.Comment, old.len + 1);
+    @memcpy(grown[0..old.len], old);
+    grown[old.len] = c;
+    self.allocator.free(old);
+    self.node_comments.items[id].dangling = grown;
+    self.comments_seen = true;
+}
+
+/// Hand buffered orphan comments (own-line comments at the end of a container's
+/// body, before its closing brace) to container `id` as its `dangling` run.
+fn claimDangling(self: *Parser, id: AST.Node.Id) Error!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].dangling = owned;
     self.comments_seen = true;
 }
 

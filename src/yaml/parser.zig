@@ -21,6 +21,11 @@ const OpenContainer = struct {
     last_child: ?AST.Node.Id = null,
     pending_key: ?AST.Node.Id = null,
     pending_value_span: usize = 0,
+    /// A comment on the `key:` line whose value is a block collection on the
+    /// following lines (`contents: # note\n- a`). It belongs to the entry, not to
+    /// the value's first child, so it is parked here and bound to the value (as
+    /// its trailing comment) when the entry is completed in `finishValue`.
+    pending_value_trailing: ?AST.Comment = null,
     pending_sequence_item_span: ?usize = null,
     pending_sequence_item: bool = false,
     continues_sequence_item: bool = false,
@@ -83,6 +88,10 @@ node_comments: std.ArrayList(AST.NodeComments) = .empty,
 pending_leading: std.ArrayList(AST.Comment) = .empty,
 last_value_id: ?AST.Node.Id = null,
 comments_seen: bool = false,
+/// True between a value-indicator `:` and the line's end. A comment seen while
+/// set, with no inline value built yet, is the entry's trailing comment (its
+/// value is a block collection below), not leading of that value's first child.
+colon_line: bool = false,
 // Suppresses leading-comment claiming while a container node is built: a comment
 // above a collection belongs to the collection's first key/item (which the
 // printer renders), not to the container node (which it does not).
@@ -425,6 +434,8 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     // An empty document — no content node, only comments, blank lines, or
     // document markers — is valid; its root is the null node.
     const root = self.root orelse try self.addNode(.null_, self.peek().span);
+    // End-of-document orphan comments dangle off the root.
+    try self.claimDangling(root);
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     errdefer self.allocator.free(nodes);
     self.nodes = .empty;
@@ -1448,6 +1459,14 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
             parent.pending_key = null;
             parent.explicit_awaiting_value = false;
 
+            // A comment parked on the `key:` line binds to this value as its
+            // trailing comment (it rides the `key:` line, above the block value).
+            if (parent.pending_value_trailing) |c| {
+                self.node_comments.items[value_id].trailing = c;
+                parent.pending_value_trailing = null;
+                self.comments_seen = true;
+            }
+
             const key_span = self.node_spans.items[key_id];
             const value_span = self.node_spans.items[value_id];
             const pair_id = try self.addNode(.{ .keyvalue = .{
@@ -1971,7 +1990,13 @@ fn advance(self: *Parser) Token {
         .comment => self.captureComment(token),
         // A newline closes the current value's trailing-comment window — a
         // comment on the next line leads the following node instead.
-        .newline => self.last_value_id = null,
+        .newline => {
+            self.last_value_id = null;
+            self.colon_line = false;
+        },
+        // A value-indicator opens the window in which a same-line comment trails
+        // the entry rather than leading its (block) value's first child.
+        .colon => self.colon_line = true,
         else => {},
     }
     return token;
@@ -1989,10 +2014,23 @@ fn captureComment(self: *Parser, token: Token) void {
         self.node_comments.items[id].trailing = c;
         self.comments_seen = true;
         self.last_value_id = null; // one trailing per value
+    } else if (self.colon_line and self.awaitsBlockValue()) {
+        // `key: # note` with the value on following lines — the comment trails the
+        // entry. Parked on the mapping entry; bound to the value in `finishValue`.
+        self.currentContainer().pending_value_trailing = c;
+        self.comments_seen = true;
     } else {
         // Capacity reserved in `parseOnce`, so this cannot fail.
         self.pending_leading.appendAssumeCapacity(c);
     }
+}
+
+/// True when the current container is a mapping with a recorded key but no value
+/// yet — i.e. a `key:` whose (block) value is still to come.
+fn awaitsBlockValue(self: *Parser) bool {
+    if (self.container_stack.items.len == 0) return false;
+    const c = self.currentContainer();
+    return c.kind == .mapping and c.pending_key != null;
 }
 
 /// Strip the leading `#` and surrounding spaces from a comment token's bytes
@@ -2009,6 +2047,17 @@ fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
     const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
     self.pending_leading.clearRetainingCapacity();
     self.node_comments.items[id].leading = owned;
+    self.comments_seen = true;
+}
+
+/// Hand buffered orphan comments (no node followed them — at end of document) to
+/// container `id` as its `dangling` run. Mid-document orphans are instead claimed
+/// as the next sibling's leading by indentation, so this only fires at EOF.
+fn claimDangling(self: *Parser, id: AST.Node.Id) ParserError!void {
+    if (self.pending_leading.items.len == 0) return;
+    const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
+    self.pending_leading.clearRetainingCapacity();
+    self.node_comments.items[id].dangling = owned;
     self.comments_seen = true;
 }
 

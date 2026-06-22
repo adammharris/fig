@@ -71,6 +71,7 @@ const Materializer = struct {
         self.out_comments.items[new_id] = .{
             .leading = try self.arena.dupe(AST.Comment, c.leading),
             .trailing = c.trailing,
+            .dangling = try self.arena.dupe(AST.Comment, c.dangling),
         };
         self.any_comments = true;
     }

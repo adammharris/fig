@@ -56,8 +56,8 @@ pub const FigStatus = enum(c_int) {
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
 /// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
 /// `json`/`jsonc`/`json5`/`yaml` only (others return `unsupported_format`); the
-/// serializer (`fig_value_serialize`) accepts `json`/`json5`/`yaml`/`toml`/`zon`
-/// and treats `jsonc` as `json`.
+/// serializer (`fig_value_serialize`) accepts `json`/`jsonc`/`json5`/`yaml`/
+/// `toml`/`zon` (JSONC = plain-JSON syntax with comments).
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
@@ -1258,7 +1258,9 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
 
 fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
     return switch (format) {
-        @intFromEnum(FigFormat.json), @intFromEnum(FigFormat.jsonc) => .json,
+        @intFromEnum(FigFormat.json) => .json,
+        // JSONC writes plain-JSON syntax plus `//`/`/* */` comments.
+        @intFromEnum(FigFormat.jsonc) => .jsonc,
         @intFromEnum(FigFormat.json5) => .json5,
         @intFromEnum(FigFormat.yaml) => .yaml,
         @intFromEnum(FigFormat.toml) => .toml,
@@ -1419,6 +1421,11 @@ pub const FigSerializeOptions = extern struct {
     /// Spaces per indent level when `pretty` is nonzero (JSON only). 0 is treated
     /// as the default (2).
     indent: u8 = 2,
+    /// Nonzero: drop comments carried on the value instead of emitting them.
+    /// Zero (default): preserve them where the target format allows. Appended
+    /// after `indent`, so older callers (whose `size` predates this field) keep
+    /// the preserve-comments default.
+    strip_comments: u8 = 0,
 };
 
 /// Whether a caller-reported options `size` fully covers `field`. Fields beyond
@@ -1438,6 +1445,7 @@ fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions
     var out: AST.SerializeOptions = .{};
     if (optionCovers(o.size, "pretty")) out.pretty = o.pretty != 0;
     if (optionCovers(o.size, "indent")) out.indent = if (o.indent == 0) 2 else o.indent;
+    if (optionCovers(o.size, "strip_comments")) out.strip_comments = o.strip_comments != 0;
     return out;
 }
 

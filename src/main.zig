@@ -108,6 +108,7 @@ const Help = struct {
             \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
             \\  --pretty: multi-line, indented output (the default).
             \\  --indent N: spaces per indent level for pretty JSON (default 2).
+            \\  --strip-comments: drop comments instead of carrying them across formats.
             \\  --lossless: preserve values the target can't represent natively
             \\    (e.g. a null in TOML, a TOML datetime in JSON) via a $fig
             \\    envelope, and reconstruct any such envelope in the input.
@@ -620,6 +621,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 serialize.pretty = false;
             } else if (std.mem.eql(u8, arg, "--pretty")) {
                 serialize.pretty = true;
+            } else if (std.mem.eql(u8, arg, "--strip-comments")) {
+                serialize.strip_comments = true;
             } else if (std.mem.eql(u8, arg, "--indent")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});

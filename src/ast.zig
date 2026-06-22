@@ -43,7 +43,10 @@ pub fn deinit(self: *AST) void {
     // table. Comment *text* aliases `self.source` or lives in `owned_strings`
     // (already freed above), so it is not freed here — same discipline as the
     // reference-layer tables.
-    for (self.node_comments) |nc| self.allocator.free(nc.leading);
+    for (self.node_comments) |nc| {
+        self.allocator.free(nc.leading);
+        self.allocator.free(nc.dangling);
+    }
     self.allocator.free(self.node_comments);
 }
 
@@ -108,18 +111,24 @@ pub const Comment = struct {
 };
 
 /// Comments bound to one node: a run of own-line comments above it (in source
-/// order) and at most one same-line trailing comment.
+/// order), at most one same-line trailing comment, and — on a container node —
+/// a run of `dangling` comments that sit at the END of its body with no child
+/// after them (an orphan in an empty `[]`, or comments before the closing brace /
+/// at end of document). `dangling` is empty for non-containers.
 pub const NodeComments = struct {
     leading: []const Comment = &.{},
     trailing: ?Comment = null,
+    dangling: []const Comment = &.{},
 
     pub fn isEmpty(self: NodeComments) bool {
-        return self.leading.len == 0 and self.trailing == null;
+        return self.leading.len == 0 and self.trailing == null and self.dangling.len == 0;
     }
 
     pub fn eql(self: NodeComments, other: NodeComments) bool {
         if (self.leading.len != other.leading.len) return false;
         for (self.leading, other.leading) |a, b| if (!a.eql(b)) return false;
+        if (self.dangling.len != other.dangling.len) return false;
+        for (self.dangling, other.dangling) |a, b| if (!a.eql(b)) return false;
         if ((self.trailing == null) != (other.trailing == null)) return false;
         if (self.trailing) |t| if (!t.eql(other.trailing.?)) return false;
         return true;
@@ -275,13 +284,31 @@ pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, native }
 ///     document form.
 ///   * `indent` — JSON/JSON5 only. ZON keeps its idiomatic four-space block
 ///     indent; YAML/TOML have their own fixed layout.
+///   * `strip_comments` — every format: drop the AST's carried comments instead
+///     of emitting them. Honored uniformly (it blanks the comment side-table
+///     before printing), so it works even for the formats whose printers take no
+///     options.
 pub const SerializeOptions = struct {
     /// `true`: multi-line, indented output. `false`: compact single-line output
     /// with no insignificant whitespace.
     pretty: bool = true,
     /// Spaces per indentation level when `pretty` is set (JSON only).
     indent: u8 = 2,
+    /// `true`: do not emit comments carried on the AST (a clean, comment-free
+    /// render). `false` (default): preserve them where the target format allows.
+    strip_comments: bool = false,
 };
+
+/// `self`, or a comment-stripped *view* of it when `options.strip_comments` is
+/// set. The view is a shallow struct copy that shares all node/string storage and
+/// only blanks `node_comments`, so stripping costs no allocation. `buf` provides
+/// the view's stack storage; the returned pointer is valid for `buf`'s lifetime.
+fn commentView(self: *const AST, options: SerializeOptions, buf: *AST) *const AST {
+    if (!options.strip_comments) return self;
+    buf.* = self.*;
+    buf.node_comments = &.{};
+    return buf;
+}
 
 /// The canonical set of ways serialization can fail
 pub const SerializeError = Writer.Error || error{
@@ -300,14 +327,16 @@ pub fn serialize(self: *const AST, writer: *Writer, format: SerializeFormat) Ser
 
 /// Render the whole AST to `writer`, controlling output style via `options`.
 pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat, options: SerializeOptions) SerializeError!void {
+    var buf: AST = undefined;
+    const ast = self.commentView(options, &buf);
     return switch (format) {
-        .json => JsonPrinter.print(writer, self, options),
-        .jsonc => JsonPrinter.printc(writer, self, options),
-        .json5 => JsonPrinter.print5(writer, self, options),
-        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, self) else error.FormatDisabled,
-        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, self) else error.FormatDisabled,
-        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, self, options) else error.FormatDisabled,
-        .native => NativePrinter.print(writer, self),
+        .json => JsonPrinter.print(writer, ast, options),
+        .jsonc => JsonPrinter.printc(writer, ast, options),
+        .json5 => JsonPrinter.print5(writer, ast, options),
+        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, ast) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .native => NativePrinter.print(writer, ast),
     };
 }
 
@@ -318,14 +347,16 @@ pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat,
 
 /// Render the subtree rooted at `id`, controlling output style via `options`.
 pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id, options: SerializeOptions) SerializeError!void {
+    var buf: AST = undefined;
+    const ast = self.commentView(options, &buf);
     return switch (format) {
-        .json => JsonPrinter.printNode(writer, self, id, 0, options),
-        .jsonc => JsonPrinter.printNodec(writer, self, id, 0, options),
-        .json5 => JsonPrinter.printNode5(writer, self, id, 0, options),
-        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
-        .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, self, id, 0) else error.FormatDisabled,
-        .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, self, id, 0, options) else error.FormatDisabled,
-        .native => NativePrinter.printNode(writer, self, id, 0),
+        .json => JsonPrinter.printNode(writer, ast, id, 0, options),
+        .jsonc => JsonPrinter.printNodec(writer, ast, id, 0, options),
+        .json5 => JsonPrinter.printNode5(writer, ast, id, 0, options),
+        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .native => NativePrinter.printNode(writer, ast, id, 0),
     };
 }
 
@@ -370,27 +401,38 @@ pub const Builder = struct {
         for (self.owned_strings.items) |s| self.allocator.free(s);
         self.owned_strings.deinit(self.allocator);
         self.nodes.deinit(self.allocator);
-        for (self.comments.items) |nc| self.allocator.free(nc.leading);
+        for (self.comments.items) |nc| {
+            self.allocator.free(nc.leading);
+            self.allocator.free(nc.dangling);
+        }
         self.comments.deinit(self.allocator);
     }
 
     /// Attach comments to an already-added node. Every comment's text is copied
-    /// into `owned_strings` (so the finished AST owns it) and the `leading` run
-    /// is duplicated into its own allocation. Replaces any comments previously
-    /// set on `id`. Pass `.{}` to clear.
+    /// into `owned_strings` (so the finished AST owns it) and the `leading`/
+    /// `dangling` runs are duplicated into their own allocations. Replaces any
+    /// comments previously set on `id`. Pass `.{}` to clear.
     pub fn setComments(self: *Builder, id: Node.Id, node_comments: NodeComments) Allocator.Error!void {
-        const leading = try self.allocator.alloc(Comment, node_comments.leading.len);
+        const leading = try self.dupeComments(node_comments.leading);
         errdefer self.allocator.free(leading);
-        for (node_comments.leading, leading) |src, *dst| {
-            dst.* = .{ .text = try self.dupe(src.text), .style = src.style };
-        }
+        const dangling = try self.dupeComments(node_comments.dangling);
+        errdefer self.allocator.free(dangling);
         var trailing: ?Comment = null;
         if (node_comments.trailing) |t| {
             trailing = .{ .text = try self.dupe(t.text), .style = t.style };
         }
         self.allocator.free(self.comments.items[id].leading);
-        self.comments.items[id] = .{ .leading = leading, .trailing = trailing };
+        self.allocator.free(self.comments.items[id].dangling);
+        self.comments.items[id] = .{ .leading = leading, .trailing = trailing, .dangling = dangling };
         self.any_comments = true;
+    }
+
+    /// Copy a comment run into a fresh slice, each text duped into owned storage.
+    fn dupeComments(self: *Builder, src: []const Comment) Allocator.Error![]Comment {
+        const out = try self.allocator.alloc(Comment, src.len);
+        errdefer self.allocator.free(out);
+        for (src, out) |s, *d| d.* = .{ .text = try self.dupe(s.text), .style = s.style };
+        return out;
     }
 
     pub fn addNull(self: *Builder) Allocator.Error!Node.Id {
@@ -576,6 +618,36 @@ test "Builder constructs an AST that serializes" {
             \\- 2
             \\
         , yw.buffered());
+    }
+}
+
+test "strip_comments drops carried comments across formats" {
+    var b = Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const v = try b.addString("fig");
+    const k = try b.addString("name");
+    try b.setComments(k, .{ .leading = &.{.{ .text = "hi", .style = .line }} });
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    // Default: comment preserved (JSON5).
+    var kept: Writer.Allocating = .init(std.testing.allocator);
+    defer kept.deinit();
+    try ast.serializeWith(&kept.writer, .json5, .{});
+    try std.testing.expect(std.mem.indexOf(u8, kept.written(), "// hi") != null);
+
+    // Stripped: same AST, no comment, in JSON5 and (an options-less printer) YAML.
+    var stripped: Writer.Allocating = .init(std.testing.allocator);
+    defer stripped.deinit();
+    try ast.serializeWith(&stripped.writer, .json5, .{ .strip_comments = true });
+    try std.testing.expect(std.mem.indexOf(u8, stripped.written(), "hi") == null);
+
+    if (comptime build_options.lang_yaml) {
+        var y: Writer.Allocating = .init(std.testing.allocator);
+        defer y.deinit();
+        try ast.serializeWith(&y.writer, .yaml, .{ .strip_comments = true });
+        try std.testing.expectEqualStrings("name: fig\n", y.written());
     }
 }
 
