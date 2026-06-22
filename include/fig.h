@@ -42,6 +42,12 @@ typedef enum FigFormat {
 
 typedef struct FigDocument FigDocument;
 
+// Parse `input[0..input_len]` as `format` into a new document (released with
+// fig_document_destroy). Empty input (input_len == 0, with or without a null
+// `input`) is handed to the parser and judged per format, NOT rejected up front:
+// YAML treats it as a null document and TOML as an empty table (both succeed),
+// while JSON/JSON5/ZON/XML require a value/root and return FIG_STATUS_PARSE_ERROR.
+// A null `input` with a nonzero `input_len` is FIG_STATUS_INVALID_ARGUMENT.
 FigStatus fig_parse(
     const uint8_t *input,
     size_t input_len,
@@ -57,6 +63,9 @@ void fig_document_destroy(FigDocument *doc);
 // Nodes are addressed by id. The sentinel FIG_NODE_NONE means "no such node".
 // Pointers returned by the scalar accessors borrow memory owned by the
 // document; they remain valid until fig_document_destroy is called on it.
+//
+// To render a parsed document back out (in its own or another format), see
+// fig_document_serialize near the end of this header.
 // ============================================================================
 
 typedef uint32_t FigNodeId;
@@ -330,6 +339,13 @@ typedef struct FigSerializeOptions {
   // (default): preserve them where the target format allows. Appended after
   // `indent`; older callers (smaller `size`) keep the preserve default.
   uint8_t strip_comments;
+  // fig_document_serialize only. Nonzero: preserve values the target format
+  // cannot represent natively (a null in TOML, a TOML datetime in JSON, ...)
+  // through a $fig envelope, and decode any such envelope found in the source.
+  // Zero (default): lossy -- an unrepresentable value yields
+  // FIG_STATUS_UNSUPPORTED_FORMAT. Ignored by fig_value_serialize_opts. Appended
+  // after `strip_comments`; older callers keep the lossy default.
+  uint8_t lossless;
 } FigSerializeOptions;
 
 // As fig_value_serialize, but `options` (NULL => defaults) controls output style
@@ -337,6 +353,32 @@ typedef struct FigSerializeOptions {
 FigStatus fig_value_serialize_opts(FigValue *value, FigNodeId root, int format,
                                    const FigSerializeOptions *options,
                                    const uint8_t **out_ptr, size_t *out_len);
+
+// ============================================================================
+// Document serialization (cross-format conversion)
+//
+// Render a whole parsed FigDocument to a writable format — the conversion
+// primitive. `format` is one of JSON/JSONC/JSON5/YAML/TOML/ZON (the writable set;
+// any other, including XML, returns FIG_STATUS_UNSUPPORTED_FORMAT). The source may
+// be any parsed format, including reader-only XML (e.g. XML in, JSON out).
+//
+// When the source is YAML and the target is not, the reference layer (anchors,
+// aliases, merge keys, tags) is collapsed automatically (strict tag mode: an
+// unknown/custom tag yields FIG_STATUS_UNSUPPORTED_FORMAT). Comments carried on
+// the source are preserved where the target format allows.
+//
+// `options` (NULL => defaults) is the same struct as fig_value_serialize_opts.
+// With `lossless` zero (default) the conversion is lossy: a value the target
+// cannot represent natively (e.g. a null in TOML) returns
+// FIG_STATUS_UNSUPPORTED_FORMAT. With `lossless` nonzero, such values round-trip
+// through a $fig envelope and any envelope already in the source is decoded back.
+//
+// Output bytes are borrowed from `doc` and valid until the next
+// fig_document_serialize call on it or fig_document_destroy. Serializes the whole
+// document (no subtree selection in this version).
+FigStatus fig_document_serialize(FigDocument *doc, int format,
+                                 const FigSerializeOptions *options,
+                                 const uint8_t **out_ptr, size_t *out_len);
 
 #ifdef __cplusplus
 }

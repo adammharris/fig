@@ -24,6 +24,12 @@ const ZonParser = if (build_options.lang_zon) @import("zon/parser.zig") else voi
 const ZonType = if (build_options.lang_zon) @import("zon/zon.zig").Type else void;
 const XmlParser = if (build_options.lang_xml) @import("xml/parser.zig") else void;
 const XmlType = if (build_options.lang_xml) @import("xml/xml.zig").Type else void;
+// Cross-format conversion helpers used by `fig_document_serialize`. `Lossless` is
+// format-agnostic (always compiled in); `materialize` is YAML-only, so it follows
+// the gated-import pattern above (collapses to `void` when YAML is off, and every
+// reference to it sits behind the matching comptime guard).
+const Lossless = @import("lossless.zig");
+const YamlMaterialize = if (build_options.lang_yaml) @import("yaml/materialize.zig") else void;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
 /// `std_options` wins). The default `std.log` handler writes to stderr via
@@ -78,6 +84,13 @@ const DocumentHandle = struct {
     allocator: std.mem.Allocator,
     source: []u8,
     document: Document,
+    /// The format `source` was parsed as. `fig_document_serialize` consults it to
+    /// decide whether to collapse YAML's reference layer before printing.
+    format: FigFormat,
+    /// Reused across `fig_document_serialize` calls; holds the bytes the most
+    /// recent call returned (cleared and refilled each time). Mirrors
+    /// `ValueHandle.rendered`.
+    rendered: std.Io.Writer.Allocating,
 };
 
 fn activeAllocator() std.mem.Allocator {
@@ -125,10 +138,11 @@ pub export fn fig_parse(
     const out = out_doc orelse return .invalid_argument;
     out.* = null;
 
-    const input = input_ptr orelse {
-        if (input_len == 0) return .parse_error;
-        return .invalid_argument;
-    };
+    // Empty input (len 0, null pointer or not) is a valid slice handed to the
+    // parser, which judges it per format (YAML → null document, TOML → empty
+    // table, JSON/JSON5/ZON/XML → parse_error). Only a null pointer paired with a
+    // nonzero length is a malformed argument. This mirrors `fig_editor_create`.
+    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
 
     const fig_format: FigFormat = switch (format) {
         @intFromEnum(FigFormat.json) => .json,
@@ -143,7 +157,7 @@ pub export fn fig_parse(
 
     const allocator = activeAllocator();
 
-    const source = allocator.dupe(u8, input[0..input_len]) catch return .out_of_memory;
+    const source = allocator.dupe(u8, input) catch return .out_of_memory;
     const handle = allocator.create(DocumentHandle) catch {
         allocator.free(source);
         return .out_of_memory;
@@ -221,6 +235,8 @@ pub export fn fig_parse(
         .allocator = allocator,
         .source = source,
         .document = doc,
+        .format = fig_format,
+        .rendered = std.Io.Writer.Allocating.init(allocator),
     };
 
     out.* = @ptrCast(handle);
@@ -238,6 +254,7 @@ fn parseFailureStatus(err: anyerror) FigStatus {
 pub export fn fig_document_destroy(doc: ?*FigDocument) void {
     const public_doc = doc orelse return;
     const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
+    handle.rendered.deinit();
     handle.document.deinit(handle.allocator);
     handle.allocator.free(handle.source);
     handle.allocator.destroy(handle);
@@ -1426,6 +1443,14 @@ pub const FigSerializeOptions = extern struct {
     /// after `indent`, so older callers (whose `size` predates this field) keep
     /// the preserve-comments default.
     strip_comments: u8 = 0,
+    /// `fig_document_serialize` only. Nonzero: preserve values the target format
+    /// cannot represent natively (a null in TOML, a TOML datetime in JSON, …)
+    /// through a `$fig` envelope, and decode any such envelope found in the
+    /// source. Zero (default): lossy — an unrepresentable value yields
+    /// `unsupported_format`. Ignored by `fig_value_serialize_opts` (the value
+    /// builder has no source envelopes to decode). Appended after
+    /// `strip_comments`, so older callers keep the lossy default.
+    lossless: u8 = 0,
 };
 
 /// Whether a caller-reported options `size` fully covers `field`. Fields beyond
@@ -1447,6 +1472,14 @@ fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions
     if (optionCovers(o.size, "indent")) out.indent = if (o.indent == 0) 2 else o.indent;
     if (optionCovers(o.size, "strip_comments")) out.strip_comments = o.strip_comments != 0;
     return out;
+}
+
+/// Whether the caller asked for lossless conversion (`fig_document_serialize`).
+/// NULL options, or a `size` that predates the `lossless` field, read as lossy —
+/// the same forward-compat rule the other option fields follow.
+fn losslessRequested(options: ?*const FigSerializeOptions) bool {
+    const o = options orelse return false;
+    return optionCovers(o.size, "lossless") and o.lossless != 0;
 }
 
 /// Render the value subtree rooted at `root` in `format`. Output bytes are
@@ -1482,6 +1515,101 @@ pub export fn fig_value_serialize_opts(
     const ast = handle.builder.view(root); // borrows the builder; never deinit'd
     ast.serializeWith(&handle.rendered.writer, fmt, serializeOptionsOf(options)) catch |err| return serializeStatus(err);
 
+    const bytes = handle.rendered.written();
+    p.* = bytes.ptr;
+    l.* = bytes.len;
+    return .ok;
+}
+
+// ==================
+// DOCUMENT SERIALIZE (CONVERT)
+// ==================
+//
+// Render a parsed `FigDocument` to any writable format — the cross-format
+// conversion primitive. Unlike `fig_value_serialize` (which prints a value the
+// caller built), this runs the same pipeline the CLI's `get` does over a source
+// document: when leaving YAML it collapses the reference layer (aliases → copies,
+// merges → flattened, tags applied/dropped) so a non-YAML printer never meets one,
+// and — when `options->lossless` is set — round-trips values the target cannot
+// hold natively through a `$fig` envelope. Comments carried on the source survive
+// where the target allows, which the parse→rebuild→`fig_value_serialize` detour
+// cannot do.
+
+/// Translate a materialization failure onto `FigStatus`. Allocation failure is
+/// `out_of_memory`; every other case is an un-collapsible reference layer
+/// (undefined/cyclic alias, unknown/mismatched tag) that the target cannot
+/// represent — mirroring the `UnresolvedAlias → unsupported_format` convention in
+/// `serializeStatus`.
+fn convertStatus(err: anyerror) FigStatus {
+    return switch (err) {
+        error.OutOfMemory => .out_of_memory,
+        else => .unsupported_format,
+    };
+}
+
+/// Render the whole parsed document in `format`. `options` (NULL ⇒ defaults)
+/// controls output style and, via `lossless`, whether unrepresentable values are
+/// preserved through a `$fig` envelope (default: lossy, so such a value yields
+/// `unsupported_format`). Output bytes are borrowed from the document handle and
+/// valid until the next `fig_document_serialize` on it or `fig_document_destroy`.
+pub export fn fig_document_serialize(
+    doc: ?*FigDocument,
+    format: c_int,
+    options: ?*const FigSerializeOptions,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const p = out_ptr orelse return .invalid_argument;
+    const l = out_len orelse return .invalid_argument;
+    const public_doc = doc orelse return .invalid_argument;
+    const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
+    const fmt = serializeFormatOf(format) orelse return .unsupported_format;
+    const opts = serializeOptionsOf(options);
+
+    // Intermediate ASTs (materialized / lossless-decoded / -encoded) live in this
+    // arena. Their string slices borrow from the source AST, which outlives the
+    // call; the rendered bytes are copied into `handle.rendered` before the arena
+    // is freed, so nothing dangles.
+    var arena_state = std.heap.ArenaAllocator.init(handle.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const src_is_yaml = handle.format == .yaml;
+    const dst_is_yaml = fmt == .yaml;
+
+    // Leaving YAML: collapse the reference layer first (strict tag mode, matching
+    // the CLI default — unknown/custom tags become `unsupported_format`).
+    const base_ast: *const AST = if (src_is_yaml and !dst_is_yaml) blk: {
+        if (comptime build_options.lang_yaml) {
+            const mat = arena.create(AST) catch return .out_of_memory;
+            mat.* = YamlMaterialize.materialize(arena, &handle.document.ast, .strict) catch |err| return convertStatus(err);
+            break :blk mat;
+        } else unreachable; // src_is_yaml ⇒ YAML was compiled in
+    } else &handle.document.ast;
+
+    // Lossless: decode any `$fig` envelopes in the source back to real kinds, then
+    // re-encode for the target. Skipped for YAML→YAML (its reference layer already
+    // round-trips, and the core-AST passes would strip it).
+    const ast: *const AST = if (losslessRequested(options) and !(src_is_yaml and dst_is_yaml)) blk: {
+        const target: ?Lossless.Target = switch (fmt) {
+            .json, .jsonc, .json5 => .json,
+            .yaml => .yaml,
+            .toml => .toml,
+            .zon => .zon,
+            // `serializeFormatOf` never yields `.native`; the arm keeps the switch
+            // total. null would mean decode-only (no envelope on output).
+            .native => null,
+        };
+        const decoded = arena.create(AST) catch return .out_of_memory;
+        decoded.* = Lossless.decode(arena, base_ast) catch return .out_of_memory;
+        const t = target orelse break :blk decoded;
+        const encoded = arena.create(AST) catch return .out_of_memory;
+        encoded.* = Lossless.encode(arena, decoded, t) catch return .out_of_memory;
+        break :blk encoded;
+    } else base_ast;
+
+    handle.rendered.clearRetainingCapacity();
+    ast.serializeWith(&handle.rendered.writer, fmt, opts) catch |err| return serializeStatus(err);
     const bytes = handle.rendered.written();
     p.* = bytes.ptr;
     l.* = bytes.len;
@@ -1873,4 +2001,111 @@ test "value c abi rejects an out-of-range child id" {
     // id 99 was never created.
     const items = [_]FigNodeId{ id, 99 };
     try std.testing.expectEqual(FigStatus.invalid_argument, fig_value_seq(out_value, &items, items.len, &id));
+}
+
+test "fig_parse empty input is judged per format" {
+    // (null ptr, len 0) reaches the parser — same as (ptr, len 0). YAML treats
+    // an empty stream as a null document and TOML as an empty table (both ok);
+    // JSON requires a value (parse_error). A null ptr with a nonzero len is a
+    // malformed argument regardless of format.
+    {
+        var out_doc: ?*FigDocument = null;
+        try std.testing.expectEqual(FigStatus.parse_error, fig_parse(null, 0, @intFromEnum(FigFormat.json), &out_doc));
+        try std.testing.expect(out_doc == null);
+    }
+    {
+        var out_doc: ?*FigDocument = null;
+        try std.testing.expectEqual(FigStatus.invalid_argument, fig_parse(null, 5, @intFromEnum(FigFormat.json), &out_doc));
+        try std.testing.expect(out_doc == null);
+    }
+    if (comptime build_options.lang_yaml) {
+        var out_doc: ?*FigDocument = null;
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(null, 0, @intFromEnum(FigFormat.yaml), &out_doc));
+        defer fig_document_destroy(out_doc);
+        try std.testing.expectEqual(FigNodeKind.null_, fig_node_kind(out_doc, fig_document_root(out_doc)));
+    }
+    if (comptime build_options.lang_toml) {
+        var out_doc: ?*FigDocument = null;
+        try std.testing.expectEqual(FigStatus.ok, fig_parse(null, 0, @intFromEnum(FigFormat.toml), &out_doc));
+        defer fig_document_destroy(out_doc);
+        try std.testing.expectEqual(FigNodeKind.mapping, fig_node_kind(out_doc, fig_document_root(out_doc)));
+        try std.testing.expectEqual(@as(usize, 0), fig_node_child_count(out_doc, fig_document_root(out_doc)));
+    }
+}
+
+test "fig_document_serialize converts JSON to YAML" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const src = "{\"name\":\"fig\",\"nums\":[1,2]}";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), null, &ptr, &len));
+    try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
+
+    // Same handle, re-serialize to TOML — the borrowed bytes refresh in place.
+    if (comptime build_options.lang_toml) {
+        try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.toml), null, &ptr, &len));
+        try std.testing.expectEqualStrings("name = \"fig\"\nnums = [1, 2]\n", ptr[0..len]);
+    }
+}
+
+test "fig_document_serialize materializes the YAML reference layer when leaving YAML" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // `b` aliases the anchor defined on `a`; converting to JSON must expand it to
+    // a copied value, not leak `*x` or fail with unsupported_format.
+    const src = "a: &x 1\nb: *x\n";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.json), null, &ptr, &len));
+    try std.testing.expectEqualStrings("{\n  \"a\": 1,\n  \"b\": 1\n}\n", ptr[0..len]);
+
+    // YAML→YAML keeps the reference layer intact (no materialize).
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), null, &ptr, &len));
+    try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "*x") != null);
+}
+
+test "fig_document_serialize honors the lossless option for TOML null" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    // A JSON null has no TOML representation. Lossy (default) reports it; lossless
+    // wraps it in a `$fig` envelope so the document still serializes.
+    const src = "{\"k\":null}";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_document_serialize(out_doc, @intFromEnum(FigFormat.toml), null, &ptr, &len));
+
+    var opts: FigSerializeOptions = .{ .lossless = 1 };
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.toml), &opts, &ptr, &len));
+    try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "$fig") != null);
+}
+
+test "fig_document_serialize preserves comments across formats" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // The motivating case the parse→rebuild→fig_value_serialize detour could not
+    // serve: a comment captured from JSON5 re-emitted into YAML.
+    const src = "{\n  // hello\n  a: 1,\n}\n";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json5), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), null, &ptr, &len));
+    try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "# hello") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "a: 1") != null);
+
+    // strip_comments drops it.
+    var opts: FigSerializeOptions = .{ .strip_comments = 1 };
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), &opts, &ptr, &len));
+    try std.testing.expect(std.mem.indexOf(u8, ptr[0..len], "hello") == null);
 }
