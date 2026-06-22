@@ -111,6 +111,7 @@ impl SerializeOptions {
 impl From<SerializeOptions> for ffi::FigSerializeOptions {
     fn from(o: SerializeOptions) -> Self {
         ffi::FigSerializeOptions {
+            size: std::mem::size_of::<ffi::FigSerializeOptions>() as u32,
             pretty: u8::from(o.pretty),
             indent: o.indent,
         }
@@ -208,7 +209,9 @@ impl Document {
     }
 
     pub(crate) fn kind(&self, node: FigNodeId) -> FigNodeKind {
-        unsafe { ffi::fig_node_kind(self.ptr(), node) }
+        // `from_c` is the sole gate that turns the raw ABI int into the enum,
+        // mapping any unknown/future kind to `Invalid` instead of risking UB.
+        FigNodeKind::from_c(unsafe { ffi::fig_node_kind(self.ptr(), node) })
     }
 
     pub(crate) fn first_child(&self, node: FigNodeId) -> Option<FigNodeId> {

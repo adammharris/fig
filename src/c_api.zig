@@ -1409,6 +1409,11 @@ pub export fn fig_value_map(
 /// honored by JSON and ZON; `indent` by JSON only. YAML and TOML render with
 /// their own fixed layout.
 pub const FigSerializeOptions = extern struct {
+    /// The caller-reported size of this struct (set to `sizeof`). Acts as a
+    /// version tag: fields may be appended in later releases, and a given field
+    /// is read only when `size` covers it (see `serializeOptionsOf`), so a
+    /// struct laid out by an older caller stays valid with new fields defaulted.
+    size: u32 = @sizeOf(FigSerializeOptions),
     /// Nonzero (default): multi-line, indented output. Zero: compact single-line.
     pretty: u8 = 1,
     /// Spaces per indent level when `pretty` is nonzero (JSON only). 0 is treated
@@ -1416,13 +1421,24 @@ pub const FigSerializeOptions = extern struct {
     indent: u8 = 2,
 };
 
+/// Whether a caller-reported options `size` fully covers `field`. Fields beyond
+/// `size` are absent in the caller's (possibly older) layout and must not be
+/// read; they take their defaults instead.
+fn optionCovers(size: u32, comptime field: []const u8) bool {
+    const end = @offsetOf(FigSerializeOptions, field) + @sizeOf(@FieldType(FigSerializeOptions, field));
+    return size >= end;
+}
+
 /// Translate the C options struct (NULL ⇒ defaults) into the core options.
+/// Each field is honored only when the caller's `size` includes it, so the
+/// struct can gain fields without breaking callers compiled against an older
+/// layout (and a zeroed/under-sized `size` reads as all-defaults, not garbage).
 fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions {
     const o = options orelse return .{};
-    return .{
-        .pretty = o.pretty != 0,
-        .indent = if (o.indent == 0) 2 else o.indent,
-    };
+    var out: AST.SerializeOptions = .{};
+    if (optionCovers(o.size, "pretty")) out.pretty = o.pretty != 0;
+    if (optionCovers(o.size, "indent")) out.indent = if (o.indent == 0) 2 else o.indent;
+    return out;
 }
 
 /// Render the value subtree rooted at `root` in `format`. Output bytes are
@@ -1806,6 +1822,37 @@ test "value c abi maps an unrepresentable value to unsupported_format" {
     // The same value serializes fine to a format that has null.
     try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.json), &ptr, &len));
     try std.testing.expectEqualStrings("{\n  \"k\": null\n}\n", ptr[0..len]);
+}
+
+test "value c abi serialize options honor the size/version field" {
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    // [ 1, 2 ] — exercise pretty on/off via the options struct.
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 1, &id));
+    const a = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 2, &id));
+    const b = id;
+    const items = [_]FigNodeId{ a, b };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_seq(out_value, &items, items.len, &id));
+    const root = id;
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+
+    // A fully-populated options struct: compact output.
+    var opts: FigSerializeOptions = .{ .pretty = 0 };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.json), &opts, &ptr, &len));
+    try std.testing.expectEqualStrings("[1,2]\n", ptr[0..len]);
+
+    // A `size` that does not reach `pretty` must leave it (and `indent`) at the
+    // default — i.e. behave as if those fields were absent, not read as garbage.
+    // This is the forward-compat contract: an older/under-sized layout defaults.
+    opts.size = @offsetOf(FigSerializeOptions, "pretty"); // covers only `size`
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.json), &opts, &ptr, &len));
+    try std.testing.expectEqualStrings("[\n  1,\n  2\n]\n", ptr[0..len]);
 }
 
 test "value c abi rejects an out-of-range child id" {

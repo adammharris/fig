@@ -8,6 +8,13 @@
 extern "C" {
 #endif
 
+// Forward compatibility: later fig releases may add enumerators to the enums
+// below (status codes, node kinds, extended-scalar kinds, formats). Treat any
+// value you do not recognize as opaque — for FigStatus, as a generic failure;
+// for the kind enums, as "unknown" — rather than asserting the set is closed.
+// Language bindings must not decode a returned value into a fixed enum type
+// without a fallback, since an out-of-range discriminant is undefined behavior
+// in some languages.
 typedef enum FigStatus {
     FIG_STATUS_OK = 0,
     FIG_STATUS_INVALID_ARGUMENT = 1,
@@ -308,6 +315,13 @@ FigStatus fig_value_serialize(FigValue *value, FigNodeId root, int format,
 // honored by JSON and ZON; `indent` by JSON only. YAML and TOML render with
 // their own fixed layout.
 typedef struct FigSerializeOptions {
+  // Set this to sizeof(FigSerializeOptions). It is the struct's version tag:
+  // fig may append fields in later releases, and reads a given field only when
+  // `size` is large enough to cover it — so a struct laid out by an older
+  // caller still works, with the new fields taking their defaults. A `size`
+  // too small to cover a field (e.g. 0 from a zero-initialized struct that
+  // forgot to set it) makes that field read as its default, NOT garbage.
+  uint32_t size;
   // Nonzero (default): multi-line, indented output. Zero: compact single-line.
   uint8_t pretty;
   // Spaces per indent level when `pretty` is nonzero (JSON only). 0 => default 2.

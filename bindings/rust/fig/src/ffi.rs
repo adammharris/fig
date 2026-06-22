@@ -1,16 +1,26 @@
 use std::os::raw::c_int;
 
-#[repr(C)]
+/// A fig C ABI status code, as a transparent wrapper over the raw `c_int` the
+/// ABI returns — deliberately *not* a Rust `enum`.
+///
+/// A fieldless `#[repr(C)]` enum returned by value from an `extern "C"` function
+/// is undefined behavior the instant the callee returns a discriminant the enum
+/// does not list, and fig's status set is allowed to grow after 1.0. The newtype
+/// preserves any code unchanged; compare against the associated constants and
+/// route unrecognized values through a fallback (see [`crate::error::Error::from_status`]).
+#[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FigStatus(pub c_int);
+
 #[allow(dead_code)]
-pub enum FigStatus {
-    Ok = 0,
-    InvalidArgument = 1,
-    ParseError = 2,
-    OutOfMemory = 3,
-    UnsupportedFormat = 4,
-    NotFound = 5,
-    InternalError = 255,
+impl FigStatus {
+    pub const OK: c_int = 0;
+    pub const INVALID_ARGUMENT: c_int = 1;
+    pub const PARSE_ERROR: c_int = 2;
+    pub const OUT_OF_MEMORY: c_int = 3;
+    pub const UNSUPPORTED_FORMAT: c_int = 4;
+    pub const NOT_FOUND: c_int = 5;
+    pub const INTERNAL_ERROR: c_int = 255;
 }
 
 #[repr(C)]
@@ -50,6 +60,28 @@ pub enum FigNodeKind {
     Alias = 8,
 }
 
+impl FigNodeKind {
+    /// Map the raw `c_int` returned by `fig_node_kind` onto a `FigNodeKind`.
+    /// Unknown / future kinds collapse to [`FigNodeKind::Invalid`] rather than
+    /// being reinterpreted as an out-of-range enum value — which, for a value
+    /// returned by an `extern "C"` function into a Rust enum, is undefined
+    /// behavior. This is the only place a raw kind crosses into the enum.
+    pub(crate) fn from_c(raw: c_int) -> Self {
+        match raw {
+            0 => FigNodeKind::Null,
+            1 => FigNodeKind::Bool,
+            2 => FigNodeKind::Int,
+            3 => FigNodeKind::Float,
+            4 => FigNodeKind::String,
+            5 => FigNodeKind::Sequence,
+            6 => FigNodeKind::Mapping,
+            7 => FigNodeKind::Keyvalue,
+            8 => FigNodeKind::Alias,
+            _ => FigNodeKind::Invalid,
+        }
+    }
+}
+
 unsafe extern "C" {
     pub fn fig_parse(
         input: *const u8,
@@ -64,7 +96,10 @@ unsafe extern "C" {
 // Read traversal — consumed by `Document::to_value` and the serde deserializer.
 unsafe extern "C" {
     pub fn fig_document_root(doc: *const FigDocument) -> FigNodeId;
-    pub fn fig_node_kind(doc: *const FigDocument, node: FigNodeId) -> FigNodeKind;
+    // Returns the raw kind as `c_int`, not `FigNodeKind`: decoding it directly
+    // into the enum would be UB if the core returned an unlisted value. Callers
+    // go through `FigNodeKind::from_c`.
+    pub fn fig_node_kind(doc: *const FigDocument, node: FigNodeId) -> c_int;
     pub fn fig_node_first_child(doc: *const FigDocument, node: FigNodeId) -> FigNodeId;
     pub fn fig_node_next_sibling(doc: *const FigDocument, node: FigNodeId) -> FigNodeId;
     pub fn fig_node_child_count(doc: *const FigDocument, node: FigNodeId) -> usize;
@@ -110,6 +145,10 @@ pub struct FigKeyValue {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FigSerializeOptions {
+    /// Set to `size_of::<FigSerializeOptions>()`. Version tag for the struct:
+    /// the core reads a field only when `size` covers it, so fields can be
+    /// appended without breaking this layout. See `FigSerializeOptions` in `fig.h`.
+    pub size: u32,
     pub pretty: u8,
     pub indent: u8,
 }

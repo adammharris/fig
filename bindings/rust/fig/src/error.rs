@@ -107,14 +107,16 @@ impl Error {
     }
 
     pub(crate) fn from_status(status: ffi::FigStatus) -> Result<(), Self> {
-        match status {
-            ffi::FigStatus::Ok => Ok(()),
-            ffi::FigStatus::InvalidArgument => Err(Self::InvalidArgument),
-            ffi::FigStatus::ParseError => Err(Self::Parse),
-            ffi::FigStatus::OutOfMemory => Err(Self::OutOfMemory),
-            ffi::FigStatus::UnsupportedFormat => Err(Self::UnsupportedFormat),
-            ffi::FigStatus::NotFound => Err(Self::NotFound),
-            ffi::FigStatus::InternalError => Err(Self::Internal),
+        match status.0 {
+            ffi::FigStatus::OK => Ok(()),
+            ffi::FigStatus::INVALID_ARGUMENT => Err(Self::InvalidArgument),
+            ffi::FigStatus::PARSE_ERROR => Err(Self::Parse),
+            ffi::FigStatus::OUT_OF_MEMORY => Err(Self::OutOfMemory),
+            ffi::FigStatus::UNSUPPORTED_FORMAT => Err(Self::UnsupportedFormat),
+            ffi::FigStatus::NOT_FOUND => Err(Self::NotFound),
+            // `INTERNAL_ERROR` and any code fig may add in a later release fold
+            // into `Internal`: an unrecognized status is never mistaken for `Ok`.
+            _ => Err(Self::Internal),
         }
     }
 }

@@ -181,10 +181,13 @@ export function serialize(value: Value | JsValue, format: Format, options?: Seri
     try {
       const scratch = frame.alloc(8); // out_id / out_ptr+out_len
       const root = build(handle, node, frame, scratch);
-      // FigSerializeOptions { pretty: u8, indent: u8 }; NULL (ptr 0) ⇒ defaults.
+      // FigSerializeOptions { u32 size; u8 pretty; u8 indent; } — 8 bytes with
+      // tail padding. `size` is the struct's version tag (must be its byte size
+      // so the core knows which fields we set); NULL (ptr 0) would instead pick
+      // all defaults. Little-endian: size=8 -> [8,0,0,0], then pretty, indent, pad.
       const pretty = options?.pretty === false ? 0 : 1;
       const indent = options?.indent ?? 2;
-      const optsPtr = frame.bytes(new Uint8Array([pretty, indent]));
+      const optsPtr = frame.bytes(new Uint8Array([8, 0, 0, 0, pretty, indent, 0, 0]));
       check(fig.fig_value_serialize_opts(handle, root, format, optsPtr, scratch, scratch + 4), "fig_value_serialize_opts");
       return readOutSlice(scratch);
     } finally {
