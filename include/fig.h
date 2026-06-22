@@ -441,6 +441,71 @@ FigStatus fig_document_serialize(FigDocument *doc, int format,
                                  const FigSerializeOptions *options,
                                  const uint8_t **out_ptr, size_t *out_len);
 
+// ==================
+// DIAGNOSTICS
+// ==================
+//
+// Report what a serialization would silently lose, without performing it. fig's
+// printers degrade or drop data the target format cannot hold (a TOML null
+// vanishes, a datetime becomes a string, a block comment becomes a # run, plain
+// JSON drops comments) — all still-valid output, so it happens quietly. These
+// calls surface each such event so a host can warn, block, or ignore it.
+
+// What kind of loss a warning describes. Mirrors the producing values exactly.
+typedef enum FigWarningCode {
+  // A carried comment is not emitted at all (no comment syntax, or stripped).
+  FIG_WARNING_COMMENT_DROPPED = 0,
+  // A block comment is rendered as a run of line comments.
+  FIG_WARNING_COMMENT_STYLE_DEGRADED = 1,
+  // A node is removed entirely (the target cannot represent it even degraded).
+  FIG_WARNING_VALUE_DROPPED = 2,
+  // An extended/non-finite value is rendered as a poorer type.
+  FIG_WARNING_TYPE_DEGRADED = 3,
+} FigWarningCode;
+
+// Why the loss happens — so a host can keep or ignore each class.
+typedef enum FigWarningCause {
+  // The target format inherently cannot represent it.
+  FIG_WARNING_CAUSE_FORMAT_LIMITATION = 0,
+  // A caller option forced it (e.g. strip_comments).
+  FIG_WARNING_CAUSE_EXPLICIT_OPTION = 1,
+} FigWarningCause;
+
+// One lossy event. `code`/`cause` hold FigWarningCode/FigWarningCause values
+// (compared as int for forward-compatibility). `path`/`note` are NOT
+// null-terminated — use the paired `*_len`. `path` is the dotted/[i] location
+// (path_len == 0 means the document root); `note` is the degraded-to type for
+// FIG_WARNING_TYPE_DEGRADED (e.g. "string", "number"), empty otherwise. Both
+// borrow the producing handle's storage (see the borrowing note below).
+typedef struct FigWarning {
+  int code;
+  int cause;
+  const uint8_t *path;
+  size_t path_len;
+  const uint8_t *note;
+  size_t note_len;
+} FigWarning;
+
+// Report what serializing the whole parsed document to `format` would lose,
+// using the same pipeline fig_document_serialize prints from (YAML collapse and,
+// under `options->lossless`, $fig envelopes — so lossless suppresses value
+// losses). `options` (NULL => defaults) supplies pretty/strip_comments/lossless,
+// which change what is lost. On FIG_STATUS_OK, *out_warnings points at
+// *out_count FigWarning entries (NULL and 0 if nothing is lost) borrowed from
+// `doc` and valid until the next fig_document_diagnose on it or
+// fig_document_destroy.
+FigStatus fig_document_diagnose(FigDocument *doc, int format,
+                                const FigSerializeOptions *options,
+                                FigWarning **out_warnings, size_t *out_count);
+
+// Report what serializing the built value subtree rooted at `root` to `format`
+// would lose. The value builder has no source envelopes, so `options->lossless`
+// is ignored here. Borrowing rules match fig_document_diagnose (valid until the
+// next fig_value_diagnose on `value` or fig_value_destroy).
+FigStatus fig_value_diagnose(FigValue *value, FigNodeId root, int format,
+                             const FigSerializeOptions *options,
+                             FigWarning **out_warnings, size_t *out_count);
+
 #ifdef __cplusplus
 }
 #endif

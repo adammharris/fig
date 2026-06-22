@@ -8,6 +8,8 @@ pub const Document = @import("document.zig");
 pub const AST = @import("ast.zig");
 pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
+/// Serialization diagnostics: report what a cross-format conversion would lose.
+pub const Diagnostics = @import("diagnostics.zig");
 /// The native "fig" format: the AST's own 1:1 canonical text encoding.
 pub const Native = @import("native/native.zig");
 
@@ -26,6 +28,7 @@ test {
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
+    _ = @import("diagnostics.zig");
     _ = @import("native/native.zig");
     _ = @import("deserialize.zig");
     _ = @import("c_api.zig");

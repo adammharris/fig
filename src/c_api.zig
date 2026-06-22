@@ -29,6 +29,7 @@ const XmlType = if (build_options.lang_xml) @import("xml/xml.zig").Type else voi
 // the gated-import pattern above (collapses to `void` when YAML is off, and every
 // reference to it sits behind the matching comptime guard).
 const Lossless = @import("lossless.zig");
+const Diagnostics = @import("diagnostics.zig");
 const YamlMaterialize = if (build_options.lang_yaml) @import("yaml/materialize.zig") else void;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
@@ -154,6 +155,11 @@ const DocumentHandle = struct {
     /// recent call returned (cleared and refilled each time). Mirrors
     /// `ValueHandle.rendered`.
     rendered: std.Io.Writer.Allocating,
+    /// Backs the warnings (and their path strings) the most recent
+    /// `fig_document_diagnose` returned; reset (not freed) each call, so a
+    /// returned `FigWarning` array is borrowed and valid only until the next
+    /// diagnose on this handle or `fig_document_destroy`.
+    diag_arena: std.heap.ArenaAllocator,
 };
 
 fn activeAllocator() std.mem.Allocator {
@@ -300,6 +306,7 @@ pub export fn fig_parse(
         .document = doc,
         .format = fig_format,
         .rendered = std.Io.Writer.Allocating.init(allocator),
+        .diag_arena = std.heap.ArenaAllocator.init(allocator),
     };
 
     out.* = @ptrCast(handle);
@@ -318,6 +325,7 @@ pub export fn fig_document_destroy(doc: ?*FigDocument) void {
     const public_doc = doc orelse return;
     const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
     handle.rendered.deinit();
+    handle.diag_arena.deinit();
     handle.document.deinit(handle.allocator);
     handle.allocator.free(handle.source);
     handle.allocator.destroy(handle);
@@ -1319,6 +1327,9 @@ const ValueHandle = struct {
     /// Reused across `fig_value_serialize` calls; holds the bytes the most recent
     /// call returned (cleared and refilled each time).
     rendered: std.Io.Writer.Allocating,
+    /// Backs the warnings returned by the most recent `fig_value_diagnose`; reset
+    /// (not freed) each call. Mirrors `DocumentHandle.diag_arena`.
+    diag_arena: std.heap.ArenaAllocator,
 };
 
 fn valueFrom(value: ?*FigValue) ?*ValueHandle {
@@ -1339,15 +1350,22 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
     };
 }
 
+/// Map a C `format` to the writable-format set, or null if it cannot be written
+/// in THIS build. Gated formats compiled out return null here — the single policy
+/// point that keeps `fig_*_serialize`, `fig_*_diagnose`, and
+/// `fig_format_capabilities` in agreement (all yield `unsupported_format` for a
+/// compiled-out format, rather than serialize rejecting it at print time while
+/// diagnose silently accepts it). The `FormatDisabled` arms in the printers
+/// remain as defense-in-depth for any path that bypasses this map.
 fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
     return switch (format) {
         @intFromEnum(FigFormat.json) => .json,
         // JSONC writes plain-JSON syntax plus `//`/`/* */` comments.
         @intFromEnum(FigFormat.jsonc) => .jsonc,
         @intFromEnum(FigFormat.json5) => .json5,
-        @intFromEnum(FigFormat.yaml) => .yaml,
-        @intFromEnum(FigFormat.toml) => .toml,
-        @intFromEnum(FigFormat.zon) => .zon,
+        @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else null,
+        @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else null,
+        @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else null,
         else => null,
     };
 }
@@ -1381,6 +1399,7 @@ pub export fn fig_value_create(out_value: ?*?*FigValue) FigStatus {
         .allocator = allocator,
         .builder = AST.Builder.init(allocator),
         .rendered = std.Io.Writer.Allocating.init(allocator),
+        .diag_arena = std.heap.ArenaAllocator.init(allocator),
     };
     out.* = @ptrCast(handle);
     return .ok;
@@ -1391,6 +1410,7 @@ pub export fn fig_value_destroy(value: ?*FigValue) void {
     const allocator = handle.allocator;
     handle.builder.deinit();
     handle.rendered.deinit();
+    handle.diag_arena.deinit();
     allocator.destroy(handle);
 }
 
@@ -1640,6 +1660,24 @@ pub export fn fig_document_serialize(
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    const ast = prepareDocumentAst(handle, fmt, options, arena) catch |err| return convertStatus(err);
+
+    handle.rendered.clearRetainingCapacity();
+    ast.serializeWith(&handle.rendered.writer, fmt, opts) catch |err| return serializeStatus(err);
+    const bytes = handle.rendered.written();
+    p.* = bytes.ptr;
+    l.* = bytes.len;
+    return .ok;
+}
+
+/// Run the same source→target AST pipeline `fig_document_serialize` prints from:
+/// collapse YAML's reference layer when leaving YAML (strict tags), then — under
+/// `lossless` — decode any `$fig` envelopes and re-encode for the target. All
+/// intermediate ASTs live in `arena` (their strings borrow the source AST, which
+/// outlives the call). Returns the source AST unchanged when no transform applies.
+/// Errors: `OutOfMemory`, or an un-collapsible YAML reference layer from
+/// `materialize` — both mapped via `convertStatus` at the call site.
+fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options: ?*const FigSerializeOptions, arena: std.mem.Allocator) !*const AST {
     const src_is_yaml = handle.format == .yaml;
     const dst_is_yaml = fmt == .yaml;
 
@@ -1647,8 +1685,8 @@ pub export fn fig_document_serialize(
     // the CLI default — unknown/custom tags become `unsupported_format`).
     const base_ast: *const AST = if (src_is_yaml and !dst_is_yaml) blk: {
         if (comptime build_options.lang_yaml) {
-            const mat = arena.create(AST) catch return .out_of_memory;
-            mat.* = YamlMaterialize.materialize(arena, &handle.document.ast, .strict) catch |err| return convertStatus(err);
+            const mat = try arena.create(AST);
+            mat.* = try YamlMaterialize.materialize(arena, &handle.document.ast, .strict);
             break :blk mat;
         } else unreachable; // src_is_yaml ⇒ YAML was compiled in
     } else &handle.document.ast;
@@ -1656,7 +1694,7 @@ pub export fn fig_document_serialize(
     // Lossless: decode any `$fig` envelopes in the source back to real kinds, then
     // re-encode for the target. Skipped for YAML→YAML (its reference layer already
     // round-trips, and the core-AST passes would strip it).
-    const ast: *const AST = if (losslessRequested(options) and !(src_is_yaml and dst_is_yaml)) blk: {
+    if (losslessRequested(options) and !(src_is_yaml and dst_is_yaml)) {
         const target: ?Lossless.Target = switch (fmt) {
             .json, .jsonc, .json5 => .json,
             .yaml => .yaml,
@@ -1666,20 +1704,172 @@ pub export fn fig_document_serialize(
             // total. null would mean decode-only (no envelope on output).
             .native => null,
         };
-        const decoded = arena.create(AST) catch return .out_of_memory;
-        decoded.* = Lossless.decode(arena, base_ast) catch return .out_of_memory;
-        const t = target orelse break :blk decoded;
-        const encoded = arena.create(AST) catch return .out_of_memory;
-        encoded.* = Lossless.encode(arena, decoded, t) catch return .out_of_memory;
-        break :blk encoded;
-    } else base_ast;
+        const decoded = try arena.create(AST);
+        decoded.* = try Lossless.decode(arena, base_ast);
+        const t = target orelse return decoded;
+        const encoded = try arena.create(AST);
+        encoded.* = try Lossless.encode(arena, decoded, t);
+        return encoded;
+    }
+    return base_ast;
+}
 
-    handle.rendered.clearRetainingCapacity();
-    ast.serializeWith(&handle.rendered.writer, fmt, opts) catch |err| return serializeStatus(err);
-    const bytes = handle.rendered.written();
-    p.* = bytes.ptr;
-    l.* = bytes.len;
+// ==================
+// DIAGNOSTICS
+// ==================
+//
+// Report what a conversion would silently lose (comments dropped/degraded,
+// values dropped/degraded). It runs the SAME pipeline `*_serialize` prints from,
+// so the warnings reflect the actual output. Read-only on the document/value
+// *content*, but NOT a const operation: it resets and fills the handle's
+// `diag_arena` scratch, so for the threading rules it counts as a mutating call
+// on the handle (hence the non-const handle pointer) — do not run it concurrently
+// with any other call on the same handle, including the genuinely-const reads.
+// The returned array — and its `path` strings — are borrowed from the handle and
+// valid only until the next diagnose on it or its destroy.
+
+/// Mirrors `Diagnostics.Warning.Code`.
+pub const FigWarningCode = enum(c_int) {
+    /// A carried comment is not emitted at all.
+    comment_dropped = 0,
+    /// A block comment is rendered as a run of line comments.
+    comment_style_degraded = 1,
+    /// A node is removed entirely (the target cannot represent it even degraded).
+    value_dropped = 2,
+    /// An extended/non-finite value is rendered as a poorer type.
+    type_degraded = 3,
+};
+
+/// Mirrors `Diagnostics.Warning.Cause`.
+pub const FigWarningCause = enum(c_int) {
+    /// The target format inherently cannot represent it.
+    format_limitation = 0,
+    /// A caller option forced it (e.g. `strip_comments`).
+    explicit_option = 1,
+};
+
+/// One lossy event. `path`/`note` are NOT null-terminated — use the paired
+/// `*_len`. `path` is the dotted/`[i]` location ("" / len 0 = document root);
+/// `note` is the degraded-to type for `type_degraded`, else empty. Both borrow
+/// the producing handle's diagnostics arena.
+pub const FigWarning = extern struct {
+    code: c_int,
+    cause: c_int,
+    path: [*c]const u8,
+    path_len: usize,
+    note: [*c]const u8,
+    note_len: usize,
+};
+
+fn warningCodeInt(code: Diagnostics.Warning.Code) c_int {
+    return @intFromEnum(@as(FigWarningCode, switch (code) {
+        .comment_dropped => .comment_dropped,
+        .comment_style_degraded => .comment_style_degraded,
+        .value_dropped => .value_dropped,
+        .type_degraded => .type_degraded,
+    }));
+}
+
+fn warningCauseInt(cause: Diagnostics.Warning.Cause) c_int {
+    return @intFromEnum(@as(FigWarningCause, switch (cause) {
+        .format_limitation => .format_limitation,
+        .explicit_option => .explicit_option,
+    }));
+}
+
+/// Build `Diagnostics.Options` from the serialize options (NULL ⇒ defaults).
+fn diagnoseOptionsOf(options: ?*const FigSerializeOptions) Diagnostics.Options {
+    const so = serializeOptionsOf(options);
+    return .{
+        .pretty = so.pretty,
+        .strip_comments = so.strip_comments,
+        .lossless = losslessRequested(options),
+    };
+}
+
+/// Copy `warnings` into a freshly-allocated `FigWarning` array in `arena` and
+/// hand it back through `out_*`. A zero-length result yields a NULL pointer and
+/// count 0.
+fn emitWarnings(arena: std.mem.Allocator, warnings: []const Diagnostics.Warning, out_warnings: *[*c]FigWarning, out_count: *usize) FigStatus {
+    if (warnings.len == 0) {
+        out_warnings.* = null;
+        out_count.* = 0;
+        return .ok;
+    }
+    const out = arena.alloc(FigWarning, warnings.len) catch return .out_of_memory;
+    for (warnings, out) |w, *o| {
+        o.* = .{
+            .code = warningCodeInt(w.code),
+            .cause = warningCauseInt(w.cause),
+            .path = w.path.ptr,
+            .path_len = w.path.len,
+            .note = w.note.ptr,
+            .note_len = w.note.len,
+        };
+    }
+    out_warnings.* = out.ptr;
+    out_count.* = out.len;
     return .ok;
+}
+
+/// Report what serializing the parsed document to `format` would lose, using the
+/// same pipeline (YAML collapse, lossless envelopes) `fig_document_serialize`
+/// would. `options` (NULL ⇒ defaults) supplies `pretty`/`strip_comments`/
+/// `lossless`, which change what is lost. On success `*out_warnings` points at
+/// `*out_count` `FigWarning`s borrowed from the handle (NULL/0 if nothing is
+/// lost), valid until the next `fig_document_diagnose` on `doc` or its destroy.
+pub export fn fig_document_diagnose(
+    doc: ?*FigDocument,
+    format: c_int,
+    options: ?*const FigSerializeOptions,
+    out_warnings: ?*[*c]FigWarning,
+    out_count: ?*usize,
+) FigStatus {
+    const ow = out_warnings orelse return .invalid_argument;
+    const oc = out_count orelse return .invalid_argument;
+    // Clear the out-params up front so an early error return (unsupported_format,
+    // out_of_memory) never leaves a caller reading a stale/uninitialized array.
+    // Mirrors `fig_parse` nulling its out-handle.
+    ow.* = null;
+    oc.* = 0;
+    const public_doc = doc orelse return .invalid_argument;
+    const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
+    const fmt = serializeFormatOf(format) orelse return .unsupported_format;
+
+    _ = handle.diag_arena.reset(.retain_capacity);
+    const arena = handle.diag_arena.allocator();
+    const ast = prepareDocumentAst(handle, fmt, options, arena) catch |err| return convertStatus(err);
+    const warnings = Diagnostics.analyze(arena, ast, ast.root, fmt, diagnoseOptionsOf(options)) catch return .out_of_memory;
+    return emitWarnings(arena, warnings, ow, oc);
+}
+
+/// Report what serializing the built value subtree rooted at `root` to `format`
+/// would lose. The value builder has no source envelopes, so `lossless` in
+/// `options` is ignored here (it only affects `fig_document_diagnose`).
+/// Borrowing rules match `fig_document_diagnose`.
+pub export fn fig_value_diagnose(
+    value: ?*FigValue,
+    root: FigNodeId,
+    format: c_int,
+    options: ?*const FigSerializeOptions,
+    out_warnings: ?*[*c]FigWarning,
+    out_count: ?*usize,
+) FigStatus {
+    const ow = out_warnings orelse return .invalid_argument;
+    const oc = out_count orelse return .invalid_argument;
+    // Clear up front so an early error return never leaves a stale array exposed
+    // (see `fig_document_diagnose`).
+    ow.* = null;
+    oc.* = 0;
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    const fmt = serializeFormatOf(format) orelse return .unsupported_format;
+    if (root >= handle.builder.nodes.items.len) return .invalid_argument;
+
+    _ = handle.diag_arena.reset(.retain_capacity);
+    const arena = handle.diag_arena.allocator();
+    const ast = handle.builder.view(root); // borrows the builder; never deinit'd
+    const warnings = Diagnostics.analyze(arena, &ast, root, fmt, diagnoseOptionsOf(options)) catch return .out_of_memory;
+    return emitWarnings(arena, warnings, ow, oc);
 }
 
 test "traversal over a parsed mapping" {
@@ -1721,6 +1911,89 @@ test "traversal over a parsed mapping" {
     const tags_val = fig_keyvalue_value(doc, third);
     try std.testing.expectEqual(FigNodeKind.sequence, fig_node_kind(doc, tags_val));
     try std.testing.expectEqual(@as(usize, 2), fig_node_child_count(doc, tags_val));
+}
+
+test "fig_document_diagnose reports a dropped null for TOML" {
+    if (comptime !(build_options.lang_yaml and build_options.lang_toml)) return error.SkipZigTest;
+    const src = "a: null\nb: 1\n";
+
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var warns: [*c]FigWarning = undefined;
+    var count: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &warns, &count));
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@intFromEnum(FigWarningCode.value_dropped), warns[0].code);
+    try std.testing.expectEqual(@intFromEnum(FigWarningCause.format_limitation), warns[0].cause);
+    try std.testing.expectEqualStrings("a", warns[0].path[0..warns[0].path_len]);
+
+    // Lossless preserves the null → no warnings.
+    var opts: FigSerializeOptions = .{ .lossless = 1 };
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), &opts, &warns, &count));
+    try std.testing.expectEqual(@as(usize, 0), count);
+    try std.testing.expectEqual(@as([*c]FigWarning, null), warns);
+
+    // A representable target loses nothing.
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.json), null, &warns, &count));
+    try std.testing.expectEqual(@as(usize, 0), count);
+}
+
+test "fig_value_diagnose reports a degraded datetime" {
+    var v: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&v));
+    defer fig_value_destroy(v);
+
+    const ts = "1979-05-27T07:32:00Z";
+    var dt: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_extended(v, @intFromEnum(FigExtKind.offset_datetime), ts.ptr, ts.len, &dt));
+
+    var warns: [*c]FigWarning = undefined;
+    var count: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.json), null, &warns, &count));
+    try std.testing.expectEqual(@as(usize, 1), count);
+    try std.testing.expectEqual(@intFromEnum(FigWarningCode.type_degraded), warns[0].code);
+    try std.testing.expectEqualStrings("string", warns[0].note[0..warns[0].note_len]);
+
+    // TOML holds datetimes natively → no warning.
+    if (comptime build_options.lang_toml) {
+        try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.toml), null, &warns, &count));
+        try std.testing.expectEqual(@as(usize, 0), count);
+    }
+}
+
+test "a compiled-out format is unsupported in serialize and diagnose alike" {
+    // Only meaningful when a writable format is gated out of this build; the
+    // default all-on build has nothing to probe. TOML is the stand-in.
+    if (comptime build_options.lang_toml) return error.SkipZigTest;
+
+    const src = "{\"a\": 1}"; // JSON is always compiled in, so the parse succeeds.
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    // Serialize rejects the gated-out target...
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(
+        FigStatus.unsupported_format,
+        fig_document_serialize(out_doc, @intFromEnum(FigFormat.toml), null, &ptr, &len),
+    );
+
+    // ...and diagnose agrees, instead of silently accepting it. Out-params are
+    // cleared on the error path (pre-initialized up front).
+    var warns: [*c]FigWarning = undefined;
+    var count: usize = 999;
+    try std.testing.expectEqual(
+        FigStatus.unsupported_format,
+        fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &warns, &count),
+    );
+    try std.testing.expectEqual(@as([*c]FigWarning, null), warns);
+    try std.testing.expectEqual(@as(usize, 0), count);
+
+    // Capabilities report the same verdict: nothing for a compiled-out format.
+    try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(@intFromEnum(FigFormat.toml)));
 }
 
 test "parse c abi reads toml and zon" {

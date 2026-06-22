@@ -58,6 +58,11 @@ const CliActionOptions = union(CliAction) {
         /// `--indent N` sets the JSON indent width. Honored by JSON (pretty +
         /// indent) and ZON (pretty only); YAML/TOML render with their own layout.
         serialize: fig.AST.SerializeOptions = .{},
+        /// Suppress the lossy-conversion warnings normally written to stderr.
+        quiet: bool = false,
+        /// Treat any lossy conversion as an error: print the warnings, then exit
+        /// non-zero without writing output.
+        strict: bool = false,
     },
 };
 
@@ -113,6 +118,8 @@ const Help = struct {
             \\    (e.g. a null in TOML, a TOML datetime in JSON) via a $fig
             \\    envelope, and reconstruct any such envelope in the input.
             \\    --lossy (the default) emits clean, idiomatic output instead.
+            \\  -q, --quiet: suppress the lossy-conversion warnings on stderr.
+            \\  --strict: treat any lossy conversion as an error (exit non-zero).
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: reads the YAML frontmatter
@@ -307,19 +314,49 @@ pub fn main(init: std.process.Init) !void {
                 .xml => unreachable, // rejected up front (reader-only)
             };
 
+            // Surface everything the conversion would silently lose (comments
+            // dropped/degraded, values dropped/degraded) — unless `--quiet`. The
+            // pass is read-only and runs on the AST as it will be printed: under
+            // `--lossless` the lossy nodes are already enveloped, so no value
+            // warnings fire. `--strict` turns any warning into a hard failure.
+            if (!opts.quiet or opts.strict) {
+                const warnings = try fig.Diagnostics.analyze(init.arena.allocator(), ast, node_id, target, .{
+                    .pretty = opts.serialize.pretty,
+                    .strip_comments = opts.serialize.strip_comments,
+                    .lossless = opts.lossless,
+                });
+                // The CLI only surfaces losses the FORMAT forced. A loss the user
+                // explicitly asked for (e.g. `--strip-comments`) carries
+                // `explicit_option` and is not surprising, so it neither warns nor
+                // trips `--strict` — it just rides through on the warning layer for
+                // a library consumer that wants it.
+                var surfaced: usize = 0;
+                for (warnings) |w| {
+                    if (w.cause != .format_limitation) continue;
+                    surfaced += 1;
+                    if (!opts.quiet) {
+                        try stderr_terminal.setColor(.red);
+                        try stderr_terminal.writer.writeAll("warning: ");
+                        try stderr_terminal.setColor(.reset);
+                        try w.render(stderr_terminal.writer, target);
+                        try stderr_terminal.writer.writeByte('\n');
+                    }
+                }
+                if (!opts.quiet) try stderr_terminal.writer.flush();
+                if (opts.strict and surfaced > 0) {
+                    try stderr_terminal.writer.print("error: {d} lossy conversion warning(s); --strict aborts.\n", .{surfaced});
+                    try stderr_terminal.writer.flush();
+                    std.process.exit(1);
+                }
+            }
+
             if (target == .toml and !opts.lossless) {
                 // TOML has no null. In lossy mode, rather than the printer
                 // aborting mid-document on one, strip unrepresentable values up
-                // front and warn — output stays valid and complete. (Lossless
-                // mode already wrapped them in `$fig` envelopes.) `lossyStrip`
-                // re-roots at `node_id`, so the result serializes whole.
+                // front so output stays valid and complete (the warnings above
+                // already reported them). `lossyStrip` re-roots at `node_id`, so
+                // the result serializes whole.
                 const result = try fig.Lossless.lossyStrip(init.arena.allocator(), ast, node_id, .toml);
-                for (result.dropped) |dropped_path| {
-                    try stderr_terminal.setColor(.red);
-                    try stderr_terminal.writer.print("warning: dropped null value at `{s}` (TOML cannot represent null). Use --lossless to preserve.\n", .{dropped_path});
-                    try stderr_terminal.setColor(.reset);
-                }
-                try stderr_terminal.writer.flush();
                 if (result.ast) |stripped| {
                     try stripped.serializeWith(stdout_terminal.writer, .toml, opts.serialize);
                 }
@@ -606,6 +643,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         var output_override: ?Format = null;
         var lax_tags = false;
         var lossless = false;
+        var quiet = false;
+        var strict = false;
         var serialize: fig.AST.SerializeOptions = .{};
         var positionals: std.ArrayList([]const u8) = .empty;
         defer positionals.deinit(allocator);
@@ -623,6 +662,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 serialize.pretty = true;
             } else if (std.mem.eql(u8, arg, "--strip-comments")) {
                 serialize.strip_comments = true;
+            } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--no-warnings")) {
+                quiet = true;
+            } else if (std.mem.eql(u8, arg, "--strict")) {
+                strict = true;
             } else if (std.mem.eql(u8, arg, "--indent")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});
@@ -714,6 +757,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .lossless = lossless,
             .embed = embed,
             .serialize = serialize,
+            .quiet = quiet,
+            .strict = strict,
         } };
     } else {
         log.err("Action not recognized: {s}", .{action_str});

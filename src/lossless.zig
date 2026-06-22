@@ -57,7 +57,7 @@ pub const Error = Allocator.Error;
 /// Does `target` need the lossless envelope to represent `kind` without loss?
 /// True only for the scalar kinds the target can't hold natively; every other
 /// kind (and any container) is copied through verbatim.
-fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
+pub fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
     return switch (kind) {
         // Only TOML lacks a null. JSON/YAML/ZON all have one.
         .null_ => target == .toml,
@@ -88,7 +88,7 @@ fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
 /// datetime → JSON is a `needsEnvelope` case (degrades to a string in lossy mode,
 /// no data type lost beyond the tag) but NOT unrepresentable. Only a `null`
 /// bound for TOML is genuinely unrepresentable today.
-fn isUnrepresentable(target: Target, kind: AST.Node.Kind) bool {
+pub fn isUnrepresentable(target: Target, kind: AST.Node.Kind) bool {
     return target == .toml and kind == .null_;
 }
 
