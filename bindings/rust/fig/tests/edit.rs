@@ -125,6 +125,23 @@ fn json5_editor_delete_keeps_owned_line_comment_with_key() {
 }
 
 #[test]
+fn toml_editor_renders_value_splice_as_toml_not_yaml() {
+    // Splice text is rendered in the editor's own format. A replacement string
+    // value must come out quoted (`"b"`) for TOML; the previous hardcoded-YAML
+    // path emitted a bare `b`, which is not a valid TOML value and failed the
+    // reparse. Integers are format-invariant, so `port` exercises the plain path.
+    let mut ed = Editor::open(b"[server]\nhost = \"a\"\nport = 1\n", Format::Toml).unwrap();
+    ed.replace(&[Segment::Key("server"), Segment::Key("host")], "b")
+        .unwrap();
+    ed.replace(&[Segment::Key("server"), Segment::Key("port")], &9090)
+        .unwrap();
+    assert_eq!(
+        ed.source().unwrap(),
+        "[server]\nhost = \"b\"\nport = 9090\n",
+    );
+}
+
+#[test]
 fn json_editor_rejects_json5_only_syntax() {
     // Sanity: the strict JSON dialect still refuses JSON5 input, so `Format::Json5`
     // is a real, distinct selection and not just an alias.

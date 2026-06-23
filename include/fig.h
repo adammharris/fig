@@ -52,7 +52,27 @@ const char *fig_version_string(void);
 //     out before that point if you need to keep them.
 // Buffers from fig_alloc are the only ones the caller owns; release them (only
 // them) with fig_free.
+//
+// fig_alloc/fig_free exist chiefly to bridge an address-space boundary: a caller
+// that does not share the library's memory (the WebAssembly build, driven from
+// JavaScript) cannot otherwise place input bytes where the API can read them, nor
+// hold output past the next call without copying it somewhere it owns. A host in
+// the same address space (the usual native C case) can just use its own
+// allocator instead — every API input is copied internally and every output is
+// borrowed, so nothing here returns a caller-owned buffer on its own.
+//
+// fig_free takes the length back: it is a SIZED free, so pass the exact `len` you
+// requested from fig_alloc (the (out_ptr,out_len) reads give you that length for
+// any bytes you copied into a fig_alloc buffer). A null pointer or zero length is
+// a no-op on both.
 // ============================================================================
+
+// Allocate `len` bytes from the library's allocator, or return NULL on failure
+// or a zero-length request. The bytes are uninitialized. Release with fig_free.
+uint8_t *fig_alloc(size_t len);
+// Release a buffer obtained from fig_alloc. `len` MUST equal the length passed to
+// fig_alloc. A null pointer or zero length is a no-op.
+void fig_free(uint8_t *ptr, size_t len);
 
 // Forward compatibility: later fig releases may add enumerators to the enums
 // below (status codes, node kinds, extended-scalar kinds, formats). Treat any
@@ -72,7 +92,7 @@ typedef enum FigStatus {
 } FigStatus;
 
 // Not every function accepts every member. fig_parse accepts all of them; the
-// editor (fig_editor_*) supports JSON/JSONC/JSON5/YAML only (others return
+// editor (fig_editor_*) supports JSON/JSONC/JSON5/YAML/TOML (others return
 // FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts
 // JSON/JSONC/JSON5/YAML/TOML/ZON (JSONC = plain-JSON syntax with comments). XML
 // is reader-only: accepted by fig_parse, rejected by the editor and serializer.
@@ -96,8 +116,8 @@ typedef enum FigCapability {
 } FigCapability;
 
 // Bitmask of FIG_CAP_* describing what this build can do with `format`. Reflects
-// both inherent support (XML is reader-only; TOML/ZON parse and serialize but are
-// not editable) and build-time gating: a format compiled out of this build, or an
+// both inherent support (XML is reader-only; ZON parses and serializes but is not
+// editable) and build-time gating: a format compiled out of this build, or an
 // unknown `format` value, reports 0. JSON/JSONC/JSON5 are always fully supported.
 uint32_t fig_format_capabilities(int format);
 

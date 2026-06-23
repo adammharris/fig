@@ -149,6 +149,15 @@ test("Editor edits an empty document", () => {
   assert.equal(ed.source(), "k: v\n");
 });
 
+test("Editor edits TOML, rendering value splice text as TOML", () => {
+  // Typed-value edits render in the editor's own format: a string becomes the
+  // quoted `"b"` for TOML (a bare `b` would be invalid and fail the reparse).
+  using ed = Editor.open("[server]\nhost = \"a\"\nport = 1\n", Format.Toml);
+  ed.replaceValue(["server", "host"], "b");
+  ed.replaceValue(["server", "port"], 9090);
+  assert.equal(ed.source(), "[server]\nhost = \"b\"\nport = 9090\n");
+});
+
 test("Editor edits JSON5, preserving unquoted keys and comments", () => {
   // Raw-text edits are the JSON-family pattern (value rendering is YAML-shaped).
   // The splice touches only the `8080` value; the `//` comments, single-quoted

@@ -29,7 +29,10 @@ It is currently in early alpha. Most features are not implemented yet.
 
 Other planned features:
 - JSON5
-- Expand editor to include TOML and ZON
+- Expand editor to include TOML and ZON (TOML done; ZON remaining)
+- Add a build flag to gate JSON out (`-Djson`), for consistency with the other
+  `lang_*` gates now that a native `.fig` format exists as a base — currently
+  `lang_json` is always on and assumed by `Language.detect()` and the C ABI
 - Publish Rust crate
 - Publish NPM package
 

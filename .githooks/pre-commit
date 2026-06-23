@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pre-commit: keep the C ABI surface consistent. Runs `zig build abi-check` (the
+# symbol diff in tools/abi-check.zig + the C/C++ header probe wired in build.zig)
+# only when the implementation or header is part of this commit, so commits that
+# don't touch the ABI pay nothing. Bypass with `git commit --no-verify` if needed.
+#
+# This shim is the one piece that must stay shell: a git hook is exec'd as a
+# program and a .zig file cannot carry a shebang, so the Zig logic lives behind
+# `zig build abi-check` and this just dispatches to it.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+staged=$(git diff --cached --name-only --diff-filter=ACM)
+
+case "$staged" in
+    *src/c_api.zig* | *include/fig.h*)
+        printf 'pre-commit: C ABI files staged — running abi-check\n'
+        ( cd "$root" && zig build abi-check ) || {
+            printf 'pre-commit: abi-check failed; commit aborted (use --no-verify to bypass)\n' >&2
+            exit 1
+        }
+        ;;
+esac

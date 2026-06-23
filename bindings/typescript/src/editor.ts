@@ -1,4 +1,5 @@
-// Comment-preserving, in-place editing of a whole JSON/JSONC/YAML document.
+// Comment-preserving, in-place editing of a whole JSON/JSONC/JSON5/YAML/TOML
+// document.
 //
 // Unlike `serialize`, which re-renders a whole value, `Editor` splices only the
 // bytes of the node you change — comments, key order, blank lines, and quoting
@@ -11,8 +12,9 @@ import { Editable, type EditFns } from "./edit-ops.ts";
 
 const encoder = new TextEncoder();
 
-// Editor edits are rendered as YAML before splicing, matching the Rust binding;
-// the Zig editor re-frames the text into the document's actual context.
+// Editor edits are rendered in the document's own format before splicing (a
+// `Value` string becomes `"x"` for TOML/JSON but a bare `x` for YAML); the Zig
+// editor then re-frames that text into the document's actual context.
 const EDITOR_FNS: EditFns = {
   replaceVal: fig.fig_editor_replace_val,
   replaceKey: fig.fig_editor_replace_key,
@@ -32,12 +34,12 @@ const EDITOR_FNS: EditFns = {
 };
 
 export class Editor extends Editable {
-  private constructor(handle: number) {
-    super(handle, EDITOR_FNS, Format.Yaml);
+  private constructor(handle: number, format: Format) {
+    super(handle, EDITOR_FNS, format);
   }
 
-  /** Open an editor over a copy of `input` in `format` (Json/Jsonc/Json5/Yaml).
-   *  Empty input is a valid empty document. */
+  /** Open an editor over a copy of `input` in `format`
+   *  (Json/Jsonc/Json5/Yaml/Toml). Empty input is a valid empty document. */
   static open(input: string | Uint8Array, format: Format): Editor {
     const bytes = typeof input === "string" ? encoder.encode(input) : input;
     const frame = new Frame();
@@ -47,7 +49,7 @@ export class Editor extends Editable {
       check(fig.fig_editor_create(ptr, bytes.length, format, out), "fig_editor_create");
       const handle = new DataView(fig.memory.buffer).getUint32(out, true);
       if (handle === 0) throw new FigError(Status.InternalError, "fig_editor_create");
-      return new Editor(handle);
+      return new Editor(handle, format);
     } finally {
       frame.dispose();
     }

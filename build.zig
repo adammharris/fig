@@ -214,6 +214,50 @@ pub fn build(b: *std.Build) void {
     const gen_json5_step = b.step("gen-json5-conformance", "Vendor the json5-tests corpus");
     gen_json5_step.dependOn(&gen_json5_run.step);
 
+    // ABI surface check: keep the C ABI implementation (src/c_api.zig), the
+    // public header (include/fig.h), and the built library in agreement.
+    //   * tools/abi-check.zig diffs the exported `fig_*` symbols against the
+    //     header prototypes (both directions), failing on any mismatch — this is
+    //     what catches a symbol exported without a header declaration.
+    //   * abi_probe.{c,cpp} are compiled against fig.h, as C and as C++, and
+    //     linked against the C ABI static library, proving the header parses and
+    //     links in both languages.
+    // Signatures are not compared (C has no name mangling). Run: zig build abi-check.
+    // The pre-commit hook in .githooks/ runs this when an ABI file is staged.
+    const abi_check = b.addExecutable(.{
+        .name = "abi_check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/abi-check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const abi_check_run = b.addRunArtifact(abi_check);
+    // Passed as file args so the run is cache-keyed on the files it inspects.
+    abi_check_run.addFileArg(b.path("include/fig.h"));
+    abi_check_run.addFileArg(b.path("src/c_api.zig"));
+
+    const abi_probe_c = b.addExecutable(.{
+        .name = "abi_probe_c",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
+    });
+    abi_probe_c.root_module.addCSourceFile(.{ .file = b.path("tools/abi_probe.c") });
+    abi_probe_c.root_module.addIncludePath(b.path("include"));
+    abi_probe_c.root_module.linkLibrary(c_lib);
+
+    const abi_probe_cpp = b.addExecutable(.{
+        .name = "abi_probe_cpp",
+        .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true }),
+    });
+    abi_probe_cpp.root_module.addCSourceFile(.{ .file = b.path("tools/abi_probe.cpp") });
+    abi_probe_cpp.root_module.addIncludePath(b.path("include"));
+    abi_probe_cpp.root_module.linkLibrary(c_lib);
+
+    const abi_check_step = b.step("abi-check", "Check the C ABI surface: symbol diff + C/C++ header probe");
+    abi_check_step.dependOn(&abi_check_run.step);
+    abi_check_step.dependOn(&abi_probe_c.step);
+    abi_check_step.dependOn(&abi_probe_cpp.step);
+
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
         orelse &.{};

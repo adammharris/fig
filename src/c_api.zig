@@ -20,6 +20,7 @@ const YamlType = if (build_options.lang_yaml) @import("yaml/yaml.zig").Type else
 const YamlLang = if (build_options.lang_yaml) @import("yaml/yaml.zig").Language else void;
 const TomlParser = if (build_options.lang_toml) @import("toml/parser.zig") else void;
 const TomlType = if (build_options.lang_toml) @import("toml/toml.zig").Type else void;
+const TomlLang = if (build_options.lang_toml) @import("toml/toml.zig").Language else void;
 const ZonParser = if (build_options.lang_zon) @import("zon/parser.zig") else void;
 const ZonType = if (build_options.lang_zon) @import("zon/zon.zig").Type else void;
 const XmlParser = if (build_options.lang_xml) @import("xml/parser.zig") else void;
@@ -62,7 +63,7 @@ pub const FigStatus = enum(c_int) {
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
 /// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
-/// `json`/`jsonc`/`json5`/`yaml` only (others return `unsupported_format`); the
+/// `json`/`jsonc`/`json5`/`yaml`/`toml` (others return `unsupported_format`); the
 /// serializer (`fig_value_serialize`) accepts `json`/`jsonc`/`json5`/`yaml`/
 /// `toml`/`zon` (JSONC = plain-JSON syntax with comments).
 pub const FigFormat = enum(c_int) {
@@ -121,7 +122,7 @@ pub const FigCapability = enum(u32) {
 
 /// Report what `fig` can do with `format` in THIS build as a bitmask of
 /// `FigCapability` (read | edit | serialize). Reflects both the format's inherent
-/// support (XML is reader-only; TOML/ZON parse and serialize but are not editable)
+/// support (XML is reader-only; ZON parses and serializes but is not editable)
 /// and build-time gating: a format compiled out reports 0, as does an unknown
 /// `format` value. JSON/JSONC/JSON5 are always fully supported. Lets a host pick a
 /// working format up front instead of probing via `unsupported_format` returns.
@@ -135,7 +136,7 @@ pub export fn fig_format_capabilities(format: c_int) u32 {
         @intFromEnum(FigFormat.json5),
         => read | edit | serialize,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) read | edit | serialize else 0,
-        @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | serialize else 0,
+        @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | edit | serialize else 0,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | serialize else 0,
         @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read else 0,
         else => 0,
@@ -692,6 +693,11 @@ fn editStatus(err: anyerror) FigStatus {
         error.OutOfMemory => .out_of_memory,
         error.NotFound => .not_found,
         error.NotAMapping, error.NotASequence, error.NotAContainer, error.InvalidDocument => .invalid_argument,
+        // TOML structural edits reject a request that doesn't match the document
+        // shape (e.g. appending to a non-array-of-tables, deleting a table by the
+        // scalar ops, inserting a key/table that already exists). These are caller
+        // errors, not malformed-source reparse failures.
+        error.NotATable, error.NotAnInlineArray, error.NotAnArrayOfTables, error.TableExists, error.DuplicateKey, error.CannotDeleteTable, error.MergeOnlyKey => .invalid_argument,
         // The target dialect has no comment syntax (strict JSON).
         error.CommentsUnsupported => .unsupported_format,
         // A trailing comment was given multi-line text.
@@ -705,11 +711,24 @@ fn editStatus(err: anyerror) FigStatus {
 pub const FigEditor = opaque {};
 
 // The editor backends, shared by the document editor and the embed editor. The
-// `yaml` variant only exists when YAML is compiled in — gating it out (rather
-// than leaving a `void` field) keeps the `inline else` switches below valid.
-const EditorUnion = if (build_options.lang_yaml)
+// `yaml`/`toml` variants only exist when that format is compiled in — gating a
+// variant out (rather than leaving a `void` field) keeps the `inline else`
+// switches below valid, which is why the type is selected per build-flag combo
+// instead of carrying void members. JSON is always present.
+const EditorUnion = if (build_options.lang_yaml and build_options.lang_toml)
     union(enum) {
         yaml: Editor(YamlLang),
+        toml: Editor(TomlLang),
+        json: Editor(JsonLang),
+    }
+else if (build_options.lang_yaml)
+    union(enum) {
+        yaml: Editor(YamlLang),
+        json: Editor(JsonLang),
+    }
+else if (build_options.lang_toml)
+    union(enum) {
+        toml: Editor(TomlLang),
         json: Editor(JsonLang),
     }
 else
@@ -751,6 +770,7 @@ pub export fn fig_editor_create(
         @intFromEnum(FigFormat.jsonc) => .jsonc,
         @intFromEnum(FigFormat.json5) => .json5,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
+        @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else return .unsupported_format,
         else => return .unsupported_format,
     };
 
@@ -766,8 +786,9 @@ pub export fn fig_editor_create(
         // editor splices source in place, so all of that survives untouched
         // outside the edited span.
         .json5 => .{ .json = .{ .allocator = allocator, .format = .JSON5 } },
+        .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         // Filtered out by the format switch above; editing these is not yet wired.
-        .toml, .zon, .xml => unreachable,
+        .zon, .xml => unreachable,
     };
 
     switch (handle.inner) {
@@ -2425,6 +2446,70 @@ test "editor c abi accepts empty input as an empty document" {
     try std.testing.expectEqualStrings("k: v\n", ptr[0..len]);
 }
 
+test "toml editor c abi insert + replace + delete round-trip" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    const src = "[server]\nhost = \"a\"\nport = 1\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.toml), &ed));
+    defer fig_editor_destroy(ed);
+
+    // Insert a key into the [server] table (lands at the end of the table region).
+    const server = [_]FigPathSegment{keySeg("server")};
+    const tls = "tls";
+    const tval = "true";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_insert_key(ed, &server, 1, tls.ptr, tls.len, tval.ptr, tval.len));
+
+    // Replace a nested value through a multi-segment C path.
+    const port = [_]FigPathSegment{ keySeg("server"), keySeg("port") };
+    const nine = "9090";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_replace_val(ed, &port, 2, nine.ptr, nine.len));
+
+    // Delete a key.
+    const host = [_]FigPathSegment{ keySeg("server"), keySeg("host") };
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_delete_key(ed, &host, 2));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("[server]\nport = 9090\ntls = true\n", ptr[0..len]);
+}
+
+test "toml editor c abi add leading comment uses the # marker" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    const src = "a = 1\nb = 2\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.toml), &ed));
+    defer fig_editor_destroy(ed);
+
+    const b = [_]FigPathSegment{keySeg("b")};
+    const note = "note";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_add_leading_comment(ed, &b, 1, note.ptr, note.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("a = 1\n# note\nb = 2\n", ptr[0..len]);
+}
+
+test "toml editor c abi maps a shape-mismatch edit to invalid_argument" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    const src = "a = 1\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.toml), &ed));
+    defer fig_editor_destroy(ed);
+
+    // Inserting a key that already exists rolls back with error.DuplicateKey,
+    // which must surface as invalid_argument (a caller error), NOT parse_error.
+    const a = "a";
+    const two = "2";
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_editor_insert_key(ed, null, 0, a.ptr, a.len, two.ptr, two.len));
+    // The editor is still usable after the rolled-back edit.
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("a = 1\n", ptr[0..len]);
+}
+
 test "frontmatter c abi preserves fences and body" {
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n";
@@ -2786,7 +2871,7 @@ test "fig_format_capabilities reports the per-format matrix" {
         fig_format_capabilities(@intFromEnum(FigFormat.yaml)),
     );
     try std.testing.expectEqual(
-        if (build_options.lang_toml) read | serialize else 0, // no edit
+        if (build_options.lang_toml) read | edit | serialize else 0,
         fig_format_capabilities(@intFromEnum(FigFormat.toml)),
     );
     try std.testing.expectEqual(
@@ -2802,6 +2887,72 @@ test "fig_format_capabilities reports the per-format matrix" {
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(0));
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(9999));
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(-1));
+}
+
+test "fig_format_capabilities agrees with actual READ/EDIT/SERIALIZE behavior" {
+    // The capability matrix is only useful if it matches reality. Rather than
+    // re-encode the matrix as a hand-maintained constant (which drifts silently
+    // when core gains a capability the ABI hasn't surfaced — exactly how TOML
+    // editing stayed hidden), assert each advertised bit against what the
+    // corresponding entry point actually does on a valid input. This fails the
+    // build the moment a format's real capability and its bit diverge — in either
+    // direction, and under any build-flag combination.
+    const read = @intFromEnum(FigCapability.read);
+    const edit = @intFromEnum(FigCapability.edit);
+    const serialize = @intFromEnum(FigCapability.serialize);
+
+    const Case = struct { fmt: FigFormat, sample: []const u8 };
+    const cases = [_]Case{
+        .{ .fmt = .json, .sample = "{\"a\":1}" },
+        .{ .fmt = .jsonc, .sample = "{\"a\":1}" },
+        .{ .fmt = .json5, .sample = "{a:1}" },
+        .{ .fmt = .yaml, .sample = "a: 1\n" },
+        .{ .fmt = .toml, .sample = "a = 1\n" },
+        .{ .fmt = .zon, .sample = ".{ .a = 1 }" },
+        .{ .fmt = .xml, .sample = "<r>x</r>" },
+    };
+
+    // A value every writable format can represent ({"a": 1}); used for the
+    // SERIALIZE probe so a failure can only mean "format not writable", never
+    // "value unrepresentable in this format".
+    var value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&value));
+    defer fig_value_destroy(value);
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(value, 1, &id));
+    const v_one = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(value, "a", 1, &id));
+    const k_a = id;
+    const entries = [_]FigKeyValue{.{ .key = k_a, .value = v_one }};
+    try std.testing.expectEqual(FigStatus.ok, fig_value_map(value, &entries, entries.len, &id));
+    const root = id;
+
+    for (cases) |c| {
+        const fmt = @intFromEnum(c.fmt);
+        const caps = fig_format_capabilities(fmt);
+
+        // READ: a valid sample parses iff the format is compiled in (which is
+        // exactly when the read bit is set).
+        var doc: ?*FigDocument = null;
+        const parse_status = fig_parse(c.sample.ptr, c.sample.len, fmt, &doc);
+        defer if (doc != null) fig_document_destroy(doc);
+        try std.testing.expectEqual((caps & read) != 0, parse_status == .ok);
+
+        // EDIT: create rejects a non-editable or gated format with
+        // unsupported_format before it ever parses, so a valid sample never
+        // yields parse_error here — the only non-ok outcome is unsupported_format.
+        var ed: ?*FigEditor = null;
+        const edit_status = fig_editor_create(c.sample.ptr, c.sample.len, fmt, &ed);
+        defer if (ed != null) fig_editor_destroy(ed);
+        try std.testing.expectEqual((caps & edit) != 0, edit_status != .unsupported_format);
+
+        // SERIALIZE: rendering a representable value succeeds iff the format is
+        // writable in this build.
+        var ptr: [*c]const u8 = undefined;
+        var len: usize = undefined;
+        const ser_status = fig_value_serialize(value, root, fmt, &ptr, &len);
+        try std.testing.expectEqual((caps & serialize) != 0, ser_status != .unsupported_format);
+    }
 }
 
 test "fig_editor comment ops add, set, and delete through the C ABI" {

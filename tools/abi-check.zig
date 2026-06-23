@@ -1,0 +1,125 @@
+//! Dev tool: C ABI symbol diff. Cross-checks that every `export fn fig_*` in
+//! src/c_api.zig has a matching prototype in include/fig.h, and vice versa —
+//! catching a symbol that is exported but undocumented (a caller cannot find it)
+//! or declared but unimplemented (a dangling prototype). This is the check that
+//! catches drift like `fig_alloc`/`fig_free` being exported without a header
+//! declaration.
+//!
+//! Run via `zig build abi-check`, which also compiles the abi_probe.{c,cpp} TUs
+//! against fig.h as C and C++ to prove the header parses and links in both. What
+//! is NOT checked here: signatures (C has no name mangling, so a param-type or
+//! arity change links fine) — that drift would need parsing and comparing both
+//! sides' parameter lists.
+//!
+//! Usage (driven by build.zig): abi-check <header.h> <impl.zig>
+
+const std = @import("std");
+
+const max_file = 4 * 1024 * 1024;
+
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    var arena_state = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var args = try init.minimal.args.iterateAllocator(init.gpa);
+    defer args.deinit();
+    _ = args.next(); // argv0
+    const header_path = args.next() orelse return error.MissingArgument;
+    const impl_path = args.next() orelse return error.MissingArgument;
+
+    const cwd = std.Io.Dir.cwd();
+    const header = try cwd.readFileAlloc(io, header_path, arena, .limited(max_file));
+    const impl = try cwd.readFileAlloc(io, impl_path, arena, .limited(max_file));
+
+    // Declared: `fig_x(` tokens on non-comment header lines (so prose mentions
+    // like "release with fig_free" don't count as declarations).
+    const declared = try collectDeclared(arena, header);
+    // Exported: every `pub export fn fig_*` in the implementation.
+    const exported = try collectExported(arena, impl);
+
+    var fail = false;
+    for (exported) |name| {
+        if (!contains(declared, name)) {
+            if (!fail) std.debug.print("abi-check: FAIL\n", .{});
+            std.debug.print("  exported by c_api.zig but NOT declared in fig.h: {s}\n", .{name});
+            fail = true;
+        }
+    }
+    for (declared) |name| {
+        if (!contains(exported, name)) {
+            if (!fail) std.debug.print("abi-check: FAIL\n", .{});
+            std.debug.print("  declared in fig.h but NOT exported by c_api.zig: {s}\n", .{name});
+            fail = true;
+        }
+    }
+    if (fail) std.process.exit(1);
+    std.debug.print("abi-check: symbol diff OK ({d} symbols)\n", .{exported.len});
+}
+
+fn isNameChar(c: u8) bool {
+    return (c >= 'a' and c <= 'z') or (c >= '0' and c <= '9') or c == '_';
+}
+
+/// Header prototypes: a `fig_<name>(` token (the `(` distinguishes a declaration
+/// or call from a bare prose mention) on a line that is not a `//` comment.
+fn collectDeclared(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "//")) continue;
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, line, i, "fig_")) |pos| {
+            // Skip a `fig_` that is the tail of a longer identifier.
+            if (pos > 0 and isNameChar(line[pos - 1])) {
+                i = pos + 4;
+                continue;
+            }
+            var end = pos + 4;
+            while (end < line.len and isNameChar(line[end])) end += 1;
+            if (end < line.len and line[end] == '(') {
+                try list.append(arena, line[pos..end]);
+            }
+            i = end;
+        }
+    }
+    return sortDedup(arena, &list);
+}
+
+/// Implementation exports: the name following each `export fn ` marker, kept when
+/// it starts with `fig_`.
+fn collectExported(arena: std.mem.Allocator, text: []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    const marker = "export fn ";
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, marker)) |pos| {
+        const start = pos + marker.len;
+        var end = start;
+        while (end < text.len and isNameChar(text[end])) end += 1;
+        const name = text[start..end];
+        if (std.mem.startsWith(u8, name, "fig_")) try list.append(arena, name);
+        i = end;
+    }
+    return sortDedup(arena, &list);
+}
+
+fn lessThanStr(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+fn sortDedup(arena: std.mem.Allocator, list: *std.ArrayList([]const u8)) ![]const []const u8 {
+    std.mem.sort([]const u8, list.items, {}, lessThanStr);
+    var out: std.ArrayList([]const u8) = .empty;
+    for (list.items, 0..) |name, idx| {
+        if (idx > 0 and std.mem.eql(u8, name, list.items[idx - 1])) continue;
+        try out.append(arena, name);
+    }
+    return out.items;
+}
+
+fn contains(haystack: []const []const u8, needle: []const u8) bool {
+    for (haystack) |s| if (std.mem.eql(u8, s, needle)) return true;
+    return false;
+}

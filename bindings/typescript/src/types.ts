@@ -3,8 +3,8 @@ import { Status } from "./ffi.ts";
 
 export { Status };
 
-/** A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`;
- *  serialization additionally supports `Toml`/`Zon`. Values match the C ABI
+/** A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`/
+ *  `Toml`; serialization additionally supports `Zon`. Values match the C ABI
  *  (`Json5 = 7` is appended, leaving a gap at the reader-only `Xml = 6`). */
 export enum Format {
   Json = 1,

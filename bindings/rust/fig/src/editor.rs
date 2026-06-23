@@ -77,6 +77,11 @@ pub(crate) fn to_ffi_keys<S: AsRef<str>>(keys: &[S]) -> Vec<ffi::FigStr> {
 #[derive(Debug)]
 pub struct Editor {
     raw: NonNull<ffi::FigEditor>,
+    /// The document's format, used to render replacement/insertion splice text in
+    /// the same dialect (e.g. a `Value::Str` becomes `"x"` for TOML/JSON but a
+    /// bare `x` for YAML). Hardcoding one format would splice syntactically wrong
+    /// text for the others and fail the editor's reparse.
+    format: Format,
 }
 
 impl Editor {
@@ -89,7 +94,7 @@ impl Editor {
         };
         Error::from_status(status)?;
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
-        Ok(Self { raw })
+        Ok(Self { raw, format })
     }
 
     fn ptr(&self) -> *mut ffi::FigEditor {
@@ -100,7 +105,7 @@ impl Editor {
 
     /// Replace the value at `path` with `value`.
     pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let repl = value_text(value, Format::Yaml)?;
+        let repl = value_text(value, self.format)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -110,7 +115,7 @@ impl Editor {
 
     /// Replace the key at `path` with `key`.
     pub fn replace_key(&mut self, path: &[Segment], key: &str) -> Result<(), Error> {
-        let repl = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
+        let repl = value_text(&Value::Str(key.to_string()), self.format)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_replace_key(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -125,8 +130,8 @@ impl Editor {
         key: &str,
         value: &Value,
     ) -> Result<(), Error> {
-        let key_text = value_text(&Value::Str(key.to_string()), Format::Yaml)?;
-        let val = value_text(value, Format::Yaml)?;
+        let key_text = value_text(&Value::Str(key.to_string()), self.format)?;
+        let val = value_text(value, self.format)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_insert_key(
@@ -144,7 +149,7 @@ impl Editor {
 
     /// Append `value` to the sequence at `path`.
     pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, Format::Yaml)?;
+        let val = value_text(value, self.format)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
@@ -154,7 +159,7 @@ impl Editor {
 
     /// Prepend `value` to the sequence at `path`.
     pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, Format::Yaml)?;
+        let val = value_text(value, self.format)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_editor_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
