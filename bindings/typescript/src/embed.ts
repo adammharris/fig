@@ -24,6 +24,10 @@ const EMBED_FNS: EditFns = {
   reorderKeys: fig.fig_embed_reorder_keys,
   moveItem: fig.fig_embed_move_item,
   reorderItems: fig.fig_embed_reorder_items,
+  addLeadingComment: fig.fig_embed_add_leading_comment,
+  setTrailingComment: fig.fig_embed_set_trailing_comment,
+  deleteLeadingComments: fig.fig_embed_delete_leading_comments,
+  deleteTrailingComment: fig.fig_embed_delete_trailing_comment,
 };
 
 /** A half-open `[start, end)` byte span within the host file. */

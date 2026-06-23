@@ -692,6 +692,10 @@ fn editStatus(err: anyerror) FigStatus {
         error.OutOfMemory => .out_of_memory,
         error.NotFound => .not_found,
         error.NotAMapping, error.NotASequence, error.NotAContainer, error.InvalidDocument => .invalid_argument,
+        // The target dialect has no comment syntax (strict JSON).
+        error.CommentsUnsupported => .unsupported_format,
+        // A trailing comment was given multi-line text.
+        error.MultilineComment => .invalid_argument,
         error.NotInitialized, error.MultipleInit, error.InvalidSpan => .internal_error,
         // A reparse after a malformed edit lands here.
         else => .parse_error,
@@ -814,6 +818,77 @@ pub export fn fig_editor_replace_key(
     const repl = sliceOf(repl_ptr, repl_len) orelse return .invalid_argument;
     return switch (handle.inner) {
         inline else => |*e| if (e.replaceKeyAtPath(path, repl)) .ok else |err| editStatus(err),
+    };
+}
+
+// ── Comment editing ─────────────────────────────────────────────────────────
+// Splice comment trivia around the node at `path`, preserving the rest of the
+// document byte-for-byte. The marker (`#`, `//`) is added by the editor; a
+// dialect without comment syntax (strict JSON) returns `unsupported_format`.
+
+/// Add an own-line comment ABOVE the node at `path`. `text` may be multi-line
+/// (one comment line per row), at the node's indentation, nearest the node.
+pub export fn fig_editor_add_leading_comment(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const text = sliceOf(text_ptr, text_len) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.addLeadingComment(path, text)) .ok else |err| editStatus(err),
+    };
+}
+
+/// Set the same-line trailing comment on the value at `path` (replace existing
+/// or append). `text` must be single-line (else `invalid_argument`).
+pub export fn fig_editor_set_trailing_comment(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const text = sliceOf(text_ptr, text_len) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.setTrailingComment(path, text)) .ok else |err| editStatus(err),
+    };
+}
+
+/// Remove the own-line comment block immediately above the node at `path` (no-op
+/// when there is none).
+pub export fn fig_editor_delete_leading_comments(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.deleteLeadingComments(path)) .ok else |err| editStatus(err),
+    };
+}
+
+/// Remove the same-line trailing comment on the value at `path` (no-op when
+/// there is none).
+pub export fn fig_editor_delete_trailing_comment(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.deleteTrailingComment(path)) .ok else |err| editStatus(err),
     };
 }
 
@@ -1167,6 +1242,66 @@ pub export fn fig_embed_replace_key(
     const repl = sliceOf(repl_ptr, repl_len) orelse return .invalid_argument;
     return switch (handle.editor) {
         inline else => |*e| if (e.replaceKeyAtPath(path, repl)) .ok else |err| editStatus(err),
+    };
+}
+
+// ── Comment editing (embed mirror of fig_editor_*) ──────────────────────────
+
+pub export fn fig_embed_add_leading_comment(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const text = sliceOf(text_ptr, text_len) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.addLeadingComment(path, text)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_embed_set_trailing_comment(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    text_ptr: ?[*]const u8,
+    text_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const text = sliceOf(text_ptr, text_len) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.setTrailingComment(path, text)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_embed_delete_leading_comments(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.deleteLeadingComments(path)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_embed_delete_trailing_comment(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.deleteTrailingComment(path)) .ok else |err| editStatus(err),
     };
 }
 
@@ -2667,4 +2802,44 @@ test "fig_format_capabilities reports the per-format matrix" {
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(0));
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(9999));
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(-1));
+}
+
+test "fig_editor comment ops add, set, and delete through the C ABI" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const src = "a: 1\nb: 2\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &ed));
+    defer fig_editor_destroy(ed);
+
+    // path = ["b"]
+    var key = [_]u8{'b'};
+    const path = [_]FigPathSegment{.{ .kind = 0, .key_ptr = &key, .key_len = 1, .index = 0 }};
+
+    const leading = "why";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_add_leading_comment(ed, &path, 1, leading.ptr, leading.len));
+    const trailing = "two";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_set_trailing_comment(ed, &path, 1, trailing.ptr, trailing.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("a: 1\n# why\nb: 2 # two\n", ptr[0..len]);
+
+    // Delete both back out.
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_delete_trailing_comment(ed, &path, 1));
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_delete_leading_comments(ed, &path, 1));
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("a: 1\nb: 2\n", ptr[0..len]);
+}
+
+test "fig_editor comment ops reject strict JSON with unsupported_format" {
+    const src = "{\"a\":1}";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.json), &ed));
+    defer fig_editor_destroy(ed);
+    var key = [_]u8{'a'};
+    const path = [_]FigPathSegment{.{ .kind = 0, .key_ptr = &key, .key_len = 1, .index = 0 }};
+    const text = "x";
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_add_leading_comment(ed, &path, 1, text.ptr, text.len));
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_delete_trailing_comment(ed, &path, 1));
 }

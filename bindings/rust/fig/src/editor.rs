@@ -205,6 +205,49 @@ impl Editor {
         self.prepend_value(path, &crate::ser::to_value(value)?)
     }
 
+    // ── comment editing ─────────────────────────────────────────────────────
+
+    /// Add an own-line comment ABOVE the node at `path` (the key's line for a
+    /// mapping entry), at its indentation, nearest the node. `text` may be
+    /// multi-line (one comment line per row). The marker (`#` for YAML, `//` for
+    /// JSONC/JSON5) is added for you; strict JSON returns
+    /// [`Error::UnsupportedFormat`].
+    pub fn add_leading_comment(&mut self, path: &[Segment], text: &str) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_editor_add_leading_comment(self.ptr(), p.as_ptr(), p.len(), text.as_ptr(), text.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Set the same-line trailing comment on the value at `path`, replacing an
+    /// existing one or appending if absent. `text` must be a single line
+    /// ([`Error::InvalidArgument`] otherwise); strict JSON returns
+    /// [`Error::UnsupportedFormat`].
+    pub fn set_trailing_comment(&mut self, path: &[Segment], text: &str) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_editor_set_trailing_comment(self.ptr(), p.as_ptr(), p.len(), text.as_ptr(), text.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Remove the own-line comment block immediately above the node at `path`.
+    /// A no-op (still `Ok`) when there is none.
+    pub fn delete_leading_comments(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_editor_delete_leading_comments(self.ptr(), p.as_ptr(), p.len()) };
+        Error::from_status(status)
+    }
+
+    /// Remove the same-line trailing comment on the value at `path`. A no-op
+    /// (still `Ok`) when there is none.
+    pub fn delete_trailing_comment(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_editor_delete_trailing_comment(self.ptr(), p.as_ptr(), p.len()) };
+        Error::from_status(status)
+    }
+
     // ── structural edits (no value) ─────────────────────────────────────────
 
     /// Delete the mapping entry named by `path`.

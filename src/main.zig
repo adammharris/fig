@@ -8,7 +8,13 @@ const build_options = @import("build_options");
 const Io = std.Io;
 
 const title_string = "\n=========\n   FIG\n=========\n\n";
-const version = "0.0.0-alpha";
+// The version of the linked fig core, so the CLI never drifts from the library
+// it ships. Sourced from `build.zig` (the same numbers `fig_version` exposes).
+const version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
+    build_options.version_major,
+    build_options.version_minor,
+    build_options.version_patch,
+});
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
@@ -19,6 +25,7 @@ const CliAction = enum {
     version,
     edit,
     get,
+    comment,
 };
 
 const CliActionOptions = union(CliAction) {
@@ -64,6 +71,33 @@ const CliActionOptions = union(CliAction) {
         /// non-zero without writing output.
         strict: bool = false,
     },
+    comment: struct {
+        file: []const u8,
+        path: []fig.AST.PathSegment,
+        text: []const u8,
+        /// When set, target the same-line trailing comment on the value at
+        /// `path`; otherwise the own-line comment block above the node.
+        inline_comment: bool = false,
+        /// When set, delete the targeted comment instead of adding/setting it
+        /// (then `text` is unused).
+        delete: bool = false,
+        requested_help: bool = false,
+        format: Format,
+        /// As in `edit`: when set, `file` is a host document and the comment is
+        /// applied to the embedded config of this archetype, spliced back.
+        embed: ?fig.Embed.Type = null,
+    },
+};
+
+/// The in-place editing operation `applyEdit` performs. Generalizes the editor's
+/// span-splice surface so `edit` and `comment` share one code path.
+const EditOp = union(enum) {
+    replace_value,
+    replace_key,
+    add_leading_comment,
+    set_trailing_comment,
+    delete_leading_comments,
+    delete_trailing_comment,
 };
 
 const CliConfig = struct {
@@ -83,6 +117,7 @@ const Help = struct {
             \\  version: prints version number
             \\  edit: edits part of file
             \\  get: print a file or a specific part of a file to stdout
+            \\  comment: add or edit a comment on part of a file
             \\
             \\For information on action options, pass --help or -h
             \\to the action you would like to learn about.
@@ -98,6 +133,25 @@ const Help = struct {
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: edits the YAML frontmatter in place
+            \\
+        , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn comment(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} comment [--inline] [--delete] <file> <path> [<text>]
+            \\  default: add an own-line comment ABOVE the node at <path>
+            \\  --inline: target the same-line trailing comment on the value at
+            \\    <path> instead (set replaces any existing one on that line)
+            \\  --delete: remove the targeted comment instead of adding it; <text>
+            \\    is then omitted (a no-op when there is no such comment)
+            \\  the comment marker is added for you: # for YAML/TOML, // for
+            \\    JSONC/JSON5/ZON. Strict JSON has no comments (rejected).
+            \\  <text> may span multiple lines (leading only): one comment line each.
+            \\  path format: dot syntax for keys, bracket syntax for indices
+            \\    example: school.class[0].student[3]
+            \\  .md/.markdown files: comments the YAML frontmatter in place
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -167,6 +221,10 @@ pub fn main(init: std.process.Init) !void {
             try Help.get(&stderr_terminal, "fig");
             std.process.exit(2);
         },
+        ArgError.MissingCommentArgument => {
+            try Help.comment(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
         else => return err,
     };
 
@@ -189,15 +247,16 @@ pub fn main(init: std.process.Init) !void {
             const input = try getInput(io, opts.file, .read_write);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
 
+            const op: EditOp = if (opts.key) .replace_key else .replace_value;
             if (opts.embed) |embed_type| {
-                try editEmbedded(init.arena.allocator(), io, input, embed_type, opts.path, opts.replacement, opts.key);
+                try applyToEmbed(init.arena.allocator(), io, input, embed_type, opts.path, opts.replacement, op);
             } else switch (opts.format) {
                 .json, .jsonc => {
                     const replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{opts.replacement});
-                    try editDocument(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, opts.key);
+                    try applyToFile(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, op, jsonDialect(opts.format));
                 },
                 .yaml, .yml => if (comptime build_options.lang_yaml) {
-                    try editDocument(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key);
+                    try applyToFile(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, op, fig.Language.YAML.default_type);
                 } else return error.FormatDisabled,
                 // TOML value/key replacement: a value or key node has a tight,
                 // contiguous span (the parser's node_spans point at the original
@@ -207,13 +266,13 @@ pub fn main(init: std.process.Init) !void {
                 // and ZON. (Structural inserts/deletes that must place text
                 // relative to a scattered table are still unsupported.)
                 .toml => if (comptime build_options.lang_toml)
-                    try editDocument(fig.Language.TOML, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key)
+                    try applyToFile(fig.Language.TOML, init.arena.allocator(), io, input, opts.path, opts.replacement, op, fig.Language.TOML.default_type)
                 else
                     return error.FormatDisabled,
                 // ZON edits take the replacement verbatim (a literal ZON value),
                 // like YAML — the editor splices and reparses it.
                 .zon => if (comptime build_options.lang_zon)
-                    try editDocument(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, opts.key)
+                    try applyToFile(fig.Language.ZON, init.arena.allocator(), io, input, opts.path, opts.replacement, op, fig.Language.ZON.default_type)
                 else
                     return error.FormatDisabled,
                 // XML is reader-only: no in-place editor yet.
@@ -367,6 +426,53 @@ pub fn main(init: std.process.Init) !void {
             }
             try stdout_terminal.writer.flush();
         },
+        .comment => {
+            const opts = config.options.comment;
+            if (opts.requested_help) {
+                try Help.comment(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const a = init.arena.allocator();
+            const input = try getInput(io, opts.file, .read_write);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            // Pick the op from the two flags: `--inline` selects the trailing
+            // (same-line) comment vs the leading block; `--delete` removes it
+            // rather than adding/setting. The marker (`#`, `//`) is the editor's
+            // job.
+            const op: EditOp = if (opts.delete)
+                (if (opts.inline_comment) .delete_trailing_comment else .delete_leading_comments)
+            else
+                (if (opts.inline_comment) .set_trailing_comment else .add_leading_comment);
+
+            if (opts.embed) |embed_type| {
+                try applyToEmbed(a, io, input, embed_type, opts.path, opts.text, op);
+            } else switch (opts.format) {
+                // Strict JSON has no comment syntax: fail with a clear message
+                // rather than letting the editor surface a bare error.
+                .json => {
+                    try stderr_terminal.writer.print("error: strict JSON has no comments; use a .jsonc or .json5 file instead.\n", .{});
+                    try stderr_terminal.writer.flush();
+                    std.process.exit(2);
+                },
+                // JSONC/JSON5 accept `//` comments (reparsed under the dialect).
+                .jsonc, .json5 => try applyToFile(fig.Language.JSON, a, io, input, opts.path, opts.text, op, jsonDialect(opts.format)),
+                .yaml, .yml => if (comptime build_options.lang_yaml)
+                    try applyToFile(fig.Language.YAML, a, io, input, opts.path, opts.text, op, fig.Language.YAML.default_type)
+                else
+                    return error.FormatDisabled,
+                .toml => if (comptime build_options.lang_toml)
+                    try applyToFile(fig.Language.TOML, a, io, input, opts.path, opts.text, op, fig.Language.TOML.default_type)
+                else
+                    return error.FormatDisabled,
+                .zon => if (comptime build_options.lang_zon)
+                    try applyToFile(fig.Language.ZON, a, io, input, opts.path, opts.text, op, fig.Language.ZON.default_type)
+                else
+                    return error.FormatDisabled,
+                .xml => return error.UnsupportedXmlEdit,
+                .native => return error.UnsupportedNativeEdit,
+            }
+        },
     };
 }
 
@@ -403,54 +509,61 @@ fn parseEmbeddedFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File, em
     return embedded.document;
 }
 
-/// Edit `content` (a complete document) and return the new bytes.
-fn editSlice(
+/// Apply one in-place edit to `content` (a complete document parsed under
+/// `dialect`) and return the new bytes. The single span-splice path behind both
+/// the `edit` and `comment` actions.
+fn applyEdit(
     comptime Lang: type,
     allocator: std.mem.Allocator,
     content: []const u8,
     path: []fig.AST.PathSegment,
-    replacement: []const u8,
-    edit_key: bool,
+    text: []const u8,
+    op: EditOp,
+    dialect: Lang.Type,
 ) ![]u8 {
-    var editor: fig.Editor(Lang) = .{ .allocator = allocator };
+    var editor: fig.Editor(Lang) = .{ .allocator = allocator, .format = dialect };
     try editor.init(content);
     defer editor.deinit();
-    if (edit_key) {
-        try editor.replaceKeyAtPath(path, replacement);
-    } else {
-        try editor.replaceValAtPath(path, replacement);
+    switch (op) {
+        .replace_value => try editor.replaceValAtPath(path, text),
+        .replace_key => try editor.replaceKeyAtPath(path, text),
+        .add_leading_comment => try editor.addLeadingComment(path, text),
+        .set_trailing_comment => try editor.setTrailingComment(path, text),
+        .delete_leading_comments => try editor.deleteLeadingComments(path),
+        .delete_trailing_comment => try editor.deleteTrailingComment(path),
     }
     return allocator.dupe(u8, editor.source.items);
 }
 
-fn editDocument(
+fn applyToFile(
     comptime Lang: type,
     allocator: std.mem.Allocator,
     io: Io,
     file: Io.File,
     path: []fig.AST.PathSegment,
-    replacement: []const u8,
-    edit_key: bool,
+    text: []const u8,
+    op: EditOp,
+    dialect: Lang.Type,
 ) !void {
     const content = try readAll(allocator, io, file);
     defer allocator.free(content);
 
-    const edited = try editSlice(Lang, allocator, content, path, replacement, edit_key);
+    const edited = try applyEdit(Lang, allocator, content, path, text, op, dialect);
     try file.writePositionalAll(io, edited, 0);
     try file.setLength(io, edited.len);
 }
 
-/// Edit the embedded config of a host file in place: extract the region, edit
-/// only that slice as its inner format, then splice it back between the
-/// retained fences so the rest of the host file is byte-identical.
-fn editEmbedded(
+/// Apply an edit to the embedded config of a host file in place: extract the
+/// region, edit only that slice as its inner format, then splice it back between
+/// the retained fences so the rest of the host file is byte-identical.
+fn applyToEmbed(
     allocator: std.mem.Allocator,
     io: Io,
     file: Io.File,
     embed_type: fig.Embed.Type,
     path: []fig.AST.PathSegment,
-    replacement: []const u8,
-    edit_key: bool,
+    text: []const u8,
+    op: EditOp,
 ) !void {
     const content = try readAll(allocator, io, file);
     defer allocator.free(content);
@@ -462,12 +575,19 @@ fn editEmbedded(
 
     const edited_inner = switch (embed_type) {
         .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
-            try editSlice(fig.Language.YAML, allocator, inner, path, replacement, edit_key)
+            try applyEdit(fig.Language.YAML, allocator, inner, path, text, op, fig.Language.YAML.default_type)
         else
             return error.FormatDisabled,
+        // JSON frontmatter is plain (strict) JSON: a replacement value is quoted
+        // as a JSON string, while a comment op rides through unquoted and the
+        // editor rejects it (strict JSON has no comment syntax).
         .FrontmatterJson => blk: {
-            const quoted = try std.fmt.allocPrint(allocator, "\"{s}\"", .{replacement});
-            break :blk try editSlice(fig.Language.JSON, allocator, inner, path, quoted, edit_key);
+            const value_text = switch (op) {
+                .replace_value, .replace_key => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+                // Comment ops pass their text (or none, for deletes) through as-is.
+                .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment => text,
+            };
+            break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, value_text, op, .JSON);
         },
     };
 
@@ -479,6 +599,16 @@ fn editEmbedded(
 
     try file.writePositionalAll(io, out.items, 0);
     try file.setLength(io, out.items.len);
+}
+
+/// Map the CLI's JSON-family `Format` to the parser dialect the editor reparses
+/// under, so editing a JSONC/JSON5 file keeps its comments valid on reparse.
+fn jsonDialect(format: Format) fig.Language.JSON.Type {
+    return switch (format) {
+        .jsonc => .JSONC,
+        .json5 => .JSON5,
+        else => .JSON,
+    };
 }
 
 fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mode) !Io.File {
@@ -574,7 +704,7 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
     return .{ .format = format, .embed = null };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, MissingCommentArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     const log = std.log.scoped(.parseConfig);
@@ -626,12 +756,66 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             };
         }
 
-        const detected = try detectLanguageFromFileEnding(file_path);
+        // Skip extension detection when the user only asked for help (the
+        // "file" is then `--help`, which has no real format).
+        const detected: Detected = if (requested_help) .{ .format = .json } else try detectLanguageFromFileEnding(file_path);
         config.options = .{ .edit = .{
             .file = file_path,
             .path = path,
             .replacement = replacement,
             .key = edit_key,
+            .requested_help = requested_help,
+            .format = detected.format,
+            .embed = detected.embed,
+        } };
+    } else if (std.mem.eql(u8, action_str, "comment") or std.mem.eql(u8, action_str, "c")) {
+        config.action = .comment;
+
+        // Leading flags, in any order: `--inline` and `--delete`. Consume them
+        // until the first non-flag token (the file).
+        var inline_comment = false;
+        var delete = false;
+        var file_path_arg = args.next();
+        while (file_path_arg) |arg| {
+            if (std.mem.eql(u8, arg, "--inline")) {
+                inline_comment = true;
+            } else if (std.mem.eql(u8, arg, "--delete")) {
+                delete = true;
+            } else break;
+            file_path_arg = args.next();
+        }
+        const file_path = file_path_arg orelse {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingCommentArgument;
+        };
+
+        const requested_help = std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h");
+
+        var path: []fig.AST.PathSegment = &.{};
+        var text: []const u8 = "";
+        if (!requested_help) {
+            const path_str = args.next() orelse {
+                log.err("No path provided.\n", .{});
+                return ArgError.MissingCommentArgument;
+            };
+            path = try parsePath(allocator, path_str);
+
+            // Delete needs no text; add/set requires it.
+            if (!delete) {
+                text = args.next() orelse {
+                    log.err("No comment text provided.\n", .{});
+                    return ArgError.MissingCommentArgument;
+                };
+            }
+        }
+
+        const detected: Detected = if (requested_help) .{ .format = .json } else try detectLanguageFromFileEnding(file_path);
+        config.options = .{ .comment = .{
+            .file = file_path,
+            .path = path,
+            .text = text,
+            .inline_comment = inline_comment,
+            .delete = delete,
             .requested_help = requested_help,
             .format = detected.format,
             .embed = detected.embed,

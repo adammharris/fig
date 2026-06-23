@@ -533,6 +533,28 @@ mod tests {
     }
 
     #[test]
+    fn editor_comment_ops_add_set_and_delete() {
+        use super::{Editor, Segment};
+        let mut ed = Editor::open(b"a: 1\nb: 2\n", Format::Yaml).unwrap();
+        ed.add_leading_comment(&[Segment::Key("b")], "why").unwrap();
+        ed.set_trailing_comment(&[Segment::Key("b")], "two").unwrap();
+        assert_eq!(ed.source().unwrap(), "a: 1\n# why\nb: 2 # two\n");
+        ed.delete_trailing_comment(&[Segment::Key("b")]).unwrap();
+        ed.delete_leading_comments(&[Segment::Key("b")]).unwrap();
+        assert_eq!(ed.source().unwrap(), "a: 1\nb: 2\n");
+    }
+
+    #[test]
+    fn editor_comments_unsupported_in_strict_json() {
+        use super::{Editor, Error, Segment};
+        let mut ed = Editor::open(br#"{"a":1}"#, Format::Json).unwrap();
+        assert!(matches!(
+            ed.add_leading_comment(&[Segment::Key("a")], "x"),
+            Err(Error::UnsupportedFormat)
+        ));
+    }
+
+    #[test]
     fn frontmatter_reorder_keys_preserves_comments_and_body() {
         let md = "---\ntitle: Hi\n# a comment\ntags:\n- x\nauthor: me\n---\n# Body\n";
         let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();

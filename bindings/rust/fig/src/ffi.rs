@@ -412,6 +412,30 @@ unsafe extern "C" {
         repl: *const u8,
         repl_len: usize,
     ) -> FigStatus;
+    pub fn fig_editor_add_leading_comment(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        text: *const u8,
+        text_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_set_trailing_comment(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        text: *const u8,
+        text_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_delete_leading_comments(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_editor_delete_trailing_comment(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+    ) -> FigStatus;
     pub fn fig_editor_insert_key(
         editor: *mut FigEditor,
         path: *const FigPathSegment,
@@ -509,6 +533,30 @@ unsafe extern "C" {
         path_len: usize,
         repl: *const u8,
         repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_add_leading_comment(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        text: *const u8,
+        text_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_set_trailing_comment(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        text: *const u8,
+        text_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_delete_leading_comments(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_delete_trailing_comment(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
     ) -> FigStatus;
     pub fn fig_embed_insert_key(
         fm: *mut FigEmbed,

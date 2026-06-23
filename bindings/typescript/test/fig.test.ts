@@ -202,6 +202,30 @@ test("Embed.extract locates the region", () => {
   assert.equal(md.slice(region.content.start, region.content.end), "k: v\n");
 });
 
+test("editor comment ops add, set, and delete", () => {
+  using ed = Editor.open("a: 1\nb: 2\n", Format.Yaml);
+  ed.addLeadingComment(["b"], "why");
+  ed.setTrailingComment(["b"], "two");
+  assert.equal(ed.source(), "a: 1\n# why\nb: 2 # two\n");
+  ed.deleteTrailingComment(["b"]);
+  ed.deleteLeadingComments(["b"]);
+  assert.equal(ed.source(), "a: 1\nb: 2\n");
+});
+
+test("editor comments rejected for strict JSON", () => {
+  using ed = Editor.open('{"a":1}', Format.Json);
+  assert.throws(
+    () => ed.addLeadingComment(["a"], "x"),
+    (err: unknown) => err instanceof FigError && err.status === Status.UnsupportedFormat,
+  );
+});
+
+test("embed comments edit markdown frontmatter", () => {
+  using fm = Embed.open("---\ntitle: Hi\ndraft: true\n---\n# Body\n", EmbedType.FrontmatterYaml);
+  fm.addLeadingComment(["draft"], "WIP");
+  assert.equal(fm.render(), "---\ntitle: Hi\n# WIP\ndraft: true\n---\n# Body\n");
+});
+
 test("parse error surfaces as FigError", () => {
   assert.throws(
     () => Document.parse("{ not valid", Format.Json),

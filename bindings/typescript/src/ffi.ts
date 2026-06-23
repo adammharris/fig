@@ -58,6 +58,10 @@ interface Exports {
   fig_editor_destroy(ed: number): void;
   fig_editor_replace_val(ed: number, path: number, path_len: number, repl: number, repl_len: number): number;
   fig_editor_replace_key(ed: number, path: number, path_len: number, repl: number, repl_len: number): number;
+  fig_editor_add_leading_comment(ed: number, path: number, path_len: number, text: number, text_len: number): number;
+  fig_editor_set_trailing_comment(ed: number, path: number, path_len: number, text: number, text_len: number): number;
+  fig_editor_delete_leading_comments(ed: number, path: number, path_len: number): number;
+  fig_editor_delete_trailing_comment(ed: number, path: number, path_len: number): number;
   fig_editor_insert_key(ed: number, path: number, path_len: number, key: number, key_len: number, val: number, val_len: number): number;
   fig_editor_delete_key(ed: number, path: number, path_len: number): number;
   fig_editor_append_seq(ed: number, path: number, path_len: number, val: number, val_len: number): number;
@@ -74,6 +78,10 @@ interface Exports {
   fig_embed_destroy(em: number): void;
   fig_embed_replace_val(em: number, path: number, path_len: number, repl: number, repl_len: number): number;
   fig_embed_replace_key(em: number, path: number, path_len: number, repl: number, repl_len: number): number;
+  fig_embed_add_leading_comment(em: number, path: number, path_len: number, text: number, text_len: number): number;
+  fig_embed_set_trailing_comment(em: number, path: number, path_len: number, text: number, text_len: number): number;
+  fig_embed_delete_leading_comments(em: number, path: number, path_len: number): number;
+  fig_embed_delete_trailing_comment(em: number, path: number, path_len: number): number;
   fig_embed_insert_key(em: number, path: number, path_len: number, key: number, key_len: number, val: number, val_len: number): number;
   fig_embed_delete_key(em: number, path: number, path_len: number): number;
   fig_embed_append_seq(em: number, path: number, path_len: number, val: number, val_len: number): number;

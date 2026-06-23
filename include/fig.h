@@ -261,6 +261,21 @@ FigStatus fig_editor_replace_val(FigEditor *editor, const FigPathSegment *path,
                                  size_t path_len, const uint8_t *repl, size_t repl_len);
 FigStatus fig_editor_replace_key(FigEditor *editor, const FigPathSegment *path,
                                  size_t path_len, const uint8_t *repl, size_t repl_len);
+// Comment editing. The marker (`#` for YAML, `//` for JSONC/JSON5) is supplied
+// by the editor; strict JSON has no comment syntax and returns
+// FIG_STATUS_UNSUPPORTED_FORMAT. `add_leading` inserts an own-line comment above
+// the node at `path` (multi-line `text` => one line each); `set_trailing` sets
+// the value's same-line comment, replacing any existing one (single-line `text`,
+// else FIG_STATUS_INVALID_ARGUMENT). The delete ops remove the leading block /
+// the trailing comment, and are a no-op (FIG_STATUS_OK) when there is none.
+FigStatus fig_editor_add_leading_comment(FigEditor *editor, const FigPathSegment *path,
+                                         size_t path_len, const uint8_t *text, size_t text_len);
+FigStatus fig_editor_set_trailing_comment(FigEditor *editor, const FigPathSegment *path,
+                                          size_t path_len, const uint8_t *text, size_t text_len);
+FigStatus fig_editor_delete_leading_comments(FigEditor *editor, const FigPathSegment *path,
+                                             size_t path_len);
+FigStatus fig_editor_delete_trailing_comment(FigEditor *editor, const FigPathSegment *path,
+                                             size_t path_len);
 FigStatus fig_editor_insert_key(FigEditor *editor, const FigPathSegment *path, size_t path_len,
                                 const uint8_t *key, size_t key_len,
                                 const uint8_t *val, size_t val_len);
@@ -332,6 +347,16 @@ FigStatus fig_embed_replace_val(FigEmbed *embed, const FigPathSegment *path,
                                 size_t path_len, const uint8_t *repl, size_t repl_len);
 FigStatus fig_embed_replace_key(FigEmbed *embed, const FigPathSegment *path,
                                 size_t path_len, const uint8_t *repl, size_t repl_len);
+// Comment editing on the embedded config (mirrors fig_editor_*; YAML frontmatter
+// uses `#`, JSON frontmatter is strict JSON and rejects comments).
+FigStatus fig_embed_add_leading_comment(FigEmbed *embed, const FigPathSegment *path,
+                                        size_t path_len, const uint8_t *text, size_t text_len);
+FigStatus fig_embed_set_trailing_comment(FigEmbed *embed, const FigPathSegment *path,
+                                         size_t path_len, const uint8_t *text, size_t text_len);
+FigStatus fig_embed_delete_leading_comments(FigEmbed *embed, const FigPathSegment *path,
+                                            size_t path_len);
+FigStatus fig_embed_delete_trailing_comment(FigEmbed *embed, const FigPathSegment *path,
+                                            size_t path_len);
 FigStatus fig_embed_insert_key(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
                                const uint8_t *key, size_t key_len,
                                const uint8_t *val, size_t val_len);

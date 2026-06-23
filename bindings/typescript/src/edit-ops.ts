@@ -25,6 +25,10 @@ export interface EditFns {
   reorderKeys(h: number, path: number, pathLen: number, keys: number, keysLen: number): number;
   moveItem(h: number, path: number, pathLen: number, from: number, to: number): number;
   reorderItems(h: number, path: number, pathLen: number, indices: number, indicesLen: number): number;
+  addLeadingComment(h: number, path: number, pathLen: number, text: number, textLen: number): number;
+  setTrailingComment(h: number, path: number, pathLen: number, text: number, textLen: number): number;
+  deleteLeadingComments(h: number, path: number, pathLen: number): number;
+  deleteTrailingComment(h: number, path: number, pathLen: number): number;
 }
 
 export { type Segment };
@@ -188,6 +192,55 @@ export abstract class Editable {
       const p = encodePath(frame, path);
       const idx = encodeIndexList(frame, indices);
       check(this.fns.reorderItems(this.live(), p.ptr, p.len, idx.ptr, idx.len), "reorderItems");
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  // ── comment editing ─────────────────────────────────────────────────────
+
+  /** Add an own-line comment ABOVE the node at `path` (the key's line for a
+   *  mapping entry), at its indentation, nearest the node. `text` may be
+   *  multi-line (one comment line each). The marker (`#` for YAML, `//` for
+   *  JSONC/JSON5) is added for you; strict JSON throws `UnsupportedFormat`. */
+  addLeadingComment(path: readonly Segment[], text: string): void {
+    this.commentEdit(path, text, this.fns.addLeadingComment, "addLeadingComment");
+  }
+
+  /** Set the same-line trailing comment on the value at `path`, replacing an
+   *  existing one or appending if absent. `text` must be single-line. */
+  setTrailingComment(path: readonly Segment[], text: string): void {
+    this.commentEdit(path, text, this.fns.setTrailingComment, "setTrailingComment");
+  }
+
+  /** Remove the own-line comment block above the node at `path` (no-op if none). */
+  deleteLeadingComments(path: readonly Segment[]): void {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      check(this.fns.deleteLeadingComments(this.live(), p.ptr, p.len), "deleteLeadingComments");
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  /** Remove the same-line trailing comment on the value at `path` (no-op if none). */
+  deleteTrailingComment(path: readonly Segment[]): void {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      check(this.fns.deleteTrailingComment(this.live(), p.ptr, p.len), "deleteTrailingComment");
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  private commentEdit(path: readonly Segment[], text: string, fn: EditFns["addLeadingComment"], op: string): void {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      const t = frame.str(text);
+      check(fn(this.live(), p.ptr, p.len, t.ptr, t.len), op);
     } finally {
       frame.dispose();
     }

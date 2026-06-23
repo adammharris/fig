@@ -1,6 +1,7 @@
 //! Editor module, generic over Language.
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const AST = @import("ast/ast.zig");
 const Document = @import("document.zig");
@@ -18,6 +19,8 @@ const yaml_edit = @import("yaml/editor_helper.zig");
 // Language tags used by the comptime branches above.
 const Toml = @import("toml/toml.zig").Language;
 const Yaml = @import("yaml/yaml.zig").Language;
+// Used only for the comptime comment-marker choice (ZON uses `//`, like Zig).
+const Zon = @import("zon/zon.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("language.zig").validate(Language);
@@ -26,10 +29,10 @@ pub fn Editor(comptime Language: type) type {
 
         // Which leading-comment syntax this language uses, so the owned-comment
         // scan in delete/move (`commentBlockStart`) recognizes the right marker.
-        // JSON/JSONC/JSON5 use `//` and `/* */`; YAML and TOML use `#`. Plain
-        // JSON has no comments, but `.slashes` is harmless there since no `//`
-        // line can exist.
-        const comment_style: CommentStyle = if (Language == json.Language) .slashes else .hash;
+        // JSON/JSONC/JSON5 and ZON use `//` (ZON, like Zig); YAML and TOML use
+        // `#`. Plain JSON has no comments, but `.slashes` is harmless there since
+        // no `//` line can exist.
+        const comment_style: CommentStyle = if (Language == json.Language or Language == Zon) .slashes else .hash;
 
         allocator: std.mem.Allocator,
         source: std.ArrayList(u8) = .empty,
@@ -125,6 +128,121 @@ pub fn Editor(comptime Language: type) type {
             const node = try parsed.ast.getKeyByPath(path);
             const span = parsed.span(node);
             try self.replaceAtSpan(span, replacement);
+        }
+
+        // ========
+        // COMMENTS
+        // ========
+        //
+        // Comments are trivia — they live OUTSIDE every AST node span — so these
+        // ops reuse the same splice + reparse machinery as the structural edits:
+        // compute a byte position from a node's span, splice the comment text,
+        // reparse. The reparse is the safety net (`replaceAtSpan` rolls back if
+        // the result no longer parses).
+
+        /// The line-comment marker for this language/dialect, or null when the
+        /// dialect forbids comments (strict JSON). `self.format` distinguishes
+        /// strict JSON from JSONC/JSON5, which the marker choice must honor since
+        /// the splice is reparsed under that same dialect.
+        fn lineCommentMarker(self: *const Self) ?[]const u8 {
+            if (comptime Language == json.Language) {
+                // `//` is valid in JSONC/JSON5 but not strict JSON.
+                return if (self.format == .JSON) null else "//";
+            }
+            // ZON uses Zig's `//`; YAML and TOML use `#`.
+            if (comptime Language == Zon) return "//";
+            return "#";
+        }
+
+        /// Add an own-line comment ABOVE the node at `path` — the key's line for a
+        /// mapping entry, else the node's own line — matched to that line's
+        /// indentation. It lands at the BOTTOM of any existing leading comment
+        /// block (the comment line nearest the node). `text` may be multi-line;
+        /// each line becomes its own comment line. Returns `CommentsUnsupported`
+        /// for a dialect without comment syntax (strict JSON).
+        pub fn addLeadingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
+            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getNodeByPath(path);
+            const span = parsed.span(node);
+            const source = self.source.items;
+            const line_start = lineStartBefore(source, span.start);
+            const indent = source[line_start..firstNonSpace(source, line_start)];
+
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            try renderLineComments(self.allocator, &buf, indent, marker, text);
+            try self.replaceAtSpan(Span.init(line_start, line_start), buf.items);
+        }
+
+        /// Set the same-line trailing comment on the value at `path`: replace an
+        /// existing trailing comment on that line, or append one if there is none.
+        /// `text` must be a single line. Returns `CommentsUnsupported` for a
+        /// dialect without comment syntax (strict JSON), `MultilineComment` if
+        /// `text` contains a newline.
+        pub fn setTrailingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
+            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.MultilineComment;
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            const span = parsed.span(node);
+            const source = self.source.items;
+
+            // The comment sits at the end of the value's last line. Find that
+            // line's newline (or EOF); if a comment marker already follows the
+            // value, splice from it (replace), else from the value's end (append).
+            const nl = std.mem.indexOfScalarPos(u8, source, span.end, '\n') orelse source.len;
+            var cut = if (std.mem.indexOf(u8, source[span.end..nl], marker)) |rel|
+                span.end + rel
+            else
+                nl;
+            // Drop the run of spaces/tabs just before the splice so the rebuilt
+            // " <marker> text" controls its own single leading space.
+            while (cut > span.end and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
+
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(self.allocator);
+            try buf.appendSlice(self.allocator, " ");
+            try buf.appendSlice(self.allocator, marker);
+            if (text.len > 0) {
+                try buf.append(self.allocator, ' ');
+                try buf.appendSlice(self.allocator, text);
+            }
+            try self.replaceAtSpan(Span.init(cut, nl), buf.items);
+        }
+
+        /// Remove the run of own-line comments immediately ABOVE the node at
+        /// `path` — its owned leading block (contiguous comment lines with no
+        /// blank line between, the same block `deleteKey` carries). A no-op when
+        /// the node has none. Returns `CommentsUnsupported` for a dialect without
+        /// comment syntax (strict JSON).
+        pub fn deleteLeadingComments(self: *Self, path: []const AST.PathSegment) !void {
+            _ = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getNodeByPath(path);
+            const span = parsed.span(node);
+            const source = self.source.items;
+            const line_start = lineStartBefore(source, span.start);
+            const block_start = commentBlockStart(source, line_start, comment_style);
+            if (block_start == line_start) return; // nothing above to remove
+            try self.replaceAtSpan(Span.init(block_start, line_start), "");
+        }
+
+        /// Remove the same-line trailing comment on the value at `path`, if any.
+        /// A no-op when there is none. Returns `CommentsUnsupported` for a dialect
+        /// without comment syntax (strict JSON).
+        pub fn deleteTrailingComment(self: *Self, path: []const AST.PathSegment) !void {
+            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const parsed = try self.getParsed();
+            const node = try parsed.ast.getValByPath(path);
+            const span = parsed.span(node);
+            const source = self.source.items;
+            const nl = std.mem.indexOfScalarPos(u8, source, span.end, '\n') orelse source.len;
+            const rel = std.mem.indexOf(u8, source[span.end..nl], marker) orelse return; // none
+            var cut = span.end + rel;
+            // Take the whitespace separating the value from the comment with it.
+            while (cut > span.end and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
+            try self.replaceAtSpan(Span.init(cut, nl), "");
         }
 
         // ===============
@@ -808,6 +926,30 @@ pub fn appendBlockSep(out: *std.ArrayList(u8), allocator: std.mem.Allocator, blo
     try out.appendSlice(allocator, block);
 }
 
+/// Render `text` as one or more own-line comments into `out`, each line being
+/// `indent` + `marker` (+ a space and the line's text, unless the line is empty)
+/// + '\n'. A single trailing newline in `text` is ignored so it never yields a
+/// stray empty comment line.
+fn renderLineComments(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    indent: []const u8,
+    marker: []const u8,
+    text: []const u8,
+) !void {
+    const body = if (std.mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text;
+    var it = std.mem.splitScalar(u8, body, '\n');
+    while (it.next()) |line| {
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, marker);
+        if (line.len > 0) {
+            try out.append(allocator, ' ');
+            try out.appendSlice(allocator, line);
+        }
+        try out.append(allocator, '\n');
+    }
+}
+
 /// A relocatable entry block: a byte range `[start, end)` covering one mapping
 /// entry or sequence item (its owned comment block through its last line).
 const Block = struct { start: usize, end: usize };
@@ -881,4 +1023,155 @@ fn reindentInto(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value_tex
         try out.appendSlice(allocator, line);
         first = false;
     }
+}
+
+// ── Comment-editing tests ──────────────────────────────────────────────────
+const testing = std.testing;
+
+fn expectCommentEdit(
+    comptime Lang: type,
+    format: Lang.Type,
+    input: []const u8,
+    expected: []const u8,
+    op: enum { leading, trailing },
+    path: []const AST.PathSegment,
+    text: []const u8,
+) !void {
+    var ed: Editor(Lang) = .{ .allocator = testing.allocator, .format = format };
+    try ed.init(input);
+    defer ed.deinit();
+    switch (op) {
+        .leading => try ed.addLeadingComment(path, text),
+        .trailing => try ed.setTrailingComment(path, text),
+    }
+    try testing.expectEqualStrings(expected, ed.source.items);
+}
+
+test "addLeadingComment inserts an own-line comment above a YAML key" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectCommentEdit(Yaml, .v1_2_2, "a: 1\nb: 2\n", "a: 1\n# note\nb: 2\n", .leading, &.{.{ .key = "b" }}, "note");
+}
+
+test "addLeadingComment matches indentation and lands nearest the key" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // Nested key: comment takes the key's 2-space indent and sits just above it,
+    // below the pre-existing comment.
+    try expectCommentEdit(
+        Yaml,
+        .v1_2_2,
+        "outer:\n  # kept\n  inner: 1\n",
+        "outer:\n  # kept\n  # new\n  inner: 1\n",
+        .leading,
+        &.{ .{ .key = "outer" }, .{ .key = "inner" } },
+        "new",
+    );
+}
+
+test "setTrailingComment appends and then replaces a YAML same-line comment" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectCommentEdit(Yaml, .v1_2_2, "a: 1\n", "a: 1 # done\n", .trailing, &.{.{ .key = "a" }}, "done");
+    // Re-setting replaces the existing trailing comment rather than nesting it.
+    try expectCommentEdit(Yaml, .v1_2_2, "a: 1 # old\n", "a: 1 # new\n", .trailing, &.{.{ .key = "a" }}, "new");
+}
+
+test "addLeadingComment on TOML uses #" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    try expectCommentEdit(Toml, .TOML_1_1, "a = 1\nb = 2\n", "a = 1\n# note\nb = 2\n", .leading, &.{.{ .key = "b" }}, "note");
+}
+
+test "comment ops on JSONC use // and respect indentation" {
+    try expectCommentEdit(
+        json.Language,
+        .JSONC,
+        "{\n  \"a\": 1\n}",
+        "{\n  // note\n  \"a\": 1\n}",
+        .leading,
+        &.{.{ .key = "a" }},
+        "note",
+    );
+}
+
+test "comment ops are rejected for strict JSON" {
+    var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
+    try ed.init("{\"a\":1}");
+    defer ed.deinit();
+    try testing.expectError(error.CommentsUnsupported, ed.addLeadingComment(&.{.{ .key = "a" }}, "x"));
+    try testing.expectError(error.CommentsUnsupported, ed.setTrailingComment(&.{.{ .key = "a" }}, "x"));
+}
+
+test "multi-line leading comment becomes one line per row" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectCommentEdit(Yaml, .v1_2_2, "a: 1\n", "# one\n# two\na: 1\n", .leading, &.{.{ .key = "a" }}, "one\ntwo");
+}
+
+test "setTrailingComment rejects a multi-line comment" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    var ed: Editor(Yaml) = .{ .allocator = testing.allocator, .format = .v1_2_2 };
+    try ed.init("a: 1\n");
+    defer ed.deinit();
+    try testing.expectError(error.MultilineComment, ed.setTrailingComment(&.{.{ .key = "a" }}, "x\ny"));
+}
+
+fn expectCommentDelete(
+    comptime Lang: type,
+    format: Lang.Type,
+    input: []const u8,
+    expected: []const u8,
+    op: enum { leading, trailing },
+    path: []const AST.PathSegment,
+) !void {
+    var ed: Editor(Lang) = .{ .allocator = testing.allocator, .format = format };
+    try ed.init(input);
+    defer ed.deinit();
+    switch (op) {
+        .leading => try ed.deleteLeadingComments(path),
+        .trailing => try ed.deleteTrailingComment(path),
+    }
+    try testing.expectEqualStrings(expected, ed.source.items);
+}
+
+test "deleteLeadingComments removes the owned block above a YAML key" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // Only the block touching the key goes; a blank line breaks ownership, so the
+    // earlier comment (above the blank) stays.
+    try expectCommentDelete(
+        Yaml,
+        .v1_2_2,
+        "# top\n\n# a\n# b\nkey: 1\n",
+        "# top\n\nkey: 1\n",
+        .leading,
+        &.{.{ .key = "key" }},
+    );
+    // No leading comment → no-op.
+    try expectCommentDelete(Yaml, .v1_2_2, "key: 1\n", "key: 1\n", .leading, &.{.{ .key = "key" }});
+}
+
+test "deleteTrailingComment removes a same-line comment (YAML/JSONC), else no-op" {
+    if (comptime build_options.lang_yaml)
+        try expectCommentDelete(Yaml, .v1_2_2, "a: 1 # gone\nb: 2\n", "a: 1\nb: 2\n", .trailing, &.{.{ .key = "a" }});
+    // No trailing comment → no-op.
+    if (comptime build_options.lang_yaml)
+        try expectCommentDelete(Yaml, .v1_2_2, "a: 1\n", "a: 1\n", .trailing, &.{.{ .key = "a" }});
+    // JSONC `//` trailing.
+    try expectCommentDelete(json.Language, .JSONC, "{\n  \"a\": 1 // x\n}", "{\n  \"a\": 1\n}", .trailing, &.{.{ .key = "a" }});
+}
+
+test "ZON owned-comment scan uses // (comment_style fix)" {
+    if (comptime !build_options.lang_zon) return error.SkipZigTest;
+    try expectCommentDelete(
+        Zon,
+        .ZON,
+        ".{\n    // note\n    .n = 3,\n}\n",
+        ".{\n    .n = 3,\n}\n",
+        .leading,
+        &.{.{ .key = "n" }},
+    );
+}
+
+test "comment delete ops are rejected for strict JSON" {
+    var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
+    try ed.init("{\"a\":1}");
+    defer ed.deinit();
+    try testing.expectError(error.CommentsUnsupported, ed.deleteLeadingComments(&.{.{ .key = "a" }}));
+    try testing.expectError(error.CommentsUnsupported, ed.deleteTrailingComment(&.{.{ .key = "a" }}));
 }

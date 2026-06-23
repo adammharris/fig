@@ -187,6 +187,43 @@ impl Embed {
         self.prepend_value(path, &crate::ser::to_value(value)?)
     }
 
+    // ── comment editing ─────────────────────────────────────────────────────
+
+    /// Add an own-line comment ABOVE the node at `path`. Mirrors
+    /// [`crate::Editor::add_leading_comment`] (YAML frontmatter uses `#`; JSON
+    /// frontmatter is strict JSON and returns [`Error::UnsupportedFormat`]).
+    pub fn add_leading_comment(&mut self, path: &[Segment], text: &str) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_embed_add_leading_comment(self.ptr(), p.as_ptr(), p.len(), text.as_ptr(), text.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Set the same-line trailing comment on the value at `path`. Mirrors
+    /// [`crate::Editor::set_trailing_comment`].
+    pub fn set_trailing_comment(&mut self, path: &[Segment], text: &str) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_embed_set_trailing_comment(self.ptr(), p.as_ptr(), p.len(), text.as_ptr(), text.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Remove the own-line comment block above the node at `path` (no-op if none).
+    pub fn delete_leading_comments(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_embed_delete_leading_comments(self.ptr(), p.as_ptr(), p.len()) };
+        Error::from_status(status)
+    }
+
+    /// Remove the same-line trailing comment on the value at `path` (no-op if none).
+    pub fn delete_trailing_comment(&mut self, path: &[Segment]) -> Result<(), Error> {
+        let p = to_ffi_path(path);
+        let status = unsafe { ffi::fig_embed_delete_trailing_comment(self.ptr(), p.as_ptr(), p.len()) };
+        Error::from_status(status)
+    }
+
     // ── structural edits (no value) ─────────────────────────────────────────
 
     /// Delete the mapping entry named by `path`.
