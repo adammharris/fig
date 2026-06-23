@@ -1,5 +1,11 @@
 const std = @import("std");
 
+/// The canonical package version, parsed once from `build.zig.zon`'s `.version`
+/// so the C ABI's `fig_version*` accessors and the version-drift check both read
+/// from a single source instead of a hand-synced trio of integers.
+const version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch
+    @compileError("invalid `.version` in build.zig.zon");
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -36,12 +42,13 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_zon", enable_zon);
     options.addOption(bool, "lang_xml", enable_xml);
     // Library version surfaced through the C ABI (`fig_version` /
-    // `fig_version_string`). KEEP IN SYNC with `.version` in `build.zig.zon` —
-    // that string is the canonical package version; these components are the same
-    // value split for the ABI's packed-integer/string accessors.
-    options.addOption(u8, "version_major", 0);
-    options.addOption(u8, "version_minor", 0);
-    options.addOption(u8, "version_patch", 0);
+    // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one
+    // canonical package version — and split into the components the ABI's
+    // packed-integer/string accessors need. `zig build abi-check` separately
+    // asserts that include/fig.h's FIG_VERSION_* macros match this same source.
+    options.addOption(u8, "version_major", @intCast(version.major));
+    options.addOption(u8, "version_minor", @intCast(version.minor));
+    options.addOption(u8, "version_patch", @intCast(version.patch));
 
     // Build the options module once and share the single instance across every
     // target. Calling `addOptions` per-module would generate a fresh module from
@@ -237,6 +244,9 @@ pub fn build(b: *std.Build) void {
     // Passed as file args so the run is cache-keyed on the files it inspects.
     abi_check_run.addFileArg(b.path("include/fig.h"));
     abi_check_run.addFileArg(b.path("src/c_api.zig"));
+    // The canonical version (from build.zig.zon) so the tool can assert that
+    // fig.h's FIG_VERSION_* macros have not drifted from it.
+    abi_check_run.addArg(b.fmt("{d}.{d}.{d}", .{ version.major, version.minor, version.patch }));
 
     const abi_probe_c = b.addExecutable(.{
         .name = "abi_probe_c",

@@ -11,7 +11,11 @@
 //! arity change links fine) — that drift would need parsing and comparing both
 //! sides' parameter lists.
 //!
-//! Usage (driven by build.zig): abi-check <header.h> <impl.zig>
+//! It also verifies that the header's FIG_VERSION_MAJOR/MINOR/PATCH macros match
+//! the canonical version (parsed from build.zig.zon and passed in by build.zig),
+//! so the C header cannot silently drift from the package version.
+//!
+//! Usage (driven by build.zig): abi-check <header.h> <impl.zig> <major.minor.patch>
 
 const std = @import("std");
 
@@ -28,6 +32,7 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next(); // argv0
     const header_path = args.next() orelse return error.MissingArgument;
     const impl_path = args.next() orelse return error.MissingArgument;
+    const want_version = args.next() orelse return error.MissingArgument;
 
     const cwd = std.Io.Dir.cwd();
     const header = try cwd.readFileAlloc(io, header_path, arena, .limited(max_file));
@@ -54,8 +59,43 @@ pub fn main(init: std.process.Init) !void {
             fail = true;
         }
     }
+    // Version drift: fig.h's macros must match the canonical build.zig.zon version.
+    const header_version = try headerVersion(arena, header);
+    if (!std.mem.eql(u8, header_version, want_version)) {
+        if (!fail) std.debug.print("abi-check: FAIL\n", .{});
+        std.debug.print(
+            "  version drift: fig.h is {s} but build.zig.zon is {s} (update the FIG_VERSION_* macros)\n",
+            .{ header_version, want_version },
+        );
+        fail = true;
+    }
+
     if (fail) std.process.exit(1);
-    std.debug.print("abi-check: symbol diff OK ({d} symbols)\n", .{exported.len});
+    std.debug.print("abi-check: symbol diff OK ({d} symbols), version {s}\n", .{ exported.len, want_version });
+}
+
+/// The `major.minor.patch` spelled by the header's `#define FIG_VERSION_*` lines.
+fn headerVersion(arena: std.mem.Allocator, header: []const u8) ![]const u8 {
+    const major = macroInt(header, "FIG_VERSION_MAJOR") orelse return error.MissingVersionMacro;
+    const minor = macroInt(header, "FIG_VERSION_MINOR") orelse return error.MissingVersionMacro;
+    const patch = macroInt(header, "FIG_VERSION_PATCH") orelse return error.MissingVersionMacro;
+    return std.fmt.allocPrint(arena, "{d}.{d}.{d}", .{ major, minor, patch });
+}
+
+/// The integer defined by `#define <name> <int>` in `text`, or null if absent.
+fn macroInt(text: []const u8, name: []const u8) ?u32 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (!std.mem.startsWith(u8, trimmed, "#define")) continue;
+        var it = std.mem.tokenizeAny(u8, trimmed, " \t");
+        _ = it.next(); // #define
+        const macro = it.next() orelse continue;
+        if (!std.mem.eql(u8, macro, name)) continue;
+        const value = it.next() orelse return null;
+        return std.fmt.parseInt(u32, value, 10) catch null;
+    }
+    return null;
 }
 
 fn isNameChar(c: u8) bool {
