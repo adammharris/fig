@@ -116,6 +116,45 @@ FigStatus fig_parse(
     FigDocument **out_doc
 );
 
+// Caller-allocated diagnostic for a parse failure. Because the caller owns it
+// (on the stack, one per thread), it needs no allocation and has no lifetime
+// tied to a handle — which is the whole point: a parse failure happens BEFORE a
+// document handle exists, so there is nothing to borrow a message from.
+//
+// `size` is the version tag, exactly like FigSerializeOptions: set it to
+// sizeof(FigError) and the library writes only the fields `size` covers, so the
+// struct can gain fields in later releases without breaking an older caller's
+// layout. The one frozen dimension is `message` — its capacity cannot grow
+// without breaking the ABI — but 256 bytes is ample for a one-line diagnostic,
+// and new fields may be appended after it.
+//
+// On a failed fig_parse_ex the library fills the covered fields; `code` repeats
+// the returned FigStatus, `message` is a NUL-terminated human-readable string
+// (truncated to fit, `message_len` excludes the NUL). `byte_offset`/`line`/
+// `column` locate the failure when known and are 0 ("unknown") otherwise — in
+// this release they are always 0 (offset plumbing is a planned follow-up).
+typedef struct FigError {
+    uint32_t size;          // caller sets sizeof(FigError); see note above
+    int      code;          // a FigStatus value (decode unknown as failure)
+    size_t   byte_offset;   // offset into input of the failure (0 = unknown)
+    uint32_t line;          // 1-based line; 0 = unknown
+    uint32_t column;        // 1-based column; 0 = unknown
+    size_t   message_len;   // bytes in `message`, excluding the NUL terminator
+    char     message[256];  // NUL-terminated, truncated to fit
+} FigError;
+
+// As fig_parse, but on failure also fills `out_err` (caller-allocated; set its
+// `size` to sizeof(FigError) first) with a diagnostic. `out_err` is nullable:
+// passing NULL makes this behave exactly like fig_parse. On FIG_STATUS_OK the
+// contents of `out_err` are unspecified — read it only on a nonzero return.
+FigStatus fig_parse_ex(
+    const uint8_t *input,
+    size_t input_len,
+    int format,
+    FigDocument **out_doc,
+    FigError *out_err
+);
+
 void fig_document_destroy(FigDocument *doc);
 
 // ============================================================================
@@ -471,13 +510,22 @@ typedef enum FigWarningCause {
   FIG_WARNING_CAUSE_EXPLICIT_OPTION = 1,
 } FigWarningCause;
 
-// One lossy event. `code`/`cause` hold FigWarningCode/FigWarningCause values
-// (compared as int for forward-compatibility). `path`/`note` are NOT
-// null-terminated — use the paired `*_len`. `path` is the dotted/[i] location
-// (path_len == 0 means the document root); `note` is the degraded-to type for
-// FIG_WARNING_TYPE_DEGRADED (e.g. "string", "number"), empty otherwise. Both
-// borrow the producing handle's storage (see the borrowing note below).
+// One lossy event, retrieved by index via fig_*_warning (the diagnose calls
+// below report only the count). `code`/`cause` hold FigWarningCode/
+// FigWarningCause values (compared as int for forward-compatibility). `path`/
+// `note` are NOT null-terminated — use the paired `*_len`. `path` is the
+// dotted/[i] location (path_len == 0 means the document root); `note` is the
+// degraded-to type for FIG_WARNING_TYPE_DEGRADED (e.g. "string", "number"),
+// empty otherwise. Both pointers borrow the producing handle's storage (see the
+// borrowing note below).
+//
+// FigWarning is caller-allocated and `size` is its version tag, the same policy
+// FigSerializeOptions/FigError follow: set `size` to sizeof(FigWarning) and the
+// library writes only the fields `size` covers, so the struct can gain fields
+// without breaking an older caller's layout. (This replaced an earlier
+// library-allocated array, which could not grow this way.)
 typedef struct FigWarning {
+  uint32_t size;        // caller sets sizeof(FigWarning); see note above
   int code;
   int cause;
   const uint8_t *path;
@@ -486,25 +534,39 @@ typedef struct FigWarning {
   size_t note_len;
 } FigWarning;
 
-// Report what serializing the whole parsed document to `format` would lose,
-// using the same pipeline fig_document_serialize prints from (YAML collapse and,
-// under `options->lossless`, $fig envelopes — so lossless suppresses value
-// losses). `options` (NULL => defaults) supplies pretty/strip_comments/lossless,
-// which change what is lost. On FIG_STATUS_OK, *out_warnings points at
-// *out_count FigWarning entries (NULL and 0 if nothing is lost) borrowed from
-// `doc` and valid until the next fig_document_diagnose on it or
-// fig_document_destroy.
+// Report HOW MANY events serializing the whole parsed document to `format` would
+// produce, using the same pipeline fig_document_serialize prints from (YAML
+// collapse and, under `options->lossless`, $fig envelopes — so lossless
+// suppresses value losses). `options` (NULL => defaults) supplies
+// pretty/strip_comments/lossless, which change what is lost. On FIG_STATUS_OK
+// writes the event count to *out_count (0 if nothing is lost); retrieve each
+// event with fig_document_warning. The computed set is retained on `doc` and
+// stays valid (including the `path`/`note` bytes the warnings borrow) until the
+// next fig_document_diagnose on it or fig_document_destroy.
 FigStatus fig_document_diagnose(FigDocument *doc, int format,
                                 const FigSerializeOptions *options,
-                                FigWarning **out_warnings, size_t *out_count);
+                                size_t *out_count);
 
-// Report what serializing the built value subtree rooted at `root` to `format`
-// would lose. The value builder has no source envelopes, so `options->lossless`
-// is ignored here. Borrowing rules match fig_document_diagnose (valid until the
-// next fig_value_diagnose on `value` or fig_value_destroy).
+// Copy the event at `index` from the most recent fig_document_diagnose on `doc`
+// into caller-allocated `*out` (set out->size to sizeof(FigWarning) first). An
+// `index` >= the reported count, or a call with no prior diagnose, returns
+// FIG_STATUS_INVALID_ARGUMENT. The `path`/`note` pointers written into `*out`
+// borrow `doc` under the lifetime described on fig_document_diagnose.
+FigStatus fig_document_warning(FigDocument *doc, size_t index, FigWarning *out);
+
+// Report how many events serializing the built value subtree rooted at `root` to
+// `format` would produce. The value builder has no source envelopes, so
+// `options->lossless` is ignored here. Retrieve each event with
+// fig_value_warning. Retention/borrowing rules match fig_document_diagnose
+// (valid until the next fig_value_diagnose on `value` or fig_value_destroy).
 FigStatus fig_value_diagnose(FigValue *value, FigNodeId root, int format,
                              const FigSerializeOptions *options,
-                             FigWarning **out_warnings, size_t *out_count);
+                             size_t *out_count);
+
+// Copy the event at `index` from the most recent fig_value_diagnose on `value`
+// into caller-allocated `*out` (set out->size to sizeof(FigWarning) first).
+// Out-of-range `index` or no prior diagnose returns FIG_STATUS_INVALID_ARGUMENT.
+FigStatus fig_value_warning(FigValue *value, size_t index, FigWarning *out);
 
 #ifdef __cplusplus
 }

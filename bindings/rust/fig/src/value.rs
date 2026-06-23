@@ -30,6 +30,9 @@ pub enum ExtKind {
     EnumLiteral,
     /// ZON character literal, e.g. `'a'` (text is the decimal codepoint).
     CharLiteral,
+    /// A non-finite JSON5 number (`Infinity`/`-Infinity`/`NaN`); text is the
+    /// literal as written.
+    NumberSpecial,
 }
 
 impl ExtKind {
@@ -42,6 +45,7 @@ impl ExtKind {
             ExtKind::LocalTime => 3,
             ExtKind::EnumLiteral => 4,
             ExtKind::CharLiteral => 5,
+            ExtKind::NumberSpecial => 6,
         }
     }
 
@@ -54,6 +58,7 @@ impl ExtKind {
             3 => ExtKind::LocalTime,
             4 => ExtKind::EnumLiteral,
             5 => ExtKind::CharLiteral,
+            6 => ExtKind::NumberSpecial,
             _ => return None,
         })
     }
@@ -167,6 +172,35 @@ impl Value {
         Ok(std::str::from_utf8(bytes)
             .map_err(|_| Error::Utf8)?
             .to_owned())
+    }
+
+    /// Report what serializing this value to `format` would silently lose
+    /// (values/comments dropped or degraded). The built value has no source
+    /// envelopes, so `options.lossless` is ignored. Returns one [`crate::Warning`]
+    /// per lossy event (empty if nothing is lost).
+    pub fn diagnose(&self, format: Format, options: SerializeOptions) -> Result<Vec<crate::Warning>, Error> {
+        let mut raw = ptr::null_mut();
+        Error::from_status(unsafe { ffi::fig_value_create(&mut raw) })?;
+        NonNull::new(raw).ok_or(Error::Internal)?;
+        let guard = ValueGuard(raw);
+
+        let root = build(guard.0, self)?;
+        let ffi_format: ffi::FigFormat = format.into();
+        let ffi_options: ffi::FigSerializeOptions = options.into();
+        let mut count: usize = 0;
+        Error::from_status(unsafe {
+            ffi::fig_value_diagnose(guard.0, root, ffi_format as c_int, &ffi_options, &mut count)
+        })?;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut w = ffi::FigWarning::new();
+            Error::from_status(unsafe { ffi::fig_value_warning(guard.0, i, &mut w) })?;
+            // Safety: on `OK`, `w` is filled with borrowed path/note bytes valid
+            // until the next diagnose on this handle (which we don't call before
+            // copying them out here) or its destroy.
+            out.push(unsafe { crate::Warning::from_ffi(&w) });
+        }
+        Ok(out)
     }
 }
 
@@ -496,6 +530,24 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    // A built datetime degrades to a string in JSON → one type-degraded warning.
+    #[test]
+    fn value_diagnose_reports_degraded_datetime() {
+        use crate::{Format, SerializeOptions, WarningCode};
+        let v = Value::Map(vec![(
+            "when".into(),
+            Value::Extended {
+                kind: ExtKind::OffsetDateTime,
+                text: "1979-05-27T07:32:00Z".into(),
+            },
+        )]);
+        let warns = v.diagnose(Format::Json, SerializeOptions::default()).unwrap();
+        assert_eq!(warns.len(), 1);
+        assert_eq!(warns[0].code, WarningCode::TypeDegraded);
+        assert_eq!(warns[0].path, "when");
+        assert_eq!(warns[0].note, "string");
     }
 
     // A directly-constructed extended value serializes via the existing write ABI.

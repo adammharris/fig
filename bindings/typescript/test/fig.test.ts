@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  capabilities,
+  diagnose,
   Document,
   Editor,
   Embed,
@@ -12,6 +14,10 @@ import {
   NodeKind,
   Status,
   V,
+  version,
+  versionString,
+  WarningCause,
+  WarningCode,
   fromJS,
   parse,
   serialize,
@@ -201,4 +207,53 @@ test("parse error surfaces as FigError", () => {
     () => Document.parse("{ not valid", Format.Json),
     (err: unknown) => err instanceof FigError && err.status === Status.ParseError,
   );
+});
+
+test("parse error carries the core's message", () => {
+  let caught: FigError | undefined;
+  try {
+    Document.parse('{"a":', Format.Json);
+  } catch (e) {
+    caught = e as FigError;
+  }
+  assert.ok(caught instanceof FigError);
+  // The message includes the core's diagnostic after the "fig_parse:" prefix,
+  // and is more than the bare status text.
+  assert.match(caught!.message, /fig_parse: .+/);
+  assert.notEqual(caught!.message, "fig_parse: parse error");
+});
+
+test("version and capabilities", () => {
+  const v = version();
+  assert.equal(versionString(), `${v.major}.${v.minor}.${v.patch}`);
+  const json = capabilities(Format.Json);
+  assert.deepEqual(json, { read: true, edit: true, serialize: true });
+});
+
+test("Document.serialize converts cross-format", () => {
+  using doc = Document.parse("name: fig\nnums:\n- 1\n- 2\n", Format.Yaml);
+  assert.equal(
+    doc.serialize(Format.Json),
+    '{\n  "name": "fig",\n  "nums": [\n    1,\n    2\n  ]\n}\n',
+  );
+});
+
+test("Document.diagnose reports a dropped null for TOML", () => {
+  using doc = Document.parse("a: null\nb: 1\n", Format.Yaml);
+  const warns = doc.diagnose(Format.Toml);
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0].code, WarningCode.ValueDropped);
+  assert.equal(warns[0].cause, WarningCause.FormatLimitation);
+  assert.equal(warns[0].path, "a");
+  // Lossless preserves the null → nothing lost.
+  assert.equal(doc.diagnose(Format.Toml, { lossless: true }).length, 0);
+});
+
+test("value diagnose reports a degraded datetime", () => {
+  const v = V.map([[V.string("when"), V.extended(ExtKind.OffsetDateTime, "1979-05-27T07:32:00Z")]]);
+  const warns = diagnose(v, Format.Json);
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0].code, WarningCode.TypeDegraded);
+  assert.equal(warns[0].path, "when");
+  assert.equal(warns[0].note, "string");
 });

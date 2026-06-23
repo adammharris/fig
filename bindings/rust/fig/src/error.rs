@@ -12,12 +12,9 @@ use crate::ffi;
 pub enum Error {
     /// A null or otherwise invalid argument reached the C ABI.
     InvalidArgument,
-    /// The input could not be parsed as the requested format.
-    ///
-    /// fig's parse ABI does not yet return a message or source location, so
-    /// this variant is intentionally coarse. See the error-handling item in
-    /// `fig.md`.
-    Parse,
+    /// The input could not be parsed as the requested format. Carries a
+    /// [`ParseError`] with the core's message and (when known) source location.
+    Parse(ParseError),
     /// Allocation failed inside the parser.
     OutOfMemory,
     /// The requested format is not supported.
@@ -57,6 +54,49 @@ pub enum Error {
     /// offending value, since an `i128` payload would force 16-byte alignment
     /// on the whole `Error` enum and bloat every `Result<_, Error>` site.
     IntOutOfRange { ty: &'static str },
+}
+
+/// Details of a parse failure, projected from the C ABI's `FigError`.
+#[derive(Debug, Clone)]
+pub struct ParseError {
+    /// A human-readable message. Currently the core's error name (e.g.
+    /// `"UnclosedObject"`); a richer message may follow in a later release.
+    pub message: String,
+    /// Byte offset of the failure within the input, when known. `None` means
+    /// unknown — the core does not yet surface offsets, so this is `None` in the
+    /// current release (the field is wired for when it does).
+    pub byte_offset: Option<usize>,
+    /// 1-based line of the failure, when known (see `byte_offset`).
+    pub line: Option<u32>,
+    /// 1-based column of the failure, when known (see `byte_offset`).
+    pub column: Option<u32>,
+}
+
+impl ParseError {
+    /// Build from a filled `FigError`. `byte_offset`/`line`/`column` of 0 are the
+    /// ABI's "unknown" sentinel and map to `None`. The message is read from
+    /// `message[..message_len]` as lossy UTF-8.
+    pub(crate) fn from_ffi(e: &ffi::FigError) -> Self {
+        let len = e.message_len.min(e.message.len());
+        let message = String::from_utf8_lossy(&e.message[..len]).into_owned();
+        ParseError {
+            message,
+            byte_offset: (e.byte_offset != 0).then_some(e.byte_offset),
+            line: (e.line != 0).then_some(e.line),
+            column: (e.column != 0).then_some(e.column),
+        }
+    }
+
+    /// A detail-free parse error for paths that have no `FigError` (e.g. the
+    /// editor's internal parse, which does not use the `_ex` entry point).
+    pub(crate) fn generic() -> Self {
+        ParseError {
+            message: String::from("failed to parse input"),
+            byte_offset: None,
+            line: None,
+            column: None,
+        }
+    }
 }
 
 impl Error {
@@ -110,7 +150,7 @@ impl Error {
         match status.0 {
             ffi::FigStatus::OK => Ok(()),
             ffi::FigStatus::INVALID_ARGUMENT => Err(Self::InvalidArgument),
-            ffi::FigStatus::PARSE_ERROR => Err(Self::Parse),
+            ffi::FigStatus::PARSE_ERROR => Err(Self::Parse(ParseError::generic())),
             ffi::FigStatus::OUT_OF_MEMORY => Err(Self::OutOfMemory),
             ffi::FigStatus::UNSUPPORTED_FORMAT => Err(Self::UnsupportedFormat),
             ffi::FigStatus::NOT_FOUND => Err(Self::NotFound),
@@ -125,7 +165,16 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::InvalidArgument => f.write_str("invalid argument"),
-            Error::Parse => f.write_str("failed to parse input"),
+            Error::Parse(e) => {
+                write!(f, "failed to parse input: {}", e.message)?;
+                match (e.line, e.column) {
+                    (Some(l), Some(c)) => write!(f, " (line {l}, column {c})"),
+                    _ => match e.byte_offset {
+                        Some(off) => write!(f, " (byte offset {off})"),
+                        None => Ok(()),
+                    },
+                }
+            }
             Error::OutOfMemory => f.write_str("out of memory"),
             Error::UnsupportedFormat => f.write_str("unsupported format"),
             Error::NotFound => f.write_str("path or region not found"),

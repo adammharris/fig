@@ -82,7 +82,47 @@ impl FigNodeKind {
     }
 }
 
+/// A caller-allocated parse diagnostic. Mirrors `FigError` in `fig.h`. Lead with
+/// `size = size_of::<FigError>()`: the library writes only the fields `size`
+/// covers, so it can gain fields in a later release without breaking this layout.
+/// `byte_offset`/`line`/`column` are 0 when unknown (always 0 in this release —
+/// offset plumbing is a planned core follow-up). `message` is NUL-terminated and
+/// truncated to fit; `message_len` excludes the NUL.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FigError {
+    pub size: u32,
+    pub code: c_int,
+    pub byte_offset: usize,
+    pub line: u32,
+    pub column: u32,
+    pub message_len: usize,
+    pub message: [u8; 256],
+}
+
+impl FigError {
+    /// A zeroed struct with `size` set, ready to pass to `fig_parse_ex`.
+    pub fn new() -> Self {
+        FigError {
+            size: std::mem::size_of::<FigError>() as u32,
+            code: 0,
+            byte_offset: 0,
+            line: 0,
+            column: 0,
+            message_len: 0,
+            message: [0; 256],
+        }
+    }
+}
+
 unsafe extern "C" {
+    pub fn fig_version() -> u32;
+    pub fn fig_version_string() -> *const std::os::raw::c_char;
+    pub fn fig_format_capabilities(format: c_int) -> u32;
+
+    // Declared for ABI-mirror completeness; the binding parses via `fig_parse_ex`
+    // (richer errors), so this plain entry point is not called from Rust.
+    #[allow(dead_code)]
     pub fn fig_parse(
         input: *const u8,
         input_len: usize,
@@ -90,7 +130,23 @@ unsafe extern "C" {
         out_doc: *mut *mut FigDocument,
     ) -> FigStatus;
 
+    pub fn fig_parse_ex(
+        input: *const u8,
+        input_len: usize,
+        format: c_int,
+        out_doc: *mut *mut FigDocument,
+        out_err: *mut FigError,
+    ) -> FigStatus;
+
     pub fn fig_document_destroy(doc: *mut FigDocument);
+
+    pub fn fig_document_serialize(
+        doc: *mut FigDocument,
+        format: c_int,
+        options: *const FigSerializeOptions,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
 }
 
 // Read traversal — consumed by `Document::to_value` and the serde deserializer.
@@ -140,8 +196,11 @@ pub struct FigKeyValue {
     pub value: FigNodeId,
 }
 
-/// Output style for `fig_value_serialize_opts`. Mirrors `FigSerializeOptions`
-/// in `fig.h`.
+/// Output style for `fig_value_serialize_opts`/`fig_document_serialize`. Mirrors
+/// `FigSerializeOptions` in `fig.h`. ALL trailing fields are declared explicitly
+/// (not left to struct padding): with `size = size_of` the core reads every byte
+/// up to `size`, so an undeclared `strip_comments`/`lossless` would otherwise be
+/// read out of uninitialized padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct FigSerializeOptions {
@@ -151,6 +210,41 @@ pub struct FigSerializeOptions {
     pub size: u32,
     pub pretty: u8,
     pub indent: u8,
+    pub strip_comments: u8,
+    pub lossless: u8,
+}
+
+/// One lossy event from `fig_*_diagnose`, pulled by index via `fig_*_warning`.
+/// Caller-allocated; lead with `size = size_of::<FigWarning>()` (same policy as
+/// `FigSerializeOptions`/`FigError`). `path`/`note` are NOT NUL-terminated and
+/// borrow the producing handle's diagnostics arena (valid until the next
+/// diagnose on it or its destroy) — copy them out before then. Mirrors
+/// `FigWarning` in `fig.h`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FigWarning {
+    pub size: u32,
+    pub code: c_int,
+    pub cause: c_int,
+    pub path: *const u8,
+    pub path_len: usize,
+    pub note: *const u8,
+    pub note_len: usize,
+}
+
+impl FigWarning {
+    /// A zeroed struct with `size` set, ready to pass to a `fig_*_warning` call.
+    pub fn new() -> Self {
+        FigWarning {
+            size: std::mem::size_of::<FigWarning>() as u32,
+            code: 0,
+            cause: 0,
+            path: std::ptr::null(),
+            path_len: 0,
+            note: std::ptr::null(),
+            note_len: 0,
+        }
+    }
 }
 
 unsafe extern "C" {
@@ -193,6 +287,8 @@ unsafe extern "C" {
         entries_len: usize,
         out_id: *mut FigNodeId,
     ) -> FigStatus;
+    // ABI-mirror decl; the binding always serializes through the `_opts` form.
+    #[allow(dead_code)]
     pub fn fig_value_serialize(
         value: *mut FigValue,
         root: FigNodeId,
@@ -207,6 +303,34 @@ unsafe extern "C" {
         options: *const FigSerializeOptions,
         out_ptr: *mut *const u8,
         out_len: *mut usize,
+    ) -> FigStatus;
+}
+
+// ---- serialization diagnostics ----
+
+unsafe extern "C" {
+    pub fn fig_document_diagnose(
+        doc: *mut FigDocument,
+        format: c_int,
+        options: *const FigSerializeOptions,
+        out_count: *mut usize,
+    ) -> FigStatus;
+    pub fn fig_document_warning(
+        doc: *mut FigDocument,
+        index: usize,
+        out: *mut FigWarning,
+    ) -> FigStatus;
+    pub fn fig_value_diagnose(
+        value: *mut FigValue,
+        root: FigNodeId,
+        format: c_int,
+        options: *const FigSerializeOptions,
+        out_count: *mut usize,
+    ) -> FigStatus;
+    pub fn fig_value_warning(
+        value: *mut FigValue,
+        index: usize,
+        out: *mut FigWarning,
     ) -> FigStatus;
 }
 

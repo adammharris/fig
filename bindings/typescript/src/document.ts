@@ -4,8 +4,30 @@
 // `using` declaration). Nodes are addressed by numeric id; `null` stands in for
 // the C ABI's "no such node" sentinel. `toValue`/`toJS` walk the whole tree in
 // one call for the common case.
-import { check, ExtKind, FigError, Format, NodeKind, Status } from "./types.ts";
-import { fig, Frame, readOutSlice } from "./ffi.ts";
+import {
+  check,
+  ExtKind,
+  FigError,
+  Format,
+  NodeKind,
+  Status,
+  WarningCause,
+  WarningCode,
+  type SerializeOptions,
+  type Warning,
+} from "./types.ts";
+import {
+  allocFigError,
+  encodeOptions,
+  fig,
+  FIG_WARNING_SIZE,
+  Frame,
+  readFigError,
+  readFigWarning,
+  readOutSlice,
+  readU32,
+  writeWarningSize,
+} from "./ffi.ts";
 import { numberFromRaw, toJS, V, type JsValue, type Value } from "./value.ts";
 
 const NODE_NONE = 0xffffffff;
@@ -25,15 +47,29 @@ export class Document {
     this.handle = handle;
   }
 
-  /** Parse `input` in `format`. Accepts a string or raw bytes. */
+  /** Parse `input` in `format`. Accepts a string or raw bytes. On a parse
+   *  failure the thrown {@link FigError} carries the core's message (and source
+   *  location when the core reports one). */
   static parse(input: string | Uint8Array, format: Format): Document {
     const bytes = typeof input === "string" ? encoder.encode(input) : input;
     const frame = new Frame();
     const outDoc = frame.alloc(4);
+    const errPtr = allocFigError(frame);
     try {
       const ptr = frame.bytes(bytes);
-      check(fig.fig_parse(ptr, bytes.length, format, outDoc), "fig_parse");
-      const handle = new DataView(fig.memory.buffer).getUint32(outDoc, true);
+      const status = fig.fig_parse_ex(ptr, bytes.length, format, outDoc, errPtr);
+      if (status !== Status.Ok) {
+        // Read the diagnostic AFTER the call (an internal alloc may have grown —
+        // and detached — the buffer the views are derived from).
+        const e = readFigError(errPtr);
+        throw new FigError(status, "fig_parse", {
+          message: e.message,
+          byteOffset: e.byteOffset,
+          line: e.line,
+          column: e.column,
+        });
+      }
+      const handle = readU32(outDoc);
       if (handle === 0) throw new FigError(Status.InternalError, "fig_parse");
       return new Document(handle);
     } finally {
@@ -198,6 +234,51 @@ export class Document {
       default:
         // A bare keyvalue, an invalid id, or an unresolved alias is not a value.
         throw new FigError(Status.InternalError, `node kind ${NodeKind[kind] ?? kind}`);
+    }
+  }
+
+  /** Render the whole document to `format` — the cross-format conversion
+   *  primitive (e.g. parse YAML, emit JSON). Unlike `toValue()` + `serialize`,
+   *  this preserves source comments where the target allows and collapses YAML's
+   *  reference layer when leaving YAML. A value the target cannot represent
+   *  throws `UnsupportedFormat` unless `options.lossless` is set. */
+  serialize(format: Format, options?: SerializeOptions): string {
+    const frame = new Frame();
+    try {
+      const optsPtr = encodeOptions(frame, options);
+      const scratch = frame.alloc(8); // out_ptr + out_len
+      check(
+        fig.fig_document_serialize(this.live(), format, optsPtr, scratch, scratch + 4),
+        "fig_document_serialize",
+      );
+      return readOutSlice(scratch);
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  /** Report what serializing the whole document to `format` would silently lose
+   *  (comments/values dropped or degraded), using the same pipeline
+   *  {@link Document#serialize} prints from. Returns one {@link Warning} per
+   *  lossy event (empty if nothing is lost). */
+  diagnose(format: Format, options?: SerializeOptions): Warning[] {
+    const frame = new Frame();
+    try {
+      const optsPtr = encodeOptions(frame, options);
+      const countPtr = frame.alloc(4);
+      check(fig.fig_document_diagnose(this.live(), format, optsPtr, countPtr), "fig_document_diagnose");
+      const count = readU32(countPtr);
+      const warnPtr = frame.alloc(FIG_WARNING_SIZE);
+      const out: Warning[] = [];
+      for (let i = 0; i < count; i++) {
+        writeWarningSize(warnPtr);
+        check(fig.fig_document_warning(this.live(), i, warnPtr), "fig_document_warning");
+        const w = readFigWarning(warnPtr);
+        out.push({ code: w.code as WarningCode, cause: w.cause as WarningCause, path: w.path, note: w.note });
+      }
+      return out;
+    } finally {
+      frame.dispose();
     }
   }
 

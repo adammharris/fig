@@ -156,10 +156,14 @@ const DocumentHandle = struct {
     /// `ValueHandle.rendered`.
     rendered: std.Io.Writer.Allocating,
     /// Backs the warnings (and their path strings) the most recent
-    /// `fig_document_diagnose` returned; reset (not freed) each call, so a
-    /// returned `FigWarning` array is borrowed and valid only until the next
+    /// `fig_document_diagnose` produced; reset (not freed) each call, so the
+    /// `path`/`note` bytes a `FigWarning` borrows are valid only until the next
     /// diagnose on this handle or `fig_document_destroy`.
     diag_arena: std.heap.ArenaAllocator,
+    /// The warning set the most recent `fig_document_diagnose` computed (stored
+    /// in `diag_arena`); `fig_document_warning` indexes into it. Empty until the
+    /// first diagnose. Replaced (not appended) each diagnose call.
+    diag_warnings: []const Diagnostics.Warning = &.{},
 };
 
 fn activeAllocator() std.mem.Allocator {
@@ -198,20 +202,82 @@ pub export fn fig_free(ptr: ?[*]u8, len: usize) void {
     activeAllocator().free(p[0..len]);
 }
 
+/// Caller-allocated parse diagnostic. Mirrors `FigError` in `include/fig.h`.
+/// Caller-allocated + size-versioned for the same reason `FigSerializeOptions`
+/// is: the library writes only the fields the caller's `size` covers, so fields
+/// may be appended later without breaking an older layout. Caller-owned (no
+/// allocation, no handle lifetime) is what lets it carry a message for a failure
+/// that happens *before* any document handle exists.
+pub const FigError = extern struct {
+    size: u32,
+    code: c_int,
+    byte_offset: usize,
+    line: u32,
+    column: u32,
+    message_len: usize,
+    message: [256]u8,
+};
+
+/// Whether the caller-reported `FigError.size` covers `field` (same rule as
+/// `optionCovers`). A field past `size` is absent in the caller's layout and
+/// must not be written.
+fn errCovers(size: u32, comptime field: []const u8) bool {
+    const end = @offsetOf(FigError, field) + @sizeOf(@FieldType(FigError, field));
+    return size >= end;
+}
+
+/// Fill `out_err` (if non-null) with `status` + `message`, then return `status`
+/// so a failure path can `return fillError(...)`. Every field is gated on the
+/// caller's `size`, so an older/smaller struct receives only the fields it
+/// declared. `byte_offset`/`line`/`column` are 0 ("unknown") in this release —
+/// surfacing the failing span from each parser is a planned follow-up.
+fn fillError(out_err: ?*FigError, status: FigStatus, message: []const u8) FigStatus {
+    const e = out_err orelse return status;
+    const size = e.size;
+    if (errCovers(size, "code")) e.code = @intFromEnum(status);
+    if (errCovers(size, "byte_offset")) e.byte_offset = 0;
+    if (errCovers(size, "line")) e.line = 0;
+    if (errCovers(size, "column")) e.column = 0;
+    // `message_len` and `message` are written together, and only when `size`
+    // covers the whole inline array — a partially-covered buffer gets nothing
+    // rather than a string truncated without its NUL terminator.
+    if (errCovers(size, "message")) {
+        const n = @min(message.len, e.message.len - 1);
+        @memcpy(e.message[0..n], message[0..n]);
+        e.message[n] = 0;
+        e.message_len = n;
+    }
+    return status;
+}
+
 pub export fn fig_parse(
     input_ptr: ?[*]const u8,
     input_len: usize,
     format: c_int,
     out_doc: ?*?*FigDocument,
 ) FigStatus {
-    const out = out_doc orelse return .invalid_argument;
+    return fig_parse_ex(input_ptr, input_len, format, out_doc, null);
+}
+
+/// As `fig_parse`, but on a nonzero return also fills `out_err` (caller-allocated;
+/// nullable — NULL makes this identical to `fig_parse`) with a diagnostic. On
+/// `.ok` the contents of `out_err` are left unspecified.
+pub export fn fig_parse_ex(
+    input_ptr: ?[*]const u8,
+    input_len: usize,
+    format: c_int,
+    out_doc: ?*?*FigDocument,
+    out_err: ?*FigError,
+) FigStatus {
+    const out = out_doc orelse return fillError(out_err, .invalid_argument, "out_doc is null");
     out.* = null;
 
     // Empty input (len 0, null pointer or not) is a valid slice handed to the
     // parser, which judges it per format (YAML → null document, TOML → empty
     // table, JSON/JSON5/ZON/XML → parse_error). Only a null pointer paired with a
     // nonzero length is a malformed argument. This mirrors `fig_editor_create`.
-    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
+    const input = sliceOf(input_ptr, input_len) orelse
+        return fillError(out_err, .invalid_argument, "null input with nonzero length");
 
     const fig_format: FigFormat = switch (format) {
         @intFromEnum(FigFormat.json) => .json,
@@ -221,83 +287,49 @@ pub export fn fig_parse(
         @intFromEnum(FigFormat.toml) => .toml,
         @intFromEnum(FigFormat.zon) => .zon,
         @intFromEnum(FigFormat.xml) => .xml,
-        else => return .unsupported_format,
+        else => return fillError(out_err, .unsupported_format, "unsupported or unknown format"),
     };
 
     const allocator = activeAllocator();
 
-    const source = allocator.dupe(u8, input) catch return .out_of_memory;
+    const source = allocator.dupe(u8, input) catch
+        return fillError(out_err, .out_of_memory, "out of memory");
     const handle = allocator.create(DocumentHandle) catch {
         allocator.free(source);
-        return .out_of_memory;
+        return fillError(out_err, .out_of_memory, "out of memory");
     };
 
+    // On any parser error: free the not-yet-installed source/handle and report
+    // the error name as the message. The parser error set is payload-free, so the
+    // name is the best diagnostic available until per-parser span plumbing lands;
+    // `byte_offset`/`line`/`column` stay 0 for now.
     const doc = switch (fig_format) {
-        .json => blk: {
-            break :blk JsonParser.parse(allocator, source, JsonType.JSON) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        },
-        .jsonc => blk: {
-            break :blk JsonParser.parse(allocator, source, JsonType.JSONC) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        },
-        .json5 => blk: {
-            break :blk JsonParser.parse(allocator, source, JsonType.JSON5) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        },
-        .yaml => if (comptime build_options.lang_yaml) blk: {
-            break :blk YamlParser.parse(allocator, source, YamlType.v1_2_2) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        } else {
-            allocator.free(source);
-            allocator.destroy(handle);
-            return .unsupported_format;
-        },
-        .toml => if (comptime build_options.lang_toml) blk: {
-            break :blk TomlParser.parse(allocator, source, TomlType.TOML_1_1) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        } else {
-            allocator.free(source);
-            allocator.destroy(handle);
-            return .unsupported_format;
-        },
-        .zon => if (comptime build_options.lang_zon) blk: {
-            break :blk ZonParser.parse(allocator, source, ZonType.ZON) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        } else {
-            allocator.free(source);
-            allocator.destroy(handle);
-            return .unsupported_format;
-        },
-        .xml => if (comptime build_options.lang_xml) blk: {
-            break :blk XmlParser.parse(allocator, source, XmlType.XML_1_0) catch |err| {
-                allocator.free(source);
-                allocator.destroy(handle);
-                return parseFailureStatus(err);
-            };
-        } else {
-            allocator.free(source);
-            allocator.destroy(handle);
-            return .unsupported_format;
-        },
+        .json => JsonParser.parse(allocator, source, JsonType.JSON) catch |err|
+            return parseFailed(out_err, err, source, handle),
+        .jsonc => JsonParser.parse(allocator, source, JsonType.JSONC) catch |err|
+            return parseFailed(out_err, err, source, handle),
+        .json5 => JsonParser.parse(allocator, source, JsonType.JSON5) catch |err|
+            return parseFailed(out_err, err, source, handle),
+        .yaml => if (comptime build_options.lang_yaml)
+            YamlParser.parse(allocator, source, YamlType.v1_2_2) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .toml => if (comptime build_options.lang_toml)
+            TomlParser.parse(allocator, source, TomlType.TOML_1_1) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .zon => if (comptime build_options.lang_zon)
+            ZonParser.parse(allocator, source, ZonType.ZON) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .xml => if (comptime build_options.lang_xml)
+            XmlParser.parse(allocator, source, XmlType.XML_1_0) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
     };
 
     handle.* = .{
@@ -318,6 +350,23 @@ fn parseFailureStatus(err: anyerror) FigStatus {
         error.OutOfMemory => .out_of_memory,
         else => .parse_error,
     };
+}
+
+/// Shared cleanup + diagnostic for a failed parse: release the not-yet-installed
+/// `source`/`handle`, then report the error (its name as the message).
+fn parseFailed(out_err: ?*FigError, err: anyerror, source: []u8, handle: *DocumentHandle) FigStatus {
+    const allocator = activeAllocator();
+    allocator.free(source);
+    allocator.destroy(handle);
+    return fillError(out_err, parseFailureStatus(err), @errorName(err));
+}
+
+/// Cleanup + diagnostic for a format compiled out of this build.
+fn formatDisabled(out_err: ?*FigError, source: []u8, handle: *DocumentHandle) FigStatus {
+    const allocator = activeAllocator();
+    allocator.free(source);
+    allocator.destroy(handle);
+    return fillError(out_err, .unsupported_format, "format not compiled into this build");
 }
 
 /// Memory allocated by this API should be freed by this API.
@@ -1327,9 +1376,13 @@ const ValueHandle = struct {
     /// Reused across `fig_value_serialize` calls; holds the bytes the most recent
     /// call returned (cleared and refilled each time).
     rendered: std.Io.Writer.Allocating,
-    /// Backs the warnings returned by the most recent `fig_value_diagnose`; reset
+    /// Backs the warnings the most recent `fig_value_diagnose` produced; reset
     /// (not freed) each call. Mirrors `DocumentHandle.diag_arena`.
     diag_arena: std.heap.ArenaAllocator,
+    /// The warning set the most recent `fig_value_diagnose` computed (stored in
+    /// `diag_arena`); `fig_value_warning` indexes into it. Mirrors
+    /// `DocumentHandle.diag_warnings`.
+    diag_warnings: []const Diagnostics.Warning = &.{},
 };
 
 fn valueFrom(value: ?*FigValue) ?*ValueHandle {
@@ -1748,11 +1801,15 @@ pub const FigWarningCause = enum(c_int) {
     explicit_option = 1,
 };
 
-/// One lossy event. `path`/`note` are NOT null-terminated — use the paired
-/// `*_len`. `path` is the dotted/`[i]` location ("" / len 0 = document root);
-/// `note` is the degraded-to type for `type_degraded`, else empty. Both borrow
-/// the producing handle's diagnostics arena.
+/// One lossy event, retrieved by index via `fig_*_warning`. Caller-allocated and
+/// size-versioned (mirrors `FigError`/`FigSerializeOptions`): the library writes
+/// only the fields `out.size` covers, so the struct can gain fields without
+/// breaking an older caller's layout. `path`/`note` are NOT null-terminated — use
+/// the paired `*_len`. `path` is the dotted/`[i]` location ("" / len 0 = document
+/// root); `note` is the degraded-to type for `type_degraded`, else empty. Both
+/// borrow the producing handle's diagnostics arena.
 pub const FigWarning = extern struct {
+    size: u32,
     code: c_int,
     cause: c_int,
     path: [*c]const u8,
@@ -1760,6 +1817,26 @@ pub const FigWarning = extern struct {
     note: [*c]const u8,
     note_len: usize,
 };
+
+/// Whether the caller-reported `FigWarning.size` covers `field` (same rule as
+/// `optionCovers`/`errCovers`).
+fn warnCovers(size: u32, comptime field: []const u8) bool {
+    const end = @offsetOf(FigWarning, field) + @sizeOf(@FieldType(FigWarning, field));
+    return size >= end;
+}
+
+/// Copy `w` into caller-allocated `out`, writing only the fields its `size`
+/// covers (preserving `out.size`). The `path`/`note` pointers borrow the same
+/// storage `w` does — the producing handle's `diag_arena`.
+fn writeWarning(out: *FigWarning, w: Diagnostics.Warning) void {
+    const size = out.size;
+    if (warnCovers(size, "code")) out.code = warningCodeInt(w.code);
+    if (warnCovers(size, "cause")) out.cause = warningCauseInt(w.cause);
+    if (warnCovers(size, "path")) out.path = w.path.ptr;
+    if (warnCovers(size, "path_len")) out.path_len = w.path.len;
+    if (warnCovers(size, "note")) out.note = w.note.ptr;
+    if (warnCovers(size, "note_len")) out.note_len = w.note.len;
+}
 
 fn warningCodeInt(code: Diagnostics.Warning.Code) c_int {
     return @intFromEnum(@as(FigWarningCode, switch (code) {
@@ -1787,89 +1864,89 @@ fn diagnoseOptionsOf(options: ?*const FigSerializeOptions) Diagnostics.Options {
     };
 }
 
-/// Copy `warnings` into a freshly-allocated `FigWarning` array in `arena` and
-/// hand it back through `out_*`. A zero-length result yields a NULL pointer and
-/// count 0.
-fn emitWarnings(arena: std.mem.Allocator, warnings: []const Diagnostics.Warning, out_warnings: *[*c]FigWarning, out_count: *usize) FigStatus {
-    if (warnings.len == 0) {
-        out_warnings.* = null;
-        out_count.* = 0;
-        return .ok;
-    }
-    const out = arena.alloc(FigWarning, warnings.len) catch return .out_of_memory;
-    for (warnings, out) |w, *o| {
-        o.* = .{
-            .code = warningCodeInt(w.code),
-            .cause = warningCauseInt(w.cause),
-            .path = w.path.ptr,
-            .path_len = w.path.len,
-            .note = w.note.ptr,
-            .note_len = w.note.len,
-        };
-    }
-    out_warnings.* = out.ptr;
-    out_count.* = out.len;
-    return .ok;
-}
-
-/// Report what serializing the parsed document to `format` would lose, using the
-/// same pipeline (YAML collapse, lossless envelopes) `fig_document_serialize`
-/// would. `options` (NULL ⇒ defaults) supplies `pretty`/`strip_comments`/
-/// `lossless`, which change what is lost. On success `*out_warnings` points at
-/// `*out_count` `FigWarning`s borrowed from the handle (NULL/0 if nothing is
-/// lost), valid until the next `fig_document_diagnose` on `doc` or its destroy.
+/// Report HOW MANY events serializing the parsed document to `format` would
+/// produce, using the same pipeline (YAML collapse, lossless envelopes)
+/// `fig_document_serialize` would. `options` (NULL ⇒ defaults) supplies
+/// `pretty`/`strip_comments`/`lossless`, which change what is lost. On success
+/// writes the count to `*out_count` (0 if nothing is lost) and retains the set on
+/// the handle for `fig_document_warning` to index, valid until the next
+/// `fig_document_diagnose` on `doc` or its destroy.
 pub export fn fig_document_diagnose(
     doc: ?*FigDocument,
     format: c_int,
     options: ?*const FigSerializeOptions,
-    out_warnings: ?*[*c]FigWarning,
     out_count: ?*usize,
 ) FigStatus {
-    const ow = out_warnings orelse return .invalid_argument;
     const oc = out_count orelse return .invalid_argument;
-    // Clear the out-params up front so an early error return (unsupported_format,
-    // out_of_memory) never leaves a caller reading a stale/uninitialized array.
-    // Mirrors `fig_parse` nulling its out-handle.
-    ow.* = null;
+    // Clear the out-param up front so an early error return (unsupported_format,
+    // out_of_memory) never leaves a caller reading a stale count. Mirrors
+    // `fig_parse` nulling its out-handle.
     oc.* = 0;
     const public_doc = doc orelse return .invalid_argument;
     const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
     const fmt = serializeFormatOf(format) orelse return .unsupported_format;
 
     _ = handle.diag_arena.reset(.retain_capacity);
+    handle.diag_warnings = &.{}; // a failed analyze must not leave a stale set indexable
     const arena = handle.diag_arena.allocator();
     const ast = prepareDocumentAst(handle, fmt, options, arena) catch |err| return convertStatus(err);
     const warnings = Diagnostics.analyze(arena, ast, ast.root, fmt, diagnoseOptionsOf(options)) catch return .out_of_memory;
-    return emitWarnings(arena, warnings, ow, oc);
+    handle.diag_warnings = warnings;
+    oc.* = warnings.len;
+    return .ok;
 }
 
-/// Report what serializing the built value subtree rooted at `root` to `format`
-/// would lose. The value builder has no source envelopes, so `lossless` in
-/// `options` is ignored here (it only affects `fig_document_diagnose`).
-/// Borrowing rules match `fig_document_diagnose`.
+/// Copy the warning at `index` from the most recent `fig_document_diagnose` on
+/// `doc` into caller-allocated `*out` (set `out->size` first). An out-of-range
+/// `index`, or a call with no prior diagnose, is `invalid_argument`. The
+/// `path`/`note` pointers written borrow `doc` (see `fig_document_diagnose`).
+pub export fn fig_document_warning(doc: ?*FigDocument, index: usize, out: ?*FigWarning) FigStatus {
+    const o = out orelse return .invalid_argument;
+    const public_doc = doc orelse return .invalid_argument;
+    const handle: *DocumentHandle = @ptrCast(@alignCast(public_doc));
+    if (index >= handle.diag_warnings.len) return .invalid_argument;
+    writeWarning(o, handle.diag_warnings[index]);
+    return .ok;
+}
+
+/// Report how many events serializing the built value subtree rooted at `root` to
+/// `format` would produce. The value builder has no source envelopes, so
+/// `lossless` in `options` is ignored here (it only affects
+/// `fig_document_diagnose`). Retention rules match `fig_document_diagnose`.
 pub export fn fig_value_diagnose(
     value: ?*FigValue,
     root: FigNodeId,
     format: c_int,
     options: ?*const FigSerializeOptions,
-    out_warnings: ?*[*c]FigWarning,
     out_count: ?*usize,
 ) FigStatus {
-    const ow = out_warnings orelse return .invalid_argument;
     const oc = out_count orelse return .invalid_argument;
-    // Clear up front so an early error return never leaves a stale array exposed
+    // Clear up front so an early error return never leaves a stale count exposed
     // (see `fig_document_diagnose`).
-    ow.* = null;
     oc.* = 0;
     const handle = valueFrom(value) orelse return .invalid_argument;
     const fmt = serializeFormatOf(format) orelse return .unsupported_format;
     if (root >= handle.builder.nodes.items.len) return .invalid_argument;
 
     _ = handle.diag_arena.reset(.retain_capacity);
+    handle.diag_warnings = &.{};
     const arena = handle.diag_arena.allocator();
     const ast = handle.builder.view(root) catch return .out_of_memory; // borrows the builder; never deinit'd
     const warnings = Diagnostics.analyze(arena, &ast, root, fmt, diagnoseOptionsOf(options)) catch return .out_of_memory;
-    return emitWarnings(arena, warnings, ow, oc);
+    handle.diag_warnings = warnings;
+    oc.* = warnings.len;
+    return .ok;
+}
+
+/// Copy the warning at `index` from the most recent `fig_value_diagnose` on
+/// `value` into caller-allocated `*out` (set `out->size` first). Out-of-range
+/// `index` or no prior diagnose is `invalid_argument`.
+pub export fn fig_value_warning(value: ?*FigValue, index: usize, out: ?*FigWarning) FigStatus {
+    const o = out orelse return .invalid_argument;
+    const handle = valueFrom(value) orelse return .invalid_argument;
+    if (index >= handle.diag_warnings.len) return .invalid_argument;
+    writeWarning(o, handle.diag_warnings[index]);
+    return .ok;
 }
 
 test "traversal over a parsed mapping" {
@@ -1921,22 +1998,27 @@ test "fig_document_diagnose reports a dropped null for TOML" {
     try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &out_doc));
     defer fig_document_destroy(out_doc);
 
-    var warns: [*c]FigWarning = undefined;
     var count: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &warns, &count));
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &count));
     try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqual(@intFromEnum(FigWarningCode.value_dropped), warns[0].code);
-    try std.testing.expectEqual(@intFromEnum(FigWarningCause.format_limitation), warns[0].cause);
-    try std.testing.expectEqualStrings("a", warns[0].path[0..warns[0].path_len]);
+    var w: FigWarning = undefined;
+    w.size = @sizeOf(FigWarning);
+    try std.testing.expectEqual(FigStatus.ok, fig_document_warning(out_doc, 0, &w));
+    try std.testing.expectEqual(@intFromEnum(FigWarningCode.value_dropped), w.code);
+    try std.testing.expectEqual(@intFromEnum(FigWarningCause.format_limitation), w.cause);
+    try std.testing.expectEqualStrings("a", w.path[0..w.path_len]);
+    // An out-of-range index is rejected.
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_document_warning(out_doc, 1, &w));
 
     // Lossless preserves the null → no warnings.
     var opts: FigSerializeOptions = .{ .lossless = 1 };
-    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), &opts, &warns, &count));
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), &opts, &count));
     try std.testing.expectEqual(@as(usize, 0), count);
-    try std.testing.expectEqual(@as([*c]FigWarning, null), warns);
+    // With nothing reported, even index 0 is out of range.
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_document_warning(out_doc, 0, &w));
 
     // A representable target loses nothing.
-    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.json), null, &warns, &count));
+    try std.testing.expectEqual(FigStatus.ok, fig_document_diagnose(out_doc, @intFromEnum(FigFormat.json), null, &count));
     try std.testing.expectEqual(@as(usize, 0), count);
 }
 
@@ -1949,18 +2031,109 @@ test "fig_value_diagnose reports a degraded datetime" {
     var dt: FigNodeId = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_value_extended(v, @intFromEnum(FigExtKind.offset_datetime), ts.ptr, ts.len, &dt));
 
-    var warns: [*c]FigWarning = undefined;
     var count: usize = undefined;
-    try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.json), null, &warns, &count));
+    try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.json), null, &count));
     try std.testing.expectEqual(@as(usize, 1), count);
-    try std.testing.expectEqual(@intFromEnum(FigWarningCode.type_degraded), warns[0].code);
-    try std.testing.expectEqualStrings("string", warns[0].note[0..warns[0].note_len]);
+    var w: FigWarning = undefined;
+    w.size = @sizeOf(FigWarning);
+    try std.testing.expectEqual(FigStatus.ok, fig_value_warning(v, 0, &w));
+    try std.testing.expectEqual(@intFromEnum(FigWarningCode.type_degraded), w.code);
+    try std.testing.expectEqualStrings("string", w.note[0..w.note_len]);
 
     // TOML holds datetimes natively → no warning.
     if (comptime build_options.lang_toml) {
-        try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.toml), null, &warns, &count));
+        try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.toml), null, &count));
         try std.testing.expectEqual(@as(usize, 0), count);
     }
+}
+
+test "fig_value_warning honors a truncated (size-gated) FigWarning" {
+    var v: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&v));
+    defer fig_value_destroy(v);
+
+    const ts = "1979-05-27T07:32:00Z";
+    var dt: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_extended(v, @intFromEnum(FigExtKind.offset_datetime), ts.ptr, ts.len, &dt));
+
+    var count: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_diagnose(v, dt, @intFromEnum(FigFormat.json), null, &count));
+    try std.testing.expectEqual(@as(usize, 1), count);
+
+    // A caller whose layout stops after `cause` (an older/smaller struct) gets
+    // code+cause but not the path/note fields, which keep their prior contents.
+    var w: FigWarning = undefined;
+    w.size = @offsetOf(FigWarning, "cause") + @sizeOf(c_int);
+    w.path = null;
+    w.path_len = 12345;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_warning(v, 0, &w));
+    try std.testing.expectEqual(@intFromEnum(FigWarningCode.type_degraded), w.code);
+    try std.testing.expectEqual(@as(usize, 12345), w.path_len); // beyond `size`: untouched
+}
+
+test "fig_parse_ex fills FigError on a parse failure" {
+    const bad = "{ \"a\":"; // truncated JSON object
+
+    // No out_err: behaves exactly like fig_parse.
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(
+        FigStatus.parse_error,
+        fig_parse_ex(bad.ptr, bad.len, @intFromEnum(FigFormat.json), &out_doc, null),
+    );
+    try std.testing.expectEqual(@as(?*FigDocument, null), out_doc);
+
+    // With out_err: code mirrors the status, a non-empty NUL-terminated message
+    // is written, and the (unimplemented) offset fields are 0.
+    var err: FigError = undefined;
+    err.size = @sizeOf(FigError);
+    try std.testing.expectEqual(
+        FigStatus.parse_error,
+        fig_parse_ex(bad.ptr, bad.len, @intFromEnum(FigFormat.json), &out_doc, &err),
+    );
+    try std.testing.expectEqual(@intFromEnum(FigStatus.parse_error), err.code);
+    try std.testing.expect(err.message_len > 0);
+    try std.testing.expectEqual(@as(u8, 0), err.message[err.message_len]); // NUL-terminated
+    try std.testing.expectEqual(@as(usize, 0), err.byte_offset);
+    try std.testing.expectEqual(@as(u32, 0), err.line);
+
+    // An unsupported format reports through the same struct.
+    err.size = @sizeOf(FigError);
+    try std.testing.expectEqual(
+        FigStatus.unsupported_format,
+        fig_parse_ex(bad.ptr, bad.len, 0xBEEF, &out_doc, &err),
+    );
+    try std.testing.expectEqual(@intFromEnum(FigStatus.unsupported_format), err.code);
+}
+
+test "fig_parse_ex honors a truncated (size-gated) FigError" {
+    const bad = "[1,";
+
+    // A caller whose layout stops before `message` gets `code` filled but the
+    // message fields left as they were — no out-of-bounds write into a struct
+    // that does not declare them.
+    var err: FigError = undefined;
+    err.size = @offsetOf(FigError, "byte_offset"); // covers size+code only
+    err.message_len = 999;
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(
+        FigStatus.parse_error,
+        fig_parse_ex(bad.ptr, bad.len, @intFromEnum(FigFormat.json), &out_doc, &err),
+    );
+    try std.testing.expectEqual(@intFromEnum(FigStatus.parse_error), err.code);
+    try std.testing.expectEqual(@as(usize, 999), err.message_len); // beyond `size`: untouched
+}
+
+test "fig_parse_ex leaves out_doc null and succeeds on a valid parse" {
+    const src = "{\"a\":1}";
+    var out_doc: ?*FigDocument = null;
+    var err: FigError = undefined;
+    err.size = @sizeOf(FigError);
+    try std.testing.expectEqual(
+        FigStatus.ok,
+        fig_parse_ex(src.ptr, src.len, @intFromEnum(FigFormat.json), &out_doc, &err),
+    );
+    defer fig_document_destroy(out_doc);
+    try std.testing.expect(out_doc != null);
 }
 
 test "a compiled-out format is unsupported in serialize and diagnose alike" {
@@ -1981,15 +2154,13 @@ test "a compiled-out format is unsupported in serialize and diagnose alike" {
         fig_document_serialize(out_doc, @intFromEnum(FigFormat.toml), null, &ptr, &len),
     );
 
-    // ...and diagnose agrees, instead of silently accepting it. Out-params are
+    // ...and diagnose agrees, instead of silently accepting it. The count is
     // cleared on the error path (pre-initialized up front).
-    var warns: [*c]FigWarning = undefined;
     var count: usize = 999;
     try std.testing.expectEqual(
         FigStatus.unsupported_format,
-        fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &warns, &count),
+        fig_document_diagnose(out_doc, @intFromEnum(FigFormat.toml), null, &count),
     );
-    try std.testing.expectEqual(@as([*c]FigWarning, null), warns);
     try std.testing.expectEqual(@as(usize, 0), count);
 
     // Capabilities report the same verdict: nothing for a compiled-out format.

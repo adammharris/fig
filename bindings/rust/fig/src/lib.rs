@@ -2,6 +2,7 @@
 // within the crate's own tests and examples.
 extern crate self as fig;
 
+mod diagnostics;
 mod editor;
 mod embed;
 mod error;
@@ -18,9 +19,10 @@ mod ser;
 use std::os::raw::c_int;
 use std::ptr::NonNull;
 
+pub use diagnostics::{Warning, WarningCause, WarningCode};
 pub use editor::{Editor, Segment};
 pub use embed::{Embed, EmbedType};
-pub use error::Error;
+pub use error::{Error, ParseError};
 pub use value::{ExtKind, Value};
 
 #[cfg(feature = "derive")]
@@ -88,23 +90,43 @@ pub struct SerializeOptions {
     pub pretty: bool,
     /// Spaces per indentation level when `pretty` is set (JSON only).
     pub indent: u8,
+    /// Drop comments carried on the value instead of emitting them. Default
+    /// `false` (preserve them where the target format allows).
+    pub strip_comments: bool,
+    /// [`Document::serialize`] only: preserve values the target format cannot
+    /// represent natively (a null in TOML, a TOML datetime in JSON, …) through a
+    /// `$fig` envelope, and decode any such envelope found in the source. Default
+    /// `false` (lossy — an unrepresentable value is an [`Error::UnsupportedFormat`]).
+    /// Ignored by [`Value::serialize_with`] (a built value has no source envelopes).
+    pub lossless: bool,
 }
 
 impl Default for SerializeOptions {
     fn default() -> Self {
-        Self { pretty: true, indent: 2 }
+        Self { pretty: true, indent: 2, strip_comments: false, lossless: false }
     }
 }
 
 impl SerializeOptions {
     /// Compact single-line output with no insignificant whitespace.
     pub fn compact() -> Self {
-        Self { pretty: false, indent: 0 }
+        Self { pretty: false, ..Self::default() }
     }
 
     /// Pretty-printed output with the given number of spaces per indent level.
     pub fn pretty(indent: u8) -> Self {
-        Self { pretty: true, indent }
+        Self { pretty: true, indent, ..Self::default() }
+    }
+
+    /// This style with `lossless` enabled (see the field). Builder-style so
+    /// `SerializeOptions::default().lossless()` reads naturally.
+    pub fn lossless(self) -> Self {
+        Self { lossless: true, ..self }
+    }
+
+    /// This style with comments stripped (see `strip_comments`).
+    pub fn strip_comments(self) -> Self {
+        Self { strip_comments: true, ..self }
     }
 }
 
@@ -114,7 +136,63 @@ impl From<SerializeOptions> for ffi::FigSerializeOptions {
             size: std::mem::size_of::<ffi::FigSerializeOptions>() as u32,
             pretty: u8::from(o.pretty),
             indent: o.indent,
+            strip_comments: u8::from(o.strip_comments),
+            lossless: u8::from(o.lossless),
         }
+    }
+}
+
+/// The linked fig library's version, from [`version`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Version {
+    pub major: u8,
+    pub minor: u8,
+    pub patch: u8,
+}
+
+/// The version of the linked fig core, decoded from the packed
+/// `(major << 16) | (minor << 8) | patch` that `fig_version` returns.
+pub fn version() -> Version {
+    let packed = unsafe { ffi::fig_version() };
+    Version {
+        major: (packed >> 16) as u8,
+        minor: (packed >> 8) as u8,
+        patch: packed as u8,
+    }
+}
+
+/// The linked fig core's version as a `"major.minor.patch"` string.
+pub fn version_string() -> &'static str {
+    // Safety: `fig_version_string` returns a static NUL-terminated ASCII string
+    // owned by the library, valid for the whole program.
+    let ptr = unsafe { ffi::fig_version_string() };
+    unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_str()
+        .unwrap_or("")
+}
+
+/// What this build of the fig core can do with a format. Reflects both inherent
+/// support (XML is reader-only; TOML/ZON parse and serialize but are not
+/// editable) and build-time gating (a format compiled out reports all-false).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Capabilities {
+    /// [`Document::parse`] accepts this format.
+    pub read: bool,
+    /// The editor/embed APIs accept this format.
+    pub edit: bool,
+    /// The serializers can write this format.
+    pub serialize: bool,
+}
+
+/// Query what this build can do with `format` (read/edit/serialize). Lets a host
+/// pick a working format up front instead of probing via `UnsupportedFormat`.
+pub fn capabilities(format: Format) -> Capabilities {
+    let ffi_format: ffi::FigFormat = format.into();
+    let bits = unsafe { ffi::fig_format_capabilities(ffi_format as c_int) };
+    Capabilities {
+        read: bits & (1 << 0) != 0,
+        edit: bits & (1 << 1) != 0,
+        serialize: bits & (1 << 2) != 0,
     }
 }
 
@@ -128,10 +206,19 @@ impl Document {
         let mut raw = std::ptr::null_mut();
         let ffi_format: ffi::FigFormat = format.into();
 
-        let status =
-            unsafe { ffi::fig_parse(input.as_ptr(), input.len(), ffi_format as i32, &mut raw) };
-
-        Error::from_status(status)?;
+        // `fig_parse_ex` fills `err` on failure; on a parse error we project its
+        // message/location into `Error::Parse`. Other statuses fold through
+        // `from_status` as usual (the struct is meaningful only on failure).
+        let mut err = ffi::FigError::new();
+        let status = unsafe {
+            ffi::fig_parse_ex(input.as_ptr(), input.len(), ffi_format as i32, &mut raw, &mut err)
+        };
+        if status != ffi::FigStatus(ffi::FigStatus::OK) {
+            if status == ffi::FigStatus(ffi::FigStatus::PARSE_ERROR) {
+                return Err(Error::Parse(crate::error::ParseError::from_ffi(&err)));
+            }
+            Error::from_status(status)?;
+        }
 
         let raw = NonNull::new(raw).ok_or(Error::Internal)?;
         Ok(Self { raw })
@@ -304,6 +391,67 @@ impl Document {
     }
 }
 
+/// Cross-format conversion + serialization diagnostics over the parsed document.
+impl Document {
+    /// Render the whole document to `format` with the default output style — the
+    /// cross-format conversion primitive (e.g. parse YAML, emit JSON). Unlike
+    /// `to_value().serialize()`, this preserves comments carried on the source
+    /// where the target allows, and collapses YAML's reference layer when leaving
+    /// YAML. A value the target cannot represent is an [`Error::UnsupportedFormat`]
+    /// unless `lossless` is set (see [`Document::serialize_with`]).
+    pub fn serialize(&self, format: Format) -> Result<String, Error> {
+        self.serialize_with(format, SerializeOptions::default())
+    }
+
+    /// As [`Document::serialize`], with `options` controlling output style,
+    /// comment stripping, and lossless `$fig`-envelope round-tripping.
+    pub fn serialize_with(&self, format: Format, options: SerializeOptions) -> Result<String, Error> {
+        let ffi_format: ffi::FigFormat = format.into();
+        let ffi_options: ffi::FigSerializeOptions = options.into();
+        let mut ptr_out: *const u8 = std::ptr::null();
+        let mut len: usize = 0;
+        Error::from_status(unsafe {
+            ffi::fig_document_serialize(
+                self.raw.as_ptr(),
+                ffi_format as c_int,
+                &ffi_options,
+                &mut ptr_out,
+                &mut len,
+            )
+        })?;
+        // Safety: on success the ABI guarantees `len` bytes at `ptr_out`, owned by
+        // the handle and valid until the next serialize/destroy. Copy out now.
+        let bytes = if len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(ptr_out, len) }
+        };
+        Ok(std::str::from_utf8(bytes).map_err(|_| Error::Utf8)?.to_owned())
+    }
+
+    /// Report what serializing the whole document to `format` would silently lose
+    /// (comments dropped/degraded, values dropped/degraded), using the same
+    /// pipeline [`Document::serialize_with`] prints from. Returns one [`Warning`]
+    /// per lossy event (empty if nothing is lost).
+    pub fn diagnose(&self, format: Format, options: SerializeOptions) -> Result<Vec<Warning>, Error> {
+        let ffi_format: ffi::FigFormat = format.into();
+        let ffi_options: ffi::FigSerializeOptions = options.into();
+        let mut count: usize = 0;
+        Error::from_status(unsafe {
+            ffi::fig_document_diagnose(self.raw.as_ptr(), ffi_format as c_int, &ffi_options, &mut count)
+        })?;
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut w = ffi::FigWarning::new();
+            Error::from_status(unsafe { ffi::fig_document_warning(self.raw.as_ptr(), i, &mut w) })?;
+            // Safety: on `OK`, `w` is filled with a warning whose path/note point
+            // into the handle's arena, valid until the next diagnose/destroy.
+            out.push(unsafe { Warning::from_ffi(&w) });
+        }
+        Ok(out)
+    }
+}
+
 impl Drop for Document {
     fn drop(&mut self) {
         unsafe {
@@ -329,7 +477,59 @@ mod tests {
     #[test]
     fn parse_error_is_reported() {
         let err = Document::parse(br#"{"name":"fig""#, Format::Json).unwrap_err();
-        assert!(matches!(err, Error::Parse));
+        let Error::Parse(detail) = &err else {
+            panic!("expected Error::Parse, got {err:?}");
+        };
+        // The core surfaces a non-empty message (its error name). Offsets are not
+        // yet plumbed, so the location fields are None for now.
+        assert!(!detail.message.is_empty());
+        assert_eq!(detail.byte_offset, None);
+    }
+
+    #[test]
+    fn version_and_capabilities() {
+        use super::{capabilities, version, version_string, Format};
+        let v = version();
+        // The packed version round-trips through the string form.
+        assert_eq!(version_string(), format!("{}.{}.{}", v.major, v.minor, v.patch));
+        // JSON is always fully supported in any build.
+        let json = capabilities(Format::Json);
+        assert!(json.read && json.edit && json.serialize);
+    }
+
+    #[test]
+    fn document_serialize_converts_cross_format() {
+        // YAML in, JSON out — the conversion primitive, not a value rebuild.
+        let doc = Document::parse(b"name: fig\nnums:\n- 1\n- 2\n", Format::Yaml).unwrap();
+        assert_eq!(
+            doc.serialize(Format::Json).unwrap(),
+            "{\n  \"name\": \"fig\",\n  \"nums\": [\n    1,\n    2\n  ]\n}\n",
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "toml")]
+    fn document_diagnose_reports_dropped_null() {
+        use super::{SerializeOptions, WarningCause, WarningCode};
+        let doc = Document::parse(b"a: null\nb: 1\n", Format::Yaml).unwrap();
+        // A null can't survive in TOML → one value-dropped warning at path "a".
+        let warns = doc.diagnose(Format::Toml, SerializeOptions::default()).unwrap();
+        assert_eq!(warns.len(), 1);
+        assert_eq!(warns[0].code, WarningCode::ValueDropped);
+        assert_eq!(warns[0].cause, WarningCause::FormatLimitation);
+        assert_eq!(warns[0].path, "a");
+        // Lossless preserves the null → nothing lost.
+        let none = doc
+            .diagnose(Format::Toml, SerializeOptions::default().lossless())
+            .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn parse_error_message_is_surfaced_in_display() {
+        let err = Document::parse(br#"{"name":"fig""#, Format::Json).unwrap_err();
+        // Display includes the core's message after the generic prefix.
+        assert!(err.to_string().starts_with("failed to parse input: "));
     }
 
     #[test]

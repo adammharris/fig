@@ -27,6 +27,15 @@ export interface SerializeOptions {
   pretty?: boolean;
   /** Spaces per indentation level when `pretty` (JSON only). Defaults to 2. */
   indent?: number;
+  /** Drop comments carried on the value instead of emitting them. Defaults to
+   *  `false` (preserve where the target format allows). */
+  stripComments?: boolean;
+  /** `Document.serialize` only: preserve values the target cannot represent
+   *  natively (a null in TOML, a TOML datetime in JSON, …) through a `$fig`
+   *  envelope, and decode any such envelope in the source. Defaults to `false`
+   *  (lossy — an unrepresentable value throws `UnsupportedFormat`). Ignored by
+   *  the value `serialize` (a built value has no source envelopes). */
+  lossless?: boolean;
 }
 
 /** The kind of an AST node reached during read-path traversal. */
@@ -43,7 +52,8 @@ export enum NodeKind {
   Alias = 8,
 }
 
-/** A format-specific scalar kind (TOML datetimes, ZON enum/char literals). */
+/** A format-specific scalar kind (TOML datetimes, ZON enum/char literals, JSON5
+ *  non-finite numbers). */
 export enum ExtKind {
   OffsetDateTime = 0,
   LocalDateTime = 1,
@@ -51,6 +61,40 @@ export enum ExtKind {
   LocalTime = 3,
   EnumLiteral = 4,
   CharLiteral = 5,
+  /** A non-finite JSON5 number (`Infinity`/`-Infinity`/`NaN`). */
+  NumberSpecial = 6,
+}
+
+/** What kind of loss a {@link Warning} describes. Mirrors `FigWarningCode`. */
+export enum WarningCode {
+  /** A carried comment is not emitted at all. */
+  CommentDropped = 0,
+  /** A block comment is rendered as a run of line comments. */
+  CommentStyleDegraded = 1,
+  /** A node is removed entirely (the target cannot represent it even degraded). */
+  ValueDropped = 2,
+  /** An extended/non-finite value is rendered as a poorer type. */
+  TypeDegraded = 3,
+}
+
+/** Why a {@link Warning}'s loss happens. Mirrors `FigWarningCause`. */
+export enum WarningCause {
+  /** The target format inherently cannot represent it. */
+  FormatLimitation = 0,
+  /** A caller option forced it (e.g. `stripComments`). */
+  ExplicitOption = 1,
+}
+
+/** One lossy event reported by `Document.diagnose` / value `diagnose`. `code`
+ *  and `cause` carry the raw ABI value; a value not listed in the enums above is
+ *  a forward-compatible addition from a newer core (compare numerically). */
+export interface Warning {
+  code: WarningCode;
+  cause: WarningCause;
+  /** Dotted / `[i]` location; empty for the document root. */
+  path: string;
+  /** Degraded-to type for {@link WarningCode.TypeDegraded}, else empty. */
+  note: string;
 }
 
 /** An embedded region within a host file (e.g. markdown frontmatter). */
@@ -69,14 +113,38 @@ const STATUS_MESSAGE: Record<number, string> = {
   [Status.InternalError]: "internal error",
 };
 
-/** An error carrying the originating fig {@link Status} code. */
+/** Extra detail from a parse failure (`fig_parse_ex` / `FigError`). `byteOffset`/
+ *  `line`/`column` are present only when the core reports them (not yet — offset
+ *  plumbing is a planned core follow-up). */
+export interface ParseDetail {
+  message?: string | undefined;
+  byteOffset?: number | undefined;
+  line?: number | undefined;
+  column?: number | undefined;
+}
+
+/** An error carrying the originating fig {@link Status} code, plus (for parse
+ *  failures) the core's message and source location when available. */
 export class FigError extends Error {
   readonly status: Status;
-  constructor(status: Status, op?: string) {
-    const detail = STATUS_MESSAGE[status] ?? `status ${status}`;
-    super(op ? `${op}: ${detail}` : detail);
+  readonly byteOffset?: number | undefined;
+  readonly line?: number | undefined;
+  readonly column?: number | undefined;
+  constructor(status: Status, op?: string, detail?: ParseDetail) {
+    const base = detail?.message && detail.message.length > 0
+      ? detail.message
+      : (STATUS_MESSAGE[status] ?? `status ${status}`);
+    const loc = detail?.line != null && detail?.column != null
+      ? ` (line ${detail.line}, column ${detail.column})`
+      : detail?.byteOffset != null
+        ? ` (byte offset ${detail.byteOffset})`
+        : "";
+    super((op ? `${op}: ${base}` : base) + loc);
     this.name = "FigError";
     this.status = status;
+    this.byteOffset = detail?.byteOffset;
+    this.line = detail?.line;
+    this.column = detail?.column;
   }
 }
 

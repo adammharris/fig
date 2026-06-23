@@ -10,6 +10,7 @@
 // The module imports nothing and exports its memory, so it instantiates
 // synchronously and works identically under Node and in the browser.
 import { WASM_BASE64 } from "./wasm-bytes.ts";
+import type { SerializeOptions } from "./types.ts";
 
 /** A fig C ABI status code. `Ok` is 0; everything else is a failure. */
 export enum Status {
@@ -29,8 +30,18 @@ interface Exports {
   fig_alloc(len: number): number;
   fig_free(ptr: number, len: number): void;
 
+  fig_version(): number;
+  fig_version_string(): number;
+  fig_format_capabilities(format: number): number;
+
   fig_parse(input: number, input_len: number, format: number, out_doc: number): number;
+  fig_parse_ex(input: number, input_len: number, format: number, out_doc: number, out_err: number): number;
   fig_document_destroy(doc: number): void;
+  fig_document_serialize(doc: number, format: number, options: number, out_ptr: number, out_len: number): number;
+  fig_document_diagnose(doc: number, format: number, options: number, out_count: number): number;
+  fig_document_warning(doc: number, index: number, out: number): number;
+  fig_value_diagnose(value: number, root: number, format: number, options: number, out_count: number): number;
+  fig_value_warning(value: number, index: number, out: number): number;
   fig_document_root(doc: number): number;
   fig_node_kind(doc: number, node: number): number;
   fig_node_first_child(doc: number, node: number): number;
@@ -233,6 +244,88 @@ export function readOutSlice(scratch: number): string {
 
 export function readU32(ptr: number): number {
   return dv().getUint32(ptr, true);
+}
+
+/** Read a NUL-terminated C string from linear memory (e.g. fig_version_string). */
+export function readCString(ptr: number): string {
+  if (ptr === 0) return "";
+  const mem = u8();
+  let end = ptr;
+  while (mem[end] !== 0) end++;
+  return decoder.decode(mem.subarray(ptr, end));
+}
+
+// FigSerializeOptions { u32 size; u8 pretty; u8 indent; u8 strip_comments; u8
+// lossless; } — 8 bytes, no padding. `size` is the version tag (its byte size,
+// so the core reads every field we set). All four flag bytes are written
+// explicitly; passing NULL (ptr 0) instead would select all defaults.
+const SERIALIZE_OPTIONS_SIZE = 8;
+export function encodeOptions(frame: Frame, options?: SerializeOptions): number {
+  const pretty = options?.pretty === false ? 0 : 1;
+  const indent = options?.indent ?? 2;
+  const strip = options?.stripComments ? 1 : 0;
+  const lossless = options?.lossless ? 1 : 0;
+  return frame.bytes(
+    new Uint8Array([SERIALIZE_OPTIONS_SIZE, 0, 0, 0, pretty, indent, strip, lossless]),
+  );
+}
+
+// FigError on wasm32: u32 size; i32 code; usize byte_offset; u32 line; u32
+// column; usize message_len; char message[256]. usize is 4 bytes here, so the
+// message starts at offset 24 and the struct is 280 bytes.
+export const FIG_ERROR_SIZE = 280;
+/** Allocate a FigError, write its `size` tag, and return the pointer. */
+export function allocFigError(frame: Frame): number {
+  const ptr = frame.alloc(FIG_ERROR_SIZE);
+  dv().setUint32(ptr, FIG_ERROR_SIZE, true);
+  return ptr;
+}
+/** Decode a filled FigError. `byte_offset`/`line`/`column` of 0 mean "unknown"
+ *  and surface as `undefined`. */
+export function readFigError(ptr: number): {
+  code: number;
+  message: string;
+  byteOffset?: number | undefined;
+  line?: number | undefined;
+  column?: number | undefined;
+} {
+  const view = dv();
+  const code = view.getInt32(ptr + 4, true);
+  const byteOffset = view.getUint32(ptr + 8, true);
+  const line = view.getUint32(ptr + 12, true);
+  const column = view.getUint32(ptr + 16, true);
+  const messageLen = view.getUint32(ptr + 20, true);
+  const message = messageLen === 0 ? "" : decoder.decode(u8().subarray(ptr + 24, ptr + 24 + messageLen));
+  return {
+    code,
+    message,
+    byteOffset: byteOffset !== 0 ? byteOffset : undefined,
+    line: line !== 0 ? line : undefined,
+    column: column !== 0 ? column : undefined,
+  };
+}
+
+// FigWarning on wasm32: u32 size; i32 code; i32 cause; ptr path; usize path_len;
+// ptr note; usize note_len — 28 bytes (all 4-byte fields).
+export const FIG_WARNING_SIZE = 28;
+/** Allocate a FigWarning and write its `size` tag; reusable across a diagnose
+ *  loop (rewrite the tag each iteration since the call overwrites the body). */
+export function writeWarningSize(ptr: number): void {
+  dv().setUint32(ptr, FIG_WARNING_SIZE, true);
+}
+/** Decode a filled FigWarning, copying the borrowed path/note slices out now
+ *  (they live in the handle's arena until the next diagnose / destroy). */
+export function readFigWarning(ptr: number): { code: number; cause: number; path: string; note: string } {
+  const view = dv();
+  const code = view.getInt32(ptr + 4, true);
+  const cause = view.getInt32(ptr + 8, true);
+  const pathPtr = view.getUint32(ptr + 12, true);
+  const pathLen = view.getUint32(ptr + 16, true);
+  const notePtr = view.getUint32(ptr + 20, true);
+  const noteLen = view.getUint32(ptr + 24, true);
+  const path = pathLen === 0 ? "" : decoder.decode(u8().subarray(pathPtr, pathPtr + pathLen));
+  const note = noteLen === 0 ? "" : decoder.decode(u8().subarray(notePtr, notePtr + noteLen));
+  return { code, cause, path, note };
 }
 
 export { exports as fig };

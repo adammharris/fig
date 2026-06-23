@@ -6,8 +6,26 @@
 // and `serialize` accepts either form. Like the Rust binding, the tree is built
 // through the C value API and rendered by fig's own serializer — this file
 // emits no JSON/YAML/TOML/ZON text itself.
-import { check, ExtKind, Format, type SerializeOptions } from "./types.ts";
-import { fig, Frame, encodeNodeIds, encodeEntries, readOutSlice } from "./ffi.ts";
+import {
+  check,
+  ExtKind,
+  Format,
+  WarningCause,
+  WarningCode,
+  type SerializeOptions,
+  type Warning,
+} from "./types.ts";
+import {
+  encodeEntries,
+  encodeNodeIds,
+  encodeOptions,
+  fig,
+  FIG_WARNING_SIZE,
+  Frame,
+  readFigWarning,
+  readOutSlice,
+  writeWarningSize,
+} from "./ffi.ts";
 
 const I64_MIN = -(2n ** 63n);
 const I64_MAX = 2n ** 63n - 1n;
@@ -181,13 +199,7 @@ export function serialize(value: Value | JsValue, format: Format, options?: Seri
     try {
       const scratch = frame.alloc(8); // out_id / out_ptr+out_len
       const root = build(handle, node, frame, scratch);
-      // FigSerializeOptions { u32 size; u8 pretty; u8 indent; } — 8 bytes with
-      // tail padding. `size` is the struct's version tag (must be its byte size
-      // so the core knows which fields we set); NULL (ptr 0) would instead pick
-      // all defaults. Little-endian: size=8 -> [8,0,0,0], then pretty, indent, pad.
-      const pretty = options?.pretty === false ? 0 : 1;
-      const indent = options?.indent ?? 2;
-      const optsPtr = frame.bytes(new Uint8Array([8, 0, 0, 0, pretty, indent, 0, 0]));
+      const optsPtr = encodeOptions(frame, options);
       check(fig.fig_value_serialize_opts(handle, root, format, optsPtr, scratch, scratch + 4), "fig_value_serialize_opts");
       return readOutSlice(scratch);
     } finally {
@@ -204,6 +216,41 @@ export function serialize(value: Value | JsValue, format: Format, options?: Seri
 export function valueText(value: Value | JsValue, format: Format, options?: SerializeOptions): string {
   const s = serialize(value, format, options);
   return s.endsWith("\n") ? s.slice(0, -1) : s;
+}
+
+/** Report what serializing `value` to `format` would silently lose (values/
+ *  comments dropped or degraded). The built value has no source envelopes, so
+ *  `options.lossless` is ignored. Returns one {@link Warning} per lossy event
+ *  (empty if nothing is lost). The build/serialize mirror of {@link serialize}. */
+export function diagnose(value: Value | JsValue, format: Format, options?: SerializeOptions): Warning[] {
+  const node: Value = isValue(value) ? value : fromJS(value as JsValue);
+  const frame = new Frame();
+  const outValue = frame.alloc(4);
+  try {
+    check(fig.fig_value_create(outValue), "fig_value_create");
+    const handle = readU32(outValue);
+    try {
+      const scratch = frame.alloc(8);
+      const root = build(handle, node, frame, scratch);
+      const optsPtr = encodeOptions(frame, options);
+      const countPtr = frame.alloc(4);
+      check(fig.fig_value_diagnose(handle, root, format, optsPtr, countPtr), "fig_value_diagnose");
+      const count = readU32(countPtr);
+      const warnPtr = frame.alloc(FIG_WARNING_SIZE);
+      const out: Warning[] = [];
+      for (let i = 0; i < count; i++) {
+        writeWarningSize(warnPtr);
+        check(fig.fig_value_warning(handle, i, warnPtr), "fig_value_warning");
+        const w = readFigWarning(warnPtr);
+        out.push({ code: w.code as WarningCode, cause: w.cause as WarningCause, path: w.path, note: w.note });
+      }
+      return out;
+    } finally {
+      fig.fig_value_destroy(handle);
+    }
+  } finally {
+    frame.dispose();
+  }
 }
 
 function readU32(ptr: number): number {

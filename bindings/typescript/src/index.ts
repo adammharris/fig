@@ -3,12 +3,25 @@
 //
 // The module loads synchronously and imports nothing host-specific, so it works
 // identically in Node and the browser.
-export { Format, NodeKind, ExtKind, EmbedType, Status, FigError, type SerializeOptions } from "./types.ts";
+export {
+  Format,
+  NodeKind,
+  ExtKind,
+  EmbedType,
+  Status,
+  FigError,
+  WarningCode,
+  WarningCause,
+  type SerializeOptions,
+  type Warning,
+  type ParseDetail,
+} from "./types.ts";
 export { Document } from "./document.ts";
 export { Editor } from "./editor.ts";
 export { Embed, type Region, type Span } from "./embed.ts";
 export { type Segment } from "./edit-ops.ts";
-export { V, fromJS, toJS, serialize, valueText, type Value, type JsValue } from "./value.ts";
+export { V, fromJS, toJS, serialize, valueText, diagnose, type Value, type JsValue } from "./value.ts";
+export { version, versionString, capabilities, type Version, type Capabilities } from "./meta.ts";
 
 import { Document } from "./document.ts";
 import { serialize as serializeValue } from "./value.ts";
