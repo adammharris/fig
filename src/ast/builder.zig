@@ -296,6 +296,7 @@ fn link(self: *Builder, ids: []const Node.Id) void {
 }
 
 test "Builder constructs an AST that serializes" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const testing = std.testing;
     var b = Builder.init(testing.allocator);
     defer b.deinit();
@@ -345,6 +346,7 @@ test "Builder constructs an AST that serializes" {
 }
 
 test "strip_comments drops carried comments across formats" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var b = Builder.init(std.testing.allocator);
     defer b.deinit();
     const v = try b.addString("fig");
@@ -375,6 +377,7 @@ test "strip_comments drops carried comments across formats" {
 }
 
 test "Builder incremental comment helpers append and serialize" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var b = Builder.init(std.testing.allocator);
     defer b.deinit();
 

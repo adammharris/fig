@@ -40,6 +40,9 @@ const CliActionOptions = union(CliAction) {
         key: bool = false,
         requested_help: bool = false,
         format: Format,
+        /// Set when the format could not be inferred from the file extension:
+        /// the handler then sniffs the file's contents with `Language.detect`.
+        detect: bool = false,
         /// When set, `file` is a host document (e.g. markdown) and edits apply
         /// to the embedded config of this archetype, spliced back in place.
         embed: ?fig.Embed.Type = null,
@@ -50,6 +53,14 @@ const CliActionOptions = union(CliAction) {
         from: Format,
         to: Format,
         requested_help: bool = false,
+        /// Set when `from` could not be inferred from the file extension and no
+        /// `--input` was given: the handler sniffs the contents with
+        /// `Language.detect`. When `to` was also left to default (`output_explicit`
+        /// is false), the detected format flows through to the output too.
+        detect: bool = false,
+        /// Whether `--output`/`-o` was given. When false and `detect` fires, the
+        /// detected input format becomes the output format (echo round-trip).
+        output_explicit: bool = false,
         /// When converting YAML to another format, drop unknown/custom tags
         /// instead of erroring on them. Has no effect on parsing or YAML→YAML.
         lax_tags: bool = false,
@@ -83,6 +94,9 @@ const CliActionOptions = union(CliAction) {
         delete: bool = false,
         requested_help: bool = false,
         format: Format,
+        /// Set when the format could not be inferred from the file extension:
+        /// the handler then sniffs the file's contents with `Language.detect`.
+        detect: bool = false,
         /// As in `edit`: when set, `file` is a host document and the comment is
         /// applied to the embedded config of this archetype, spliced back.
         embed: ?fig.Embed.Type = null,
@@ -160,7 +174,8 @@ const Help = struct {
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
             \\Usage: {s} get [--input json|json5|yaml|toml|zon|native] [--output json|json5|yaml|toml|zon|native] <file> [path]
-            \\  -i, --input: input format of file (defaults to matching the file extension)
+            \\  -i, --input: input format of file (defaults to the file extension,
+            \\    then to sniffing the file's contents if the extension is unknown)
             \\  -o, --output:   output format (defaults to the input format)
             \\  native ("fig"): the AST's 1:1 canonical text encoding (.fig files);
             \\    usable as input or output, e.g. to inspect how any document parses.
@@ -250,11 +265,11 @@ pub fn main(init: std.process.Init) !void {
             const op: EditOp = if (opts.key) .replace_key else .replace_value;
             if (opts.embed) |embed_type| {
                 try applyToEmbed(init.arena.allocator(), io, input, embed_type, opts.path, opts.replacement, op);
-            } else switch (opts.format) {
-                .json, .jsonc => {
+            } else switch (if (opts.detect) try detectFileFormat(io, init.arena.allocator(), opts.file) else opts.format) {
+                .json, .jsonc => |f| if (comptime build_options.lang_json) {
                     const replacement = try std.fmt.allocPrint(init.arena.allocator(), "\"{s}\"", .{opts.replacement});
-                    try applyToFile(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, op, jsonDialect(opts.format));
-                },
+                    try applyToFile(fig.Language.JSON, init.arena.allocator(), io, input, opts.path, replacement, op, jsonDialect(f));
+                } else return error.FormatDisabled,
                 .yaml, .yml => if (comptime build_options.lang_yaml) {
                     try applyToFile(fig.Language.YAML, init.arena.allocator(), io, input, opts.path, opts.replacement, op, fig.Language.YAML.default_type);
                 } else return error.FormatDisabled,
@@ -291,36 +306,44 @@ pub fn main(init: std.process.Init) !void {
                 try Help.get(&stdout_terminal, config.binary_name);
                 return;
             }
-            // XML is reader-only: it can be a `--from` source but not a `--to`
-            // target. Reject early so the serialize switches below stay total.
-            if (opts.to == .xml) {
+            const input = try getInput(io, opts.file, .read_only);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            // Resolved input/output formats. They equal the parsed options unless
+            // the input format has to be sniffed from the file's contents (no
+            // `--input`, unrecognized extension): detection overwrites `from`, and
+            // — when no `--output` was given — `to` follows it (an echo round-trip
+            // rather than a silent convert-to-JSON).
+            var from = opts.from;
+            var to = opts.to;
+
+            const doc = if (opts.embed) |embed_type|
+                try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
+            else blk: {
+                // Read once so detection and parsing share the same bytes — a
+                // piped stdin can only be consumed a single time.
+                const content = try readAll(init.arena.allocator(), io, input);
+                if (opts.detect) {
+                    from = try resolveFormatFromContent(init.arena.allocator(), content, opts.file);
+                    if (!opts.output_explicit) to = from;
+                }
+                break :blk try parseSliceAs(from, init.arena.allocator(), content);
+            };
+
+            // XML is reader-only: a `--from`/detected source but never a `--to`
+            // target. Checked after detection so a sniffed-or-echoed `to` is caught
+            // too, keeping the serialize switches below total.
+            if (to == .xml) {
                 try stderr_terminal.writer.print("error: XML output is not yet supported (reader-only); XML may only be a `--from` source.\n", .{});
                 try stderr_terminal.writer.flush();
                 return error.UnsupportedOutputFormat;
             }
-            const input = try getInput(io, opts.file, .read_only);
-            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
-
-            const doc = if (opts.embed) |embed_type|
-                try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
-            else switch (opts.from) {
-                .json => try parseFromFile(fig.Language.JSON, init.arena.allocator(), io, input),
-                // JSONC shares JSON's grammar plus `//` and `/* */` comments, so
-                // it needs the dialect passed through (the default is strict JSON).
-                .jsonc => try parseJsonTypeFromFile(init.arena.allocator(), io, input, .JSONC),
-                .json5 => try parseJsonTypeFromFile(init.arena.allocator(), io, input, .JSON5),
-                .yaml, .yml => if (comptime build_options.lang_yaml) try parseFromFile(fig.Language.YAML, init.arena.allocator(), io, input) else return error.FormatDisabled,
-                .toml => if (comptime build_options.lang_toml) try parseFromFile(fig.Language.TOML, init.arena.allocator(), io, input) else return error.FormatDisabled,
-                .zon => if (comptime build_options.lang_zon) try parseFromFile(fig.Language.ZON, init.arena.allocator(), io, input) else return error.FormatDisabled,
-                .xml => if (comptime build_options.lang_xml) try parseFromFile(fig.Language.XML, init.arena.allocator(), io, input) else return error.FormatDisabled,
-                .native => try parseNativeFromFile(init.arena.allocator(), io, input),
-            };
 
             // Converting YAML to a non-YAML format resolves the reference layer
             // first (aliases → copies, merges → flattened, tags applied/dropped).
             // YAML→YAML keeps it intact for round-trip; JSON never has it.
-            const src_is_yaml = opts.from == .yaml or opts.from == .yml;
-            const dst_is_yaml = opts.to == .yaml or opts.to == .yml;
+            const src_is_yaml = from == .yaml or from == .yml;
+            const dst_is_yaml = to == .yaml or to == .yml;
             const base_ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
                 // Reachable only when the source is YAML, so YAML is compiled in;
                 // the comptime guard keeps `Language.YAML` out of the gated build.
@@ -339,7 +362,7 @@ pub fn main(init: std.process.Init) !void {
             // losslessly already. The passes operate on a core AST, so any
             // non-YAML source (or a materialized YAML source) is safe.
             const ast: *const fig.AST = if (opts.lossless and !(src_is_yaml and dst_is_yaml)) blk: {
-                const maybe_target: ?fig.Lossless.Target = switch (opts.to) {
+                const maybe_target: ?fig.Lossless.Target = switch (to) {
                     // JSON5 reuses the JSON envelope target. It could hold
                     // Infinity/NaN natively, so this is conservative (those ride
                     // in a `$fig` envelope) but still fully lossless.
@@ -362,7 +385,7 @@ pub fn main(init: std.process.Init) !void {
 
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
-            const target: fig.AST.SerializeFormat = switch (opts.to) {
+            const target: fig.AST.SerializeFormat = switch (to) {
                 .json => .json,
                 .jsonc => .jsonc,
                 .json5 => .json5,
@@ -447,7 +470,7 @@ pub fn main(init: std.process.Init) !void {
 
             if (opts.embed) |embed_type| {
                 try applyToEmbed(a, io, input, embed_type, opts.path, opts.text, op);
-            } else switch (opts.format) {
+            } else switch (if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format) {
                 // Strict JSON has no comment syntax: fail with a clear message
                 // rather than letting the editor surface a bare error.
                 .json => {
@@ -456,7 +479,7 @@ pub fn main(init: std.process.Init) !void {
                     std.process.exit(2);
                 },
                 // JSONC/JSON5 accept `//` comments (reparsed under the dialect).
-                .jsonc, .json5 => try applyToFile(fig.Language.JSON, a, io, input, opts.path, opts.text, op, jsonDialect(opts.format)),
+                .jsonc, .json5 => |f| if (comptime build_options.lang_json) try applyToFile(fig.Language.JSON, a, io, input, opts.path, opts.text, op, jsonDialect(f)) else return error.FormatDisabled,
                 .yaml, .yml => if (comptime build_options.lang_yaml)
                     try applyToFile(fig.Language.YAML, a, io, input, opts.path, opts.text, op, fig.Language.YAML.default_type)
                 else
@@ -482,23 +505,57 @@ fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
     return file_reader.interface.allocRemaining(allocator, max_size);
 }
 
-fn parseFromFile(comptime Lang: type, allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
-    const content = try readAll(allocator, io, file);
-    return try Lang.Parser.parse(allocator, content, Lang.default_type);
+/// Parse already-read `content` as the CLI `format`. The content-based parser the
+/// `get` action uses: reading the input once means detection and parsing share
+/// the same bytes, so a piped stdin is consumed only once. `.jsonc`/`.json5`
+/// select the JSON dialect; `.yml` aliases YAML; `.native` is the `.fig` grammar.
+fn parseSliceAs(format: Format, allocator: std.mem.Allocator, content: []const u8) !fig.Document {
+    return switch (format) {
+        .json => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON) else error.FormatDisabled,
+        .jsonc => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSONC) else error.FormatDisabled,
+        .json5 => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON5) else error.FormatDisabled,
+        .yaml, .yml => if (comptime build_options.lang_yaml) fig.Language.YAML.Parser.parse(allocator, content, fig.Language.YAML.default_type) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) fig.Language.TOML.Parser.parse(allocator, content, fig.Language.TOML.default_type) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
+        .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
+        .native => fig.Native.parse(allocator, content),
+    };
 }
 
-/// Parse a native ("fig") document. The native parser isn't a `Language` (it has
-/// no `Type`/`default_type` — its grammar is fixed), so it needs its own helper.
-fn parseNativeFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File) !fig.Document {
-    const content = try readAll(allocator, io, file);
-    return try fig.Native.parse(allocator, content);
+/// Map a `Language.detect` result to the CLI `Format`. `Detected` has no `jsonc`
+/// or `native` (neither is content-sniffed), so the mapping is total.
+fn mapDetected(d: fig.Language.Detected) Format {
+    return switch (d) {
+        .json => .json,
+        .json5 => .json5,
+        .yaml => .yaml,
+        .toml => .toml,
+        .zon => .zon,
+        .xml => .xml,
+    };
 }
 
-/// Parse a JSON-family file with an explicit dialect (the JSON `Language`'s
-/// `default_type` is plain JSON, so JSON5 input needs the type passed through).
-fn parseJsonTypeFromFile(allocator: std.mem.Allocator, io: Io, file: Io.File, json_type: fig.Language.JSON.Type) !fig.Document {
-    const content = try readAll(allocator, io, file);
-    return try fig.Language.JSON.Parser.parse(allocator, content, json_type);
+/// Sniff `content` with `Language.detect`, emit an info-level log of what was
+/// inferred, and return it — the fallback when neither `--input` nor the file
+/// extension pinned the format. Errors (after a clear message) if nothing matches.
+fn resolveFormatFromContent(allocator: std.mem.Allocator, content: []const u8, file_path: []const u8) !Format {
+    const detected = fig.Language.detect(allocator, content) orelse {
+        std.log.scoped(.detect).err("could not infer the format of `{s}` from its contents; pass an explicit format", .{file_path});
+        return error.UnsupportedFileFormat;
+    };
+    const format = mapDetected(detected);
+    std.log.scoped(.detect).info("inferred format `{s}` for `{s}` from its contents", .{ @tagName(format), file_path });
+    return format;
+}
+
+/// Open `file_path` read-only and sniff its contents. For the in-place edit paths
+/// (`edit`/`comment`), which then re-open the file read-write to splice it — so
+/// detection reads through a separate handle and never disturbs the edit read.
+fn detectFileFormat(io: Io, allocator: std.mem.Allocator, file_path: []const u8) !Format {
+    const probe = try getInput(io, file_path, .read_only);
+    defer if (!std.mem.eql(u8, file_path, "-")) probe.close(io);
+    const content = try readAll(allocator, io, probe);
+    return resolveFormatFromContent(allocator, content, file_path);
 }
 
 /// Extract the embedded config of `embed_type` from a host file and parse it.
@@ -581,14 +638,14 @@ fn applyToEmbed(
         // JSON frontmatter is plain (strict) JSON: a replacement value is quoted
         // as a JSON string, while a comment op rides through unquoted and the
         // editor rejects it (strict JSON has no comment syntax).
-        .FrontmatterJson => blk: {
+        .FrontmatterJson => if (comptime build_options.lang_json) blk: {
             const value_text = switch (op) {
                 .replace_value, .replace_key => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
                 // Comment ops pass their text (or none, for deletes) through as-is.
                 .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment => text,
             };
             break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, value_text, op, .JSON);
-        },
+        } else return error.FormatDisabled,
     };
 
     var out: std.ArrayList(u8) = .empty;
@@ -684,7 +741,10 @@ const Detected = struct {
     embed: ?fig.Embed.Type = null,
 };
 
-fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
+/// Infer the parse strategy from a file's extension, or null when the extension
+/// is missing/unrecognized — the caller then falls back to content sniffing
+/// (`Language.detect`) rather than failing outright.
+fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     const dot = std.mem.findLast(u8, file_path, ".");
     const ext = file_path[(dot orelse 0) + 1 .. file_path.len];
 
@@ -696,11 +756,7 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ArgError!Detected {
     // `.fig` is the native format's file extension (`.native` maps via the enum).
     if (std.mem.eql(u8, ext, "fig")) return .{ .format = .native, .embed = null };
 
-    const format = std.meta.stringToEnum(Format, ext) orelse {
-        const recognized_file_format = if (dot) |d| file_path[d..file_path.len] else "(none)";
-        std.log.scoped(.detectLanguage).err("File `{s}` had ending: {s}", .{ file_path, recognized_file_format });
-        return ArgError.UnsupportedFileFormat;
-    };
+    const format = std.meta.stringToEnum(Format, ext) orelse return null;
     return .{ .format = format, .embed = null };
 }
 
@@ -757,16 +813,19 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         }
 
         // Skip extension detection when the user only asked for help (the
-        // "file" is then `--help`, which has no real format).
-        const detected: Detected = if (requested_help) .{ .format = .json } else try detectLanguageFromFileEnding(file_path);
+        // "file" is then `--help`, which has no real format). An unrecognized
+        // extension is not an error here: `detect = true` defers to content
+        // sniffing in the handler.
+        const ext = if (requested_help) null else detectLanguageFromFileEnding(file_path);
         config.options = .{ .edit = .{
             .file = file_path,
             .path = path,
             .replacement = replacement,
             .key = edit_key,
             .requested_help = requested_help,
-            .format = detected.format,
-            .embed = detected.embed,
+            .format = if (ext) |d| d.format else .json,
+            .detect = !requested_help and ext == null,
+            .embed = if (ext) |d| d.embed else null,
         } };
     } else if (std.mem.eql(u8, action_str, "comment") or std.mem.eql(u8, action_str, "c")) {
         config.action = .comment;
@@ -809,7 +868,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             }
         }
 
-        const detected: Detected = if (requested_help) .{ .format = .json } else try detectLanguageFromFileEnding(file_path);
+        const ext = if (requested_help) null else detectLanguageFromFileEnding(file_path);
         config.options = .{ .comment = .{
             .file = file_path,
             .path = path,
@@ -817,8 +876,9 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .inline_comment = inline_comment,
             .delete = delete,
             .requested_help = requested_help,
-            .format = detected.format,
-            .embed = detected.embed,
+            .format = if (ext) |d| d.format else .json,
+            .detect = !requested_help and ext == null,
+            .embed = if (ext) |d| d.embed else null,
         } };
     } else if (std.mem.eql(u8, action_str, "get") or std.mem.eql(u8, action_str, "g")) {
         config.action = .get;
@@ -925,9 +985,13 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         }
 
         const detected_input: ?Detected = if (!requested_help and input_override == null)
-            try detectLanguageFromFileEnding(file_path)
+            detectLanguageFromFileEnding(file_path)
         else
             null;
+        // No `--input` and an unrecognized extension ⇒ sniff the contents in the
+        // handler. `.json` here is a placeholder `from`/`to`, overwritten once the
+        // real format is known.
+        const needs_detect = !requested_help and input_override == null and detected_input == null;
         const input_format = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
         const embed = if (detected_input) |d| d.embed else null;
 
@@ -937,6 +1001,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .from = input_format,
             .to = output_override orelse input_format,
             .requested_help = requested_help,
+            .detect = needs_detect,
+            .output_explicit = output_override != null,
             .lax_tags = lax_tags,
             .lossless = lossless,
             .embed = embed,

@@ -22,6 +22,7 @@
 const Parser = @This();
 
 const std = @import("std");
+const build_options = @import("build_options");
 const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 const Type = @import("xml.zig").Type;
@@ -392,6 +393,9 @@ const testing = std.testing;
 
 /// Parse `src` and assert its JSON serialization equals `expected`.
 fn expectJson(src: []const u8, expected: []const u8) !void {
+    // These reader tests verify the parsed shape by serializing to JSON; skip
+    // them when JSON is gated out of the build (the parser itself is unaffected).
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var doc = try parse(testing.allocator, src, .XML_1_0);
     defer doc.deinit(testing.allocator);
     var buf: [1024]u8 = undefined;

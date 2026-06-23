@@ -11,10 +11,13 @@ pub fn build(b: *std.Build) void {
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
     const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
 
-    // Per-language feature gates. Each non-JSON format can be compiled out to
-    // shrink the binary and drop its parser/printer. JSON is always included: it
-    // is the base format `Language.detect()` sniffs and the lingua-franca every
-    // consumer expects, and its footprint is small. Default: everything on.
+    // Per-language feature gates. Any format can be compiled out to shrink the
+    // binary and drop its parser/printer — including JSON, now that the native
+    // `.fig` format exists and `Language.detect()` sniffs every compiled-in
+    // language rather than assuming a JSON base. A build with no language at all
+    // is rejected at the call sites that need one (e.g. the C ABI editor union).
+    // Default: everything on.
+    const enable_json = b.option(bool, "json", "Include JSON/JSONC/JSON5 support") orelse true;
     const enable_yaml = b.option(bool, "yaml", "Include YAML support") orelse true;
     const enable_toml = b.option(bool, "toml", "Include TOML support") orelse true;
     const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
@@ -27,9 +30,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "toml_conformance", run_toml_conformance);
     options.addOption(bool, "xml_conformance", run_xml_conformance);
     // Language gates, consumed across the codebase as `build_options.lang_*`.
-    // JSON has no gate (always on); it is hard-coded `true` for symmetry so call
-    // sites can read `build_options.lang_json` uniformly.
-    options.addOption(bool, "lang_json", true);
+    options.addOption(bool, "lang_json", enable_json);
     options.addOption(bool, "lang_yaml", enable_yaml);
     options.addOption(bool, "lang_toml", enable_toml);
     options.addOption(bool, "lang_zon", enable_zon);

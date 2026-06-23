@@ -12,7 +12,7 @@ const Node = AST.Node;
 // Printers are pulled in only for the formats compiled into this build. A gated
 // format's `*Printer` is `void`, so the matching `serialize` arm below (guarded
 // by the same comptime flag) is never analyzed and the printer never compiles.
-const JsonPrinter = @import("../json/printer.zig");
+const JsonPrinter = if (build_options.lang_json) @import("../json/printer.zig") else void;
 const YamlPrinter = if (build_options.lang_yaml) @import("../yaml/printer.zig") else void;
 const TomlPrinter = if (build_options.lang_toml) @import("../toml/printer.zig") else void;
 const ZonPrinter = if (build_options.lang_zon) @import("../zon/printer.zig") else void;
@@ -80,9 +80,9 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
     var buf: AST = undefined;
     const ast = commentView(self, options, &buf);
     return switch (format) {
-        .json => JsonPrinter.print(writer, ast, options),
-        .jsonc => JsonPrinter.printc(writer, ast, options),
-        .json5 => JsonPrinter.print5(writer, ast, options),
+        .json => if (comptime build_options.lang_json) JsonPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .jsonc => if (comptime build_options.lang_json) JsonPrinter.printc(writer, ast, options) else error.FormatDisabled,
+        .json5 => if (comptime build_options.lang_json) JsonPrinter.print5(writer, ast, options) else error.FormatDisabled,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, ast) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
@@ -100,9 +100,9 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
     var buf: AST = undefined;
     const ast = commentView(self, options, &buf);
     return switch (format) {
-        .json => JsonPrinter.printNode(writer, ast, id, 0, options),
-        .jsonc => JsonPrinter.printNodec(writer, ast, id, 0, options),
-        .json5 => JsonPrinter.printNode5(writer, ast, id, 0, options),
+        .json => if (comptime build_options.lang_json) JsonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .jsonc => if (comptime build_options.lang_json) JsonPrinter.printNodec(writer, ast, id, 0, options) else error.FormatDisabled,
+        .json5 => if (comptime build_options.lang_json) JsonPrinter.printNode5(writer, ast, id, 0, options) else error.FormatDisabled,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,

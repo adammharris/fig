@@ -10,11 +10,13 @@ const Span = @import("util/span.zig");
 const Embed = @import("embed.zig");
 const Editor = @import("editor.zig").Editor;
 const build_options = @import("build_options");
-const JsonParser = @import("json/parser.zig");
-const JsonType = @import("json/json.zig").Type;
-const JsonLang = @import("json/json.zig").Language;
 // Gated formats collapse to `void`; every reference below is behind the matching
 // `build_options.lang_*` comptime guard so the parser/printer never compiles in.
+// JSON is gateable too — the editor union and the parse/capability switches all
+// guard their JSON-family arms.
+const JsonParser = if (build_options.lang_json) @import("json/parser.zig") else void;
+const JsonType = if (build_options.lang_json) @import("json/json.zig").Type else void;
+const JsonLang = if (build_options.lang_json) @import("json/json.zig").Language else void;
 const YamlParser = if (build_options.lang_yaml) @import("yaml/parser.zig") else void;
 const YamlType = if (build_options.lang_yaml) @import("yaml/yaml.zig").Type else void;
 const YamlLang = if (build_options.lang_yaml) @import("yaml/yaml.zig").Language else void;
@@ -134,7 +136,7 @@ pub export fn fig_format_capabilities(format: c_int) u32 {
         @intFromEnum(FigFormat.json),
         @intFromEnum(FigFormat.jsonc),
         @intFromEnum(FigFormat.json5),
-        => read | edit | serialize,
+        => if (comptime build_options.lang_json) read | edit | serialize else 0,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) read | edit | serialize else 0,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | edit | serialize else 0,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | serialize else 0,
@@ -305,12 +307,21 @@ pub export fn fig_parse_ex(
     // name is the best diagnostic available until per-parser span plumbing lands;
     // `byte_offset`/`line`/`column` stay 0 for now.
     const doc = switch (fig_format) {
-        .json => JsonParser.parse(allocator, source, JsonType.JSON) catch |err|
-            return parseFailed(out_err, err, source, handle),
-        .jsonc => JsonParser.parse(allocator, source, JsonType.JSONC) catch |err|
-            return parseFailed(out_err, err, source, handle),
-        .json5 => JsonParser.parse(allocator, source, JsonType.JSON5) catch |err|
-            return parseFailed(out_err, err, source, handle),
+        .json => if (comptime build_options.lang_json)
+            JsonParser.parse(allocator, source, JsonType.JSON) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .jsonc => if (comptime build_options.lang_json)
+            JsonParser.parse(allocator, source, JsonType.JSONC) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .json5 => if (comptime build_options.lang_json)
+            JsonParser.parse(allocator, source, JsonType.JSON5) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
         .yaml => if (comptime build_options.lang_yaml)
             YamlParser.parse(allocator, source, YamlType.v1_2_2) catch |err|
                 return parseFailed(out_err, err, source, handle)
@@ -710,31 +721,42 @@ fn editStatus(err: anyerror) FigStatus {
 
 pub const FigEditor = opaque {};
 
-// The editor backends, shared by the document editor and the embed editor. The
-// `yaml`/`toml` variants only exist when that format is compiled in — gating a
-// variant out (rather than leaving a `void` field) keeps the `inline else`
-// switches below valid, which is why the type is selected per build-flag combo
-// instead of carrying void members. JSON is always present.
-const EditorUnion = if (build_options.lang_yaml and build_options.lang_toml)
-    union(enum) {
-        yaml: Editor(YamlLang),
-        toml: Editor(TomlLang),
-        json: Editor(JsonLang),
+// The editor backends, shared by the document editor and the embed editor: a
+// tagged union with one variant per editable language COMPILED INTO THIS BUILD
+// (json/yaml/toml; zon/xml are not editable). The type is assembled from only the
+// enabled languages — rather than carrying `void` placeholder fields — so the
+// `inline else` switches over `handle.inner` stay valid: every variant has a real
+// `Editor` payload to act on. Building it from a list (instead of enumerating the
+// 2^3 enable combinations by hand) is what keeps adding a gate cheap.
+const editor_variants = blk: {
+    const Variant = struct { name: [:0]const u8, Lang: type };
+    var variants: []const Variant = &.{};
+    if (build_options.lang_json) variants = variants ++ &[_]Variant{.{ .name = "json", .Lang = JsonLang }};
+    if (build_options.lang_yaml) variants = variants ++ &[_]Variant{.{ .name = "yaml", .Lang = YamlLang }};
+    if (build_options.lang_toml) variants = variants ++ &[_]Variant{.{ .name = "toml", .Lang = TomlLang }};
+    break :blk variants;
+};
+
+const EditorUnion = blk: {
+    if (editor_variants.len == 0)
+        @compileError("fig C ABI: no editable language enabled; build with at least one of -Djson/-Dyaml/-Dtoml");
+    const n = editor_variants.len;
+    const IntTag = std.math.IntFittingRange(0, n - 1);
+    var names: [n][:0]const u8 = undefined;
+    var types: [n]type = undefined;
+    var values: [n]IntTag = undefined;
+    var attrs: [n]std.builtin.Type.UnionField.Attributes = undefined;
+    for (editor_variants, 0..) |v, i| {
+        names[i] = v.name;
+        types[i] = Editor(v.Lang);
+        values[i] = @intCast(i);
+        attrs[i] = .{};
     }
-else if (build_options.lang_yaml)
-    union(enum) {
-        yaml: Editor(YamlLang),
-        json: Editor(JsonLang),
-    }
-else if (build_options.lang_toml)
-    union(enum) {
-        toml: Editor(TomlLang),
-        json: Editor(JsonLang),
-    }
-else
-    union(enum) {
-        json: Editor(JsonLang),
-    };
+    // This Zig spells type reification as granular builtins (`@Enum`/`@Union`)
+    // rather than `@Type(.{...})`.
+    const Tag = @Enum(IntTag, .exhaustive, &names, &values);
+    break :blk @Union(.auto, Tag, &names, &types, &attrs);
+};
 
 const EditorHandle = struct {
     allocator: std.mem.Allocator,
@@ -766,9 +788,9 @@ pub export fn fig_editor_create(
     const slice = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
 
     const fig_format: FigFormat = switch (format) {
-        @intFromEnum(FigFormat.json) => .json,
-        @intFromEnum(FigFormat.jsonc) => .jsonc,
-        @intFromEnum(FigFormat.json5) => .json5,
+        @intFromEnum(FigFormat.json) => if (comptime build_options.lang_json) .json else return .unsupported_format,
+        @intFromEnum(FigFormat.jsonc) => if (comptime build_options.lang_json) .jsonc else return .unsupported_format,
+        @intFromEnum(FigFormat.json5) => if (comptime build_options.lang_json) .json5 else return .unsupported_format,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else return .unsupported_format,
         else => return .unsupported_format,
@@ -779,13 +801,13 @@ pub export fn fig_editor_create(
     handle.allocator = allocator;
     handle.inner = switch (fig_format) {
         .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
-        .json => .{ .json = .{ .allocator = allocator } },
-        .jsonc => .{ .json = .{ .allocator = allocator, .format = .JSONC } },
+        .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
+        .jsonc => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator, .format = .JSONC } } else unreachable,
         // JSON5 edits route through the same generic JSON editor, just in the
         // JSON5 dialect (unquoted keys, trailing commas, `//` comments). The
         // editor splices source in place, so all of that survives untouched
         // outside the edited span.
-        .json5 => .{ .json = .{ .allocator = allocator, .format = .JSON5 } },
+        .json5 => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator, .format = .JSON5 } } else unreachable,
         .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         // Filtered out by the format switch above; editing these is not yet wired.
         .zon, .xml => unreachable,
@@ -1188,9 +1210,13 @@ pub export fn fig_embed_open(
     out.* = null;
     const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
     const t = embedTypeOf(embed_type) orelse return .invalid_argument;
-    // A YAML-inner embed needs the YAML editor; reject it when YAML is gated out.
+    // An embed needs its inner-format editor; reject it when that format is gated
+    // out (YAML frontmatter without YAML, JSON frontmatter without JSON).
     if (comptime !build_options.lang_yaml) {
         if (embedInner(t) == .yaml) return .unsupported_format;
+    }
+    if (comptime !build_options.lang_json) {
+        if (embedInner(t) == .json) return .unsupported_format;
     }
 
     const region = Embed.locateRegion(input, t) catch |err| return switch (err) {
@@ -1210,7 +1236,7 @@ pub export fn fig_embed_open(
         .content = region.content,
         .editor = switch (embedInner(t)) {
             .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
-            .json => .{ .json = .{ .allocator = allocator } },
+            .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
         },
     };
     const content = host[region.content.start..region.content.end];
@@ -1568,10 +1594,10 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
 /// remain as defense-in-depth for any path that bypasses this map.
 fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
     return switch (format) {
-        @intFromEnum(FigFormat.json) => .json,
+        @intFromEnum(FigFormat.json) => if (comptime build_options.lang_json) .json else null,
         // JSONC writes plain-JSON syntax plus `//`/`/* */` comments.
-        @intFromEnum(FigFormat.jsonc) => .jsonc,
-        @intFromEnum(FigFormat.json5) => .json5,
+        @intFromEnum(FigFormat.jsonc) => if (comptime build_options.lang_json) .jsonc else null,
+        @intFromEnum(FigFormat.json5) => if (comptime build_options.lang_json) .json5 else null,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else null,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else null,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else null,
@@ -2147,6 +2173,7 @@ test "traversal over a parsed mapping" {
 }
 
 test "fig_document_diagnose reports a dropped null for TOML" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !(build_options.lang_yaml and build_options.lang_toml)) return error.SkipZigTest;
     const src = "a: null\nb: 1\n";
 
@@ -2179,6 +2206,7 @@ test "fig_document_diagnose reports a dropped null for TOML" {
 }
 
 test "fig_value_diagnose reports a degraded datetime" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var v: ?*FigValue = null;
     try std.testing.expectEqual(FigStatus.ok, fig_value_create(&v));
     defer fig_value_destroy(v);
@@ -2204,6 +2232,7 @@ test "fig_value_diagnose reports a degraded datetime" {
 }
 
 test "fig_value_warning honors a truncated (size-gated) FigWarning" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var v: ?*FigValue = null;
     try std.testing.expectEqual(FigStatus.ok, fig_value_create(&v));
     defer fig_value_destroy(v);
@@ -2228,6 +2257,7 @@ test "fig_value_warning honors a truncated (size-gated) FigWarning" {
 }
 
 test "fig_parse_ex fills FigError on a parse failure" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const bad = "{ \"a\":"; // truncated JSON object
 
     // No out_err: behaves exactly like fig_parse.
@@ -2262,6 +2292,7 @@ test "fig_parse_ex fills FigError on a parse failure" {
 }
 
 test "fig_parse_ex honors a truncated (size-gated) FigError" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const bad = "[1,";
 
     // A caller whose layout stops before `message` gets `code` filled but the
@@ -2280,6 +2311,7 @@ test "fig_parse_ex honors a truncated (size-gated) FigError" {
 }
 
 test "fig_parse_ex leaves out_doc null and succeeds on a valid parse" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const src = "{\"a\":1}";
     var out_doc: ?*FigDocument = null;
     var err: FigError = undefined;
@@ -2347,6 +2379,7 @@ test "parse c abi reads toml and zon" {
 }
 
 test "parse c abi reads json5 and rejects it under strict json" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     // Regression: the `fig_parse` format switch once dropped `json5`, so the
     // `.json5` reader arm was dead and every JSON5 parse returned
     // `unsupported_format`. JSON5-only syntax (unquoted keys, trailing comma,
@@ -2615,6 +2648,7 @@ test "embed c abi locates region" {
 }
 
 test "embed c abi edits json frontmatter (`;;;` fences, JSON inner editor)" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const md = ";;;\n{\"title\": \"Hi\", \"draft\": true}\n;;;\n# Body\n";
     var out_fm: ?*FigEmbed = null;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_json), &out_fm));
@@ -2632,6 +2666,7 @@ test "embed c abi edits json frontmatter (`;;;` fences, JSON inner editor)" {
 }
 
 test "value c abi builds and serializes to multiple formats" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var out_value: ?*FigValue = null;
     try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
     defer fig_value_destroy(out_value);
@@ -2668,6 +2703,7 @@ test "value c abi builds and serializes to multiple formats" {
 }
 
 test "value c abi maps an unrepresentable value to unsupported_format" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var out_value: ?*FigValue = null;
     try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
     defer fig_value_destroy(out_value);
@@ -2691,6 +2727,7 @@ test "value c abi maps an unrepresentable value to unsupported_format" {
 }
 
 test "value c abi serialize options honor the size/version field" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     var out_value: ?*FigValue = null;
     try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
     defer fig_value_destroy(out_value);
@@ -2734,6 +2771,7 @@ test "value c abi rejects an out-of-range child id" {
 }
 
 test "fig_parse empty input is judged per format" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     // (null ptr, len 0) reaches the parser — same as (ptr, len 0). YAML treats
     // an empty stream as a null document and TOML as an empty table (both ok);
     // JSON requires a value (parse_error). A null ptr with a nonzero len is a
@@ -2764,6 +2802,7 @@ test "fig_parse empty input is judged per format" {
 }
 
 test "fig_document_serialize converts JSON to YAML" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const src = "{\"name\":\"fig\",\"nums\":[1,2]}";
     var out_doc: ?*FigDocument = null;
@@ -2783,6 +2822,7 @@ test "fig_document_serialize converts JSON to YAML" {
 }
 
 test "fig_document_serialize materializes the YAML reference layer when leaving YAML" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     // `b` aliases the anchor defined on `a`; converting to JSON must expand it to
     // a copied value, not leak `*x` or fail with unsupported_format.
@@ -2802,6 +2842,7 @@ test "fig_document_serialize materializes the YAML reference layer when leaving 
 }
 
 test "fig_document_serialize honors the lossless option for TOML null" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_toml) return error.SkipZigTest;
     // A JSON null has no TOML representation. Lossy (default) reports it; lossless
     // wraps it in a `$fig` envelope so the document still serializes.
@@ -2820,6 +2861,7 @@ test "fig_document_serialize honors the lossless option for TOML null" {
 }
 
 test "fig_document_serialize preserves comments across formats" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     // The motivating case the parse→rebuild→fig_value_serialize detour could not
     // serve: a comment captured from JSON5 re-emitted into YAML.
@@ -2856,6 +2898,7 @@ test "fig_version matches build options and string form" {
 }
 
 test "fig_format_capabilities reports the per-format matrix" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const read = @intFromEnum(FigCapability.read);
     const edit = @intFromEnum(FigCapability.edit);
     const serialize = @intFromEnum(FigCapability.serialize);
@@ -2984,6 +3027,7 @@ test "fig_editor comment ops add, set, and delete through the C ABI" {
 }
 
 test "fig_editor comment ops reject strict JSON with unsupported_format" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
     const src = "{\"a\":1}";
     var ed: ?*FigEditor = null;
     try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.json), &ed));

@@ -147,10 +147,10 @@ pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Typ
             var parser = Language.YAML.Parser{ .allocator = allocator };
             break :blk Language.YAML.parse(&parser, slice, Language.YAML.default_type);
         } else error.FormatDisabled,
-        .json => blk: {
+        .json => if (comptime build_options.lang_json) blk: {
             var parser = Language.JSON.Parser{ .allocator = allocator };
             break :blk Language.JSON.parse(&parser, slice, Language.JSON.default_type);
-        },
+        } else error.FormatDisabled,
     };
 }
 
