@@ -212,6 +212,7 @@ pub struct FigSerializeOptions {
     pub indent: u8,
     pub strip_comments: u8,
     pub lossless: u8,
+    pub width: u16,
 }
 
 /// One lossy event from `fig_*_diagnose`, pulled by index via `fig_*_warning`.

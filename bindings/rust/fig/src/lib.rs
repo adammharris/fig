@@ -79,16 +79,19 @@ impl From<Format> for ffi::FigFormat {
 /// fig's historical style (pretty-printed, two-space indent), so
 /// [`Value::serialize`] is exactly `serialize_with(format, SerializeOptions::default())`.
 ///
-/// `pretty` is honored by [`Format::Json`] (multi-line vs. minified) and
-/// [`Format::Zon`] (`zig fmt` multi-line vs. inline `.{ a, b }`); `indent` by
-/// [`Format::Json`] only. [`Format::Yaml`] and [`Format::Toml`] render with
-/// their own fixed layout.
+/// `pretty` is honored by [`Format::Json`] (multi-line vs. minified),
+/// [`Format::Zon`] (`zig fmt` multi-line vs. inline `.{ a, b }`), and
+/// [`Format::Toml`] (gates array wrapping); `indent` by [`Format::Json`] and
+/// [`Format::Toml`]'s wrapped arrays; `width` by [`Format::Toml`]'s
+/// inline-vs-section layout. [`Format::Yaml`] renders with its own fixed layout.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializeOptions {
     /// `true`: multi-line, indented output. `false`: compact single-line output
-    /// with no insignificant whitespace.
+    /// with no insignificant whitespace. For TOML, `false` keeps every array on
+    /// one line; `true` lets a wide array wrap (see `width`).
     pub pretty: bool,
-    /// Spaces per indentation level when `pretty` is set (JSON only).
+    /// Spaces per indentation level when `pretty` is set (JSON, and TOML's wrapped
+    /// arrays).
     pub indent: u8,
     /// Drop comments carried on the value instead of emitting them. Default
     /// `false` (preserve them where the target format allows).
@@ -99,11 +102,16 @@ pub struct SerializeOptions {
     /// `false` (lossy — an unrepresentable value is an [`Error::UnsupportedFormat`]).
     /// Ignored by [`Value::serialize_with`] (a built value has no source envelopes).
     pub lossless: bool,
+    /// [`Format::Toml`] only: the column budget for its inline-vs-expanded layout.
+    /// A mapping/array that renders within `width` columns stays inline
+    /// (`k = { … }` / `[a, b]`); a wider one expands to a `[section]` / a wrapped
+    /// array. Default `80`. Ignored by the other formats.
+    pub width: u16,
 }
 
 impl Default for SerializeOptions {
     fn default() -> Self {
-        Self { pretty: true, indent: 2, strip_comments: false, lossless: false }
+        Self { pretty: true, indent: 2, strip_comments: false, lossless: false, width: 80 }
     }
 }
 
@@ -128,6 +136,12 @@ impl SerializeOptions {
     pub fn strip_comments(self) -> Self {
         Self { strip_comments: true, ..self }
     }
+
+    /// This style with the given TOML inline-vs-section column budget (see
+    /// `width`). Builder-style, e.g. `SerializeOptions::default().width(120)`.
+    pub fn width(self, width: u16) -> Self {
+        Self { width, ..self }
+    }
 }
 
 impl From<SerializeOptions> for ffi::FigSerializeOptions {
@@ -138,6 +152,7 @@ impl From<SerializeOptions> for ffi::FigSerializeOptions {
             indent: o.indent,
             strip_comments: u8::from(o.strip_comments),
             lossless: u8::from(o.lossless),
+            width: o.width,
         }
     }
 }

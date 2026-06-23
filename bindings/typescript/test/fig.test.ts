@@ -109,6 +109,16 @@ test("serialize honors JSON pretty/compact options", () => {
   assert.equal(serialize(value, Format.Zon, { pretty: false }), ".{ .name = \"fig\", .nums = .{ 1, 2 } }\n");
 });
 
+test("serialize honors the TOML width option (inline vs. section)", () => {
+  const value = V.map([
+    [V.string("point"), V.map([[V.string("x"), V.int(1)], [V.string("y"), V.int(2)]])],
+  ]);
+  // Default budget (80): the small mapping stays an inline table.
+  assert.equal(serialize(value, Format.Toml), "point = { x = 1, y = 2 }\n");
+  // A tight budget forces it to expand to a [section].
+  assert.equal(serialize(value, Format.Toml, { width: 8 }), "[point]\nx = 1\ny = 2\n");
+});
+
 test("fromJS / toJS round-trip", () => {
   const js = { a: 1, b: [true, null, "x"], c: { d: 3.5 } };
   assert.deepEqual(toJS(fromJS(js)), js);

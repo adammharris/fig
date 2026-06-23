@@ -29,11 +29,16 @@ pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, native }
 ///
 /// Honored where each setting is meaningful:
 ///   * `pretty` — JSON/JSON5 (multi-line vs. minified) and ZON (`zig fmt`
-///     multi-line vs. inline `.{ a, b }`). YAML and TOML ignore it: YAML's
-///     compact form is flow style (not yet emitted) and TOML has no single-line
-///     document form.
-///   * `indent` — JSON/JSON5 only. ZON keeps its idiomatic four-space block
-///     indent; YAML/TOML have their own fixed layout.
+///     multi-line vs. inline `.{ a, b }`). TOML uses it to gate array wrapping
+///     (`true`: wrap arrays wider than `width`; `false`: keep every array on one
+///     line). YAML ignores it (its compact flow style is not yet emitted).
+///   * `indent` — JSON/JSON5 spaces per level, and the per-level indent of TOML's
+///     wrapped arrays. ZON keeps its idiomatic four-space block indent; YAML has
+///     its own fixed layout.
+///   * `width` — TOML only: the column budget that decides whether a mapping
+///     renders as an inline table (`k = { ... }`) or a `[section]`, and whether an
+///     array stays on one line or wraps. A value/line that fits within `width`
+///     stays inline; one that exceeds it expands.
 ///   * `strip_comments` — every format: drop the AST's carried comments instead
 ///     of emitting them. Honored uniformly (it blanks the comment side-table
 ///     before printing), so it works even for the formats whose printers take no
@@ -42,8 +47,13 @@ pub const SerializeOptions = struct {
     /// `true`: multi-line, indented output. `false`: compact single-line output
     /// with no insignificant whitespace.
     pretty: bool = true,
-    /// Spaces per indentation level when `pretty` is set (JSON only).
+    /// Spaces per indentation level when `pretty` is set (JSON; TOML wrapped
+    /// arrays).
     indent: u8 = 2,
+    /// Column budget for TOML's inline-vs-expanded layout decision. Anything that
+    /// renders within this many columns stays inline; wider values expand to
+    /// sections / wrapped arrays. Ignored by the other formats.
+    width: u16 = 80,
     /// `true`: do not emit comments carried on the AST (a clean, comment-free
     /// render). `false` (default): preserve them where the target format allows.
     strip_comments: bool = false,
@@ -84,7 +94,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .jsonc => if (comptime build_options.lang_json) JsonPrinter.printc(writer, ast, options) else error.FormatDisabled,
         .json5 => if (comptime build_options.lang_json) JsonPrinter.print5(writer, ast, options) else error.FormatDisabled,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, ast) else error.FormatDisabled,
-        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
         .native => NativePrinter.print(writer, ast),
     };
@@ -104,7 +114,7 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .jsonc => if (comptime build_options.lang_json) JsonPrinter.printNodec(writer, ast, id, 0, options) else error.FormatDisabled,
         .json5 => if (comptime build_options.lang_json) JsonPrinter.printNode5(writer, ast, id, 0, options) else error.FormatDisabled,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
-        .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .native => NativePrinter.printNode(writer, ast, id, 0),
     };

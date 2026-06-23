@@ -444,8 +444,8 @@ fn convert(
     const decoded = try decode(arena, &ast);
     const encoded = try encode(arena, &decoded, target);
     var out: std.Io.Writer.Allocating = .init(arena);
-    // The JSON and ZON printers take serialization options; TOML/YAML don't (yet).
-    if (Printer == JsonPrinter or Printer == ZonPrinter) {
+    // The JSON, ZON, and TOML printers take serialization options; YAML doesn't (yet).
+    if (Printer == JsonPrinter or Printer == ZonPrinter or Printer == TomlPrinter) {
         try Printer.print(&out.writer, &encoded, .{});
     } else {
         try Printer.print(&out.writer, &encoded);
@@ -528,7 +528,7 @@ test "lossyStrip drops nulls for a TOML target and reports paths" {
     try testing.expect(result.ast != null);
 
     var out: std.Io.Writer.Allocating = .init(arena);
-    try TomlPrinter.print(&out.writer, &result.ast.?);
+    try TomlPrinter.print(&out.writer, &result.ast.?, .{});
     try testing.expectEqualStrings("a = 1\nc = [1, 2]\n", out.written());
 
     try testing.expectEqual(@as(usize, 2), result.dropped.len);

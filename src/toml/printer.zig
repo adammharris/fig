@@ -48,9 +48,12 @@ const Class = enum {
 };
 
 /// Document-emit state: `wrote` gates the blank line printed before each
-/// section/AoT header (suppressed at the very start of the output).
+/// section/AoT header (suppressed at the very start of the output); `opts`
+/// carries the width budget / indent / pretty knobs that drive the
+/// inline-vs-expanded layout decisions below.
 const Ctx = struct {
     w: *Writer,
+    opts: AST.SerializeOptions,
     wrote: bool = false,
 
     /// Emit a table's body: first every inline entry as `key = value`, then —
@@ -59,8 +62,8 @@ const Ctx = struct {
     fn body(ctx: *Ctx, ast: *const AST, node_id: AST.Node.Id, first_child: ?AST.Node.Id, path: ?*const Path) Error!void {
         var cur = first_child;
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
+            if (classify(ctx, ast, id) != .inline_) continue;
             const kv = ast.nodes[id].kind.keyvalue;
-            if (classify(ast, kv.value) != .inline_) continue;
             try ctx.kvLine(ast, kv.key, kv.value);
         }
         // Comments dangling at the end of this table's own lines (after its
@@ -76,7 +79,7 @@ const Ctx = struct {
         cur = first_child;
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
             const kv = ast.nodes[id].kind.keyvalue;
-            switch (classify(ast, kv.value)) {
+            switch (classify(ctx, ast, id)) {
                 .inline_ => {},
                 .section => try ctx.section(ast, kv.key, kv.value, path),
                 .aot => try ctx.aot(ast, kv.key, kv.value, path),
@@ -88,16 +91,51 @@ const Ctx = struct {
         try ctx.leading(ast, key_id);
         try writeKey(ctx.w, ast, key_id);
         try ctx.w.writeAll(" = ");
-        try writeInline(ctx.w, ast, value_id);
+        const col = (keyByteLen(ast, key_id) orelse 0) + 3; // `key` + ` = `
+        try ctx.writeValue(ast, value_id, col);
         try ctx.trailing(ast, value_id);
         try ctx.w.writeByte('\n');
         ctx.wrote = true;
     }
 
+    /// Render a `key = value` right-hand side. A scalar/mixed array that would
+    /// overflow `opts.width` (and `pretty` is set) wraps one element per line;
+    /// everything else renders inline. (Mappings and array-of-tables that reach
+    /// here already fit by construction — see `classify`.)
+    fn writeValue(ctx: *Ctx, ast: *const AST, value_id: AST.Node.Id, col: usize) Error!void {
+        switch (ast.nodes[value_id].kind) {
+            .sequence => |first| {
+                if (ctx.opts.pretty and first != null) {
+                    // A null/alias inside makes the array un-measurable; fall
+                    // through so `writeInline` surfaces the proper error.
+                    if (inlineByteLen(ast, value_id)) |len| {
+                        if (col + len > ctx.opts.width) return ctx.writeArrayMultiline(ast, first);
+                    }
+                }
+                try writeInline(ctx.w, ast, value_id);
+            },
+            else => try writeInline(ctx.w, ast, value_id),
+        }
+    }
+
+    /// Wrap an array across lines: `[`, then each element indented one level with
+    /// a trailing comma, then `]` at column 0. Elements themselves render inline.
+    fn writeArrayMultiline(ctx: *Ctx, ast: *const AST, first: ?AST.Node.Id) Error!void {
+        const w = ctx.w;
+        try w.writeAll("[\n");
+        var cur = first;
+        while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
+            try w.splatByteAll(' ', ctx.opts.indent);
+            try writeInline(w, ast, id);
+            try w.writeAll(",\n");
+        }
+        try w.writeByte(']');
+    }
+
     fn section(ctx: *Ctx, ast: *const AST, key_id: AST.Node.Id, value_id: AST.Node.Id, parent: ?*const Path) Error!void {
         const seg = Path{ .key = try keyText(ast, key_id), .parent = parent };
         const first = ast.nodes[value_id].kind.mapping;
-        if (needsHeader(ast, first)) {
+        if (needsHeader(ctx, ast, first)) {
             if (ctx.wrote) try ctx.w.writeByte('\n');
             try ctx.leading(ast, key_id); // comments above the `[header]` line
             try ctx.w.writeByte('[');
@@ -151,22 +189,102 @@ const Ctx = struct {
 
 /// Whether a section emits its own `[header]`: yes when empty (records its
 /// existence) or when it has at least one direct inline entry; no when it has
-/// only sub-tables/AoTs (whose own headers imply this table).
-fn needsHeader(ast: *const AST, first_child: ?AST.Node.Id) bool {
+/// only sub-tables/AoTs (whose own headers imply this table). Note an inline
+/// table counts as a direct inline entry, so a table whose sub-mappings all
+/// collapse to inline tables does regain its header.
+fn needsHeader(ctx: *Ctx, ast: *const AST, first_child: ?AST.Node.Id) bool {
     var cur = first_child orelse return true; // empty table
     while (true) {
-        const kv = ast.nodes[cur].kind.keyvalue;
-        if (classify(ast, kv.value) == .inline_) return true;
+        if (classify(ctx, ast, cur) == .inline_) return true;
         cur = ast.nodes[cur].next_sibling orelse return false;
     }
 }
 
-fn classify(ast: *const AST, value_id: AST.Node.Id) Class {
-    return switch (ast.nodes[value_id].kind) {
-        .mapping => .section,
+/// Decide how a key/value entry renders. A mapping collapses to an inline table
+/// (`{ ... }`) when `fitsInline` allows it, otherwise it expands to a
+/// `[section]`. A non-empty all-mapping sequence is always an `[[array.of.tables]]`
+/// (the block form reads better and is the conventional shape — we don't collapse
+/// it even when it would fit). Scalars and scalar/mixed arrays are always
+/// `inline_` (the array may still *wrap*, but it stays in place).
+fn classify(ctx: *Ctx, ast: *const AST, kv_id: AST.Node.Id) Class {
+    const kv = ast.nodes[kv_id].kind.keyvalue;
+    return switch (ast.nodes[kv.value].kind) {
+        .mapping => if (fitsInline(ctx, ast, kv_id)) .inline_ else .section,
         .sequence => |first| if (allMappings(ast, first)) .aot else .inline_,
         else => .inline_,
     };
+}
+
+/// Whether a mapping value should render inline (`k = { ... }`) rather than as a
+/// `[section]`. Inlining is allowed only when the whole `key = value` line fits in
+/// `opts.width`, the subtree carries no comments (the inline form can't emit them
+/// — they'd be silently dropped), and the value isn't an empty mapping (kept as
+/// `[header]` so the table's existence round-trips).
+fn fitsInline(ctx: *Ctx, ast: *const AST, kv_id: AST.Node.Id) bool {
+    const kv = ast.nodes[kv_id].kind.keyvalue;
+    const value_id = kv.value;
+    switch (ast.nodes[value_id].kind) {
+        .mapping => |first| if (first == null) return false,
+        else => {},
+    }
+    if (nodeHasComments(ast, kv_id)) return false;
+    if (subtreeHasComments(ast, kv.key)) return false;
+    if (subtreeHasComments(ast, value_id)) return false;
+    const klen = keyByteLen(ast, kv.key) orelse return false;
+    const vlen = inlineByteLen(ast, value_id) orelse return false;
+    return klen + 3 + vlen <= ctx.opts.width; // `key` + ` = ` + value
+}
+
+// ── Width / comment measurement ─────────────────────────────────────────────
+// The inline-layout decision measures a value's rendered width by printing it to
+// a discarding writer with the very functions that emit the real output, so the
+// estimate can never drift from what's actually written.
+
+/// Rendered byte width of a value's inline form, or null if it can't be inlined
+/// (a `null`/alias inside makes `writeInline` error).
+fn inlineByteLen(ast: *const AST, id: AST.Node.Id) ?usize {
+    var buf: [256]u8 = undefined;
+    var disc = std.Io.Writer.Discarding.init(&buf);
+    writeInline(&disc.writer, ast, id) catch return null;
+    return @intCast(disc.fullCount());
+}
+
+/// Rendered byte width of a key (bare or quoted), or null for a non-string key.
+fn keyByteLen(ast: *const AST, key_id: AST.Node.Id) ?usize {
+    var buf: [128]u8 = undefined;
+    var disc = std.Io.Writer.Discarding.init(&buf);
+    writeKey(&disc.writer, ast, key_id) catch return null;
+    return @intCast(disc.fullCount());
+}
+
+fn nodeHasComments(ast: *const AST, id: AST.Node.Id) bool {
+    const c = ast.comments(id);
+    return c.leading.len != 0 or c.trailing != null or c.dangling.len != 0;
+}
+
+/// Whether any node in the subtree rooted at `id` carries a comment. Used to keep
+/// a commented mapping/array as an expanded section, where the printer can still
+/// emit the comments (the inline `{ ... }` / `[ ... ]` forms cannot).
+fn subtreeHasComments(ast: *const AST, id: AST.Node.Id) bool {
+    if (nodeHasComments(ast, id)) return true;
+    switch (ast.nodes[id].kind) {
+        .sequence => |first| {
+            var cur = first;
+            while (cur) |e| : (cur = ast.nodes[e].next_sibling)
+                if (subtreeHasComments(ast, e)) return true;
+        },
+        .mapping => |first| {
+            var cur = first;
+            while (cur) |kvid| : (cur = ast.nodes[kvid].next_sibling) {
+                if (nodeHasComments(ast, kvid)) return true;
+                const kv = ast.nodes[kvid].kind.keyvalue;
+                if (subtreeHasComments(ast, kv.key)) return true;
+                if (subtreeHasComments(ast, kv.value)) return true;
+            }
+        },
+        else => {},
+    }
+    return false;
 }
 
 /// True for a non-empty sequence whose every element is a mapping — the shape
@@ -332,8 +450,8 @@ fn writeUnicodeEscape(w: *Writer, char: u8) Writer.Error!void {
 
 // ── Public entry points ─────────────────────────────────────────────────────
 
-pub fn print(writer: *Writer, ast: *const AST) Error!void {
-    var ctx = Ctx{ .w = writer };
+pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
+    var ctx = Ctx{ .w = writer, .opts = options };
     switch (ast.nodes[ast.root].kind) {
         .mapping => |first| try ctx.body(ast, ast.root, first, null),
         // A non-table root (e.g. converting a JSON array) has no valid TOML
@@ -348,9 +466,9 @@ pub fn print(writer: *Writer, ast: *const AST) Error!void {
 
 /// Print the subtree at `id` as a standalone fragment (used by `get <path>`): a
 /// mapping prints as a document body rooted there; any other node prints inline.
-pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Error!void {
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
     _ = depth;
-    var ctx = Ctx{ .w = writer };
+    var ctx = Ctx{ .w = writer, .opts = options };
     switch (ast.nodes[id].kind) {
         .mapping => |first| try ctx.body(ast, id, first, null),
         else => {
@@ -365,26 +483,37 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
 const Parser = @import("parser.zig");
 
 fn expectPrint(input: []const u8, expected: []const u8) !void {
+    try expectPrintWith(input, expected, .{});
+}
+
+fn expectPrintWith(input: []const u8, expected: []const u8, options: AST.SerializeOptions) !void {
     var ast = try Parser.parseAbstract(std.testing.allocator, input, .TOML_1_1);
     defer ast.deinit();
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try print(&output.writer, &ast);
+    try print(&output.writer, &ast, options);
     try std.testing.expectEqualStrings(expected, output.written());
 }
 
-/// Round-trip: the printed TOML must reparse to an AST equal to the original.
+/// Round-trip: the printed TOML must reparse without error, and the canonical
+/// form must be a fixed point — re-printing the reparse yields identical bytes.
+/// (We can't compare ASTs directly: `AST.eql` is structural-identity on node ids,
+/// which canonicalization to inline tables intentionally changes even though the
+/// data is preserved. Idempotency is the right invariant for a canonical printer.)
 fn expectRoundTrip(input: []const u8) !void {
     var ast = try Parser.parseAbstract(std.testing.allocator, input, .TOML_1_1);
     defer ast.deinit();
-    var output: Writer.Allocating = .init(std.testing.allocator);
-    defer output.deinit();
-    try print(&output.writer, &ast);
+    var out1: Writer.Allocating = .init(std.testing.allocator);
+    defer out1.deinit();
+    try print(&out1.writer, &ast, .{});
 
-    var reparsed = try Parser.parseAbstract(std.testing.allocator, output.written(), .TOML_1_1);
+    var reparsed = try Parser.parseAbstract(std.testing.allocator, out1.written(), .TOML_1_1);
     defer reparsed.deinit();
-    errdefer std.log.err("printed:\n{s}", .{output.written()});
-    try std.testing.expect(ast.eql(reparsed));
+    var out2: Writer.Allocating = .init(std.testing.allocator);
+    defer out2.deinit();
+    errdefer std.log.err("printed:\n{s}", .{out1.written()});
+    try print(&out2.writer, &reparsed, .{});
+    try std.testing.expectEqualStrings(out1.written(), out2.written());
 }
 
 test "captures and re-emits comments (leading, trailing, table header)" {
@@ -421,7 +550,7 @@ test "block comment carried in degrades to a # run" {
     defer ast.deinit();
     var out: Writer.Allocating = .init(a);
     defer out.deinit();
-    try print(&out.writer, &ast);
+    try print(&out.writer, &ast, .{});
     try std.testing.expectEqualStrings("# line one\n# line two\nx = 1\n", out.written());
 }
 
@@ -449,8 +578,21 @@ test "datetimes print verbatim" {
     try expectPrint("when = 1979-05-27T07:32:00Z\nd = 1979-05-27\nt = 07:32:00\n", "when = 1979-05-27T07:32:00Z\nd = 1979-05-27\nt = 07:32:00\n");
 }
 
-test "nested table becomes a header section" {
+test "a small table collapses to an inline table" {
     try expectPrint(
+        \\[server]
+        \\host = "a"
+        \\port = 80
+        \\
+    ,
+        \\server = { host = "a", port = 80 }
+        \\
+    );
+}
+
+test "a table too wide for the budget stays a [section]" {
+    // The same table forced to expand by a tight width budget.
+    try expectPrintWith(
         \\[server]
         \\host = "a"
         \\port = 80
@@ -458,13 +600,30 @@ test "nested table becomes a header section" {
     ,
         \\[server]
         \\host = "a"
+        \\port = 80
+        \\
+    , .{ .width = 20 });
+}
+
+test "a table carrying a comment stays a [section]" {
+    // Inlining would drop the comment, so the table keeps its header form.
+    try expectPrint(
+        \\[server]
+        \\host = "a" # primary
+        \\port = 80
+        \\
+    ,
+        \\[server]
+        \\host = "a" # primary
         \\port = 80
         \\
     );
 }
 
-test "scalars precede sub-tables and blank-line separates" {
-    try expectPrint(
+test "scalars precede sub-tables and blank-line separates (when expanded)" {
+    // A tight budget keeps `[a]` and `[a.b]` from collapsing inline, exercising
+    // the scalars-before-subtables ordering and the blank-line separator.
+    try expectPrintWith(
         \\[a]
         \\x = 1
         \\[a.b]
@@ -477,11 +636,13 @@ test "scalars precede sub-tables and blank-line separates" {
         \\[a.b]
         \\y = 2
         \\
-    );
+    , .{ .width = 8 });
 }
 
 test "supertable header is suppressed when it has only sub-tables" {
-    try expectPrint(
+    // A tight budget keeps `b` expanded, so `a` has only the sub-table `b` and
+    // its own header is implied (suppressed) — printing `[a.b]` directly.
+    try expectPrintWith(
         \\[a.b]
         \\y = 2
         \\
@@ -489,19 +650,57 @@ test "supertable header is suppressed when it has only sub-tables" {
         \\[a.b]
         \\y = 2
         \\
-    );
+    , .{ .width = 8 });
 }
 
 test "empty table still emits its header" {
     try expectPrint("[a]\n", "[a]\n");
 }
 
-test "inline table canonicalizes to a section" {
-    try expectPrint("point = { x = 1, y = 2 }\n", "[point]\nx = 1\ny = 2\n");
+test "a small inline table stays inline (within the budget)" {
+    try expectPrint("point = { x = 1, y = 2 }\n", "point = { x = 1, y = 2 }\n");
+}
+
+test "a wide inline table expands to a section" {
+    try expectPrintWith(
+        "point = { x = 1, y = 2 }\n",
+        "[point]\nx = 1\ny = 2\n",
+        .{ .width = 10 },
+    );
 }
 
 test "arrays of scalars print inline" {
     try expectPrint("nums = [1, 2, 3]\nnested = [[1, 2], [\"a\", \"b\"]]\n", "nums = [1, 2, 3]\nnested = [[1, 2], [\"a\", \"b\"]]\n");
+}
+
+test "a wide array wraps one element per line with a trailing comma" {
+    try expectPrintWith(
+        "members = [\"alpha\", \"beta\", \"gamma\"]\n",
+        \\members = [
+        \\  "alpha",
+        \\  "beta",
+        \\  "gamma",
+        \\]
+        \\
+    ,
+        .{ .width = 20 },
+    );
+}
+
+test "pretty=false keeps a wide array on one line" {
+    try expectPrintWith(
+        "members = [\"alpha\", \"beta\", \"gamma\"]\n",
+        "members = [\"alpha\", \"beta\", \"gamma\"]\n",
+        .{ .width = 20, .pretty = false },
+    );
+}
+
+test "wrapped-array indent honors the indent option" {
+    try expectPrintWith(
+        "xs = [1, 2]\n",
+        "xs = [\n  1,\n  2,\n]\n",
+        .{ .width = 4, .indent = 2 },
+    );
 }
 
 test "array of tables prints as double-bracket sections" {
@@ -541,7 +740,7 @@ test "null value is unsupported" {
     const ast = AST{ .allocator = std.testing.allocator, .root = 0, .nodes = &nodes };
     var output: Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try std.testing.expectError(error.NullUnsupported, print(&output.writer, &ast));
+    try std.testing.expectError(error.NullUnsupported, print(&output.writer, &ast, .{}));
 }
 
 // Round-trips across the structural features.

@@ -264,17 +264,24 @@ export function readCString(ptr: number): string {
 }
 
 // FigSerializeOptions { u32 size; u8 pretty; u8 indent; u8 strip_comments; u8
-// lossless; } — 8 bytes, no padding. `size` is the version tag (its byte size,
-// so the core reads every field we set). All four flag bytes are written
+// lossless; u16 width; } — the u16 sits at offset 8 and the struct pads to a
+// 12-byte size (4-byte alignment from `size`). `size` is the version tag (its
+// byte size, so the core reads every field we set). All fields are written
 // explicitly; passing NULL (ptr 0) instead would select all defaults.
-const SERIALIZE_OPTIONS_SIZE = 8;
+const SERIALIZE_OPTIONS_SIZE = 12;
 export function encodeOptions(frame: Frame, options?: SerializeOptions): number {
   const pretty = options?.pretty === false ? 0 : 1;
   const indent = options?.indent ?? 2;
   const strip = options?.stripComments ? 1 : 0;
   const lossless = options?.lossless ? 1 : 0;
+  const width = options?.width ?? 80;
   return frame.bytes(
-    new Uint8Array([SERIALIZE_OPTIONS_SIZE, 0, 0, 0, pretty, indent, strip, lossless]),
+    new Uint8Array([
+      SERIALIZE_OPTIONS_SIZE, 0, 0, 0, // u32 size (LE)
+      pretty, indent, strip, lossless,
+      width & 0xff, (width >> 8) & 0xff, // u16 width (LE) at offset 8
+      0, 0, // padding to the 12-byte struct size
+    ]),
   );
 }
 

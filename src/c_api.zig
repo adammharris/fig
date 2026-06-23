@@ -1746,8 +1746,9 @@ pub export fn fig_value_map(
 
 /// Controls output style for `fig_value_serialize_opts`. A NULL pointer selects
 /// the defaults below (the same output as `fig_value_serialize`). `pretty` is
-/// honored by JSON and ZON; `indent` by JSON only. YAML and TOML render with
-/// their own fixed layout.
+/// honored by JSON, ZON, and TOML (array wrapping); `indent` by JSON and TOML's
+/// wrapped arrays; `width` by TOML's inline-vs-section layout. YAML renders with
+/// its own fixed layout.
 pub const FigSerializeOptions = extern struct {
     /// The caller-reported size of this struct (set to `sizeof`). Acts as a
     /// version tag: fields may be appended in later releases, and a given field
@@ -1755,9 +1756,11 @@ pub const FigSerializeOptions = extern struct {
     /// struct laid out by an older caller stays valid with new fields defaulted.
     size: u32 = @sizeOf(FigSerializeOptions),
     /// Nonzero (default): multi-line, indented output. Zero: compact single-line.
+    /// For TOML, zero keeps every array on one line; nonzero lets a wide array
+    /// wrap (see `width`).
     pretty: u8 = 1,
-    /// Spaces per indent level when `pretty` is nonzero (JSON only). 0 is treated
-    /// as the default (2).
+    /// Spaces per indent level when `pretty` is nonzero (JSON, and TOML's wrapped
+    /// arrays). 0 is treated as the default (2).
     indent: u8 = 2,
     /// Nonzero: drop comments carried on the value instead of emitting them.
     /// Zero (default): preserve them where the target format allows. Appended
@@ -1772,6 +1775,13 @@ pub const FigSerializeOptions = extern struct {
     /// builder has no source envelopes to decode). Appended after
     /// `strip_comments`, so older callers keep the lossy default.
     lossless: u8 = 0,
+    /// TOML only: the column budget driving its inline-vs-expanded layout. A
+    /// mapping/array that renders within `width` columns stays inline
+    /// (`k = { ... }` / `[a, b]`); a wider one expands to a `[section]` / a
+    /// wrapped array. 0 is treated as the default (80). Appended after `lossless`,
+    /// so older callers (smaller `size`) keep the 80-column default. Two bytes, so
+    /// the struct gains trailing padding to a 12-byte size.
+    width: u16 = 80,
 };
 
 /// Whether a caller-reported options `size` fully covers `field`. Fields beyond
@@ -1792,6 +1802,7 @@ fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions
     if (optionCovers(o.size, "pretty")) out.pretty = o.pretty != 0;
     if (optionCovers(o.size, "indent")) out.indent = if (o.indent == 0) 2 else o.indent;
     if (optionCovers(o.size, "strip_comments")) out.strip_comments = o.strip_comments != 0;
+    if (optionCovers(o.size, "width")) out.width = if (o.width == 0) 80 else o.width;
     return out;
 }
 
@@ -2756,6 +2767,45 @@ test "value c abi serialize options honor the size/version field" {
     opts.size = @offsetOf(FigSerializeOptions, "pretty"); // covers only `size`
     try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.json), &opts, &ptr, &len));
     try std.testing.expectEqualStrings("[\n  1,\n  2\n]\n", ptr[0..len]);
+}
+
+test "value c abi serialize options carry TOML width through to the inline/section choice" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    // { point: { x = 1, y = 2 } } — a small mapping value whose layout flips on
+    // the width budget.
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 1, &id));
+    const x_val = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_int(out_value, 2, &id));
+    const y_val = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "x", 1, &id));
+    const x_key = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "y", 1, &id));
+    const y_key = id;
+    const inner = [_]FigKeyValue{ .{ .key = x_key, .value = x_val }, .{ .key = y_key, .value = y_val } };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_map(out_value, &inner, inner.len, &id));
+    const point_val = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "point", 5, &id));
+    const point_key = id;
+    const outer = [_]FigKeyValue{.{ .key = point_key, .value = point_val }};
+    try std.testing.expectEqual(FigStatus.ok, fig_value_map(out_value, &outer, outer.len, &id));
+    const root = id;
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+
+    // Default width (80): the mapping fits, so it stays an inline table.
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.toml), &ptr, &len));
+    try std.testing.expectEqualStrings("point = { x = 1, y = 2 }\n", ptr[0..len]);
+
+    // A tight width budget forces it to expand to a [section].
+    const opts: FigSerializeOptions = .{ .width = 8 };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.toml), &opts, &ptr, &len));
+    try std.testing.expectEqualStrings("[point]\nx = 1\ny = 2\n", ptr[0..len]);
 }
 
 test "value c abi rejects an out-of-range child id" {

@@ -73,8 +73,10 @@ const CliActionOptions = union(CliAction) {
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
         /// Output style. `--compact` clears `pretty` for a single-line render;
-        /// `--indent N` sets the JSON indent width. Honored by JSON (pretty +
-        /// indent) and ZON (pretty only); YAML/TOML render with their own layout.
+        /// `--indent N` sets the indent width; `--width N` sets TOML's inline-vs-
+        /// expanded column budget. Honored by JSON (pretty + indent), ZON (pretty),
+        /// and TOML (pretty gates array wrapping; indent/width drive its layout);
+        /// YAML renders with its own fixed layout.
         serialize: fig.AST.SerializeOptions = .{},
         /// Suppress the lossy-conversion warnings normally written to stderr.
         quiet: bool = false,
@@ -181,7 +183,10 @@ const Help = struct {
             \\    usable as input or output, e.g. to inspect how any document parses.
             \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
             \\  --pretty: multi-line, indented output (the default).
-            \\  --indent N: spaces per indent level for pretty JSON (default 2).
+            \\  --indent N: spaces per indent level for pretty JSON, and for TOML's
+            \\    wrapped arrays (default 2).
+            \\  --width N: TOML column budget (default 80); a mapping/array that fits
+            \\    stays inline, a wider one expands to a [section] / wrapped array.
             \\  --strip-comments: drop comments instead of carrying them across formats.
             \\  --lossless: preserve values the target can't represent natively
             \\    (e.g. a null in TOML, a TOML datetime in JSON) via a $fig
@@ -917,6 +922,15 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 };
                 serialize.indent = std.fmt.parseInt(u8, n, 10) catch {
                     log.err("Invalid --indent value: {s}\n", .{n});
+                    return ArgError.MissingGetArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--width")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+                serialize.width = std.fmt.parseInt(u16, n, 10) catch {
+                    log.err("Invalid --width value: {s}\n", .{n});
                     return ArgError.MissingGetArgument;
                 };
             } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {

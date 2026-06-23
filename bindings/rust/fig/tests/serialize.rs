@@ -229,6 +229,29 @@ fn json_compact_vs_pretty() {
 }
 
 #[test]
+fn toml_width_controls_inline_vs_section() {
+    use fig::SerializeOptions;
+    let value = map(vec![(
+        "point",
+        map(vec![("x", 1i64.into()), ("y", 2i64.into())]),
+    )]);
+
+    // Default budget (80): the small mapping stays an inline table.
+    assert_eq!(
+        value.serialize(Format::Toml).unwrap(),
+        "point = { x = 1, y = 2 }\n"
+    );
+
+    // A tight budget forces it to expand to a [section].
+    assert_eq!(
+        value
+            .serialize_with(Format::Toml, SerializeOptions::default().width(8))
+            .unwrap(),
+        "[point]\nx = 1\ny = 2\n"
+    );
+}
+
+#[test]
 fn zon_compact_vs_pretty() {
     use fig::SerializeOptions;
     let value = map(vec![
