@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-const AST = @import("ast.zig");
+const AST = @import("ast/ast.zig");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
 const json = @import("json/json.zig");

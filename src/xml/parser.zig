@@ -22,7 +22,7 @@
 const Parser = @This();
 
 const std = @import("std");
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 const Type = @import("xml.zig").Type;
 const Span = @import("../util/span.zig");

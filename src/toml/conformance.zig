@@ -18,7 +18,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Parser = @import("parser.zig");
 const TomlType = @import("toml.zig").Type;
 const JsonParser = @import("../json/parser.zig");

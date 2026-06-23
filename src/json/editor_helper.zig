@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const editor = @import("../editor.zig");
 const json = @import("json.zig");
 const log = std.log.scoped(.editor);

@@ -12,7 +12,7 @@
 //! `Document` / `AST` directly; this is the one-shot "give me my struct" path.
 
 const std = @import("std");
-const AST = @import("ast.zig");
+const AST = @import("ast/ast.zig");
 const build_options = @import("build_options");
 
 const Json = @import("json/parser.zig");

@@ -1,6 +1,6 @@
 const yaml = @This();
 const Document = @import("../document.zig");
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 
 pub const Parser = @import("parser.zig");
 pub const Tokenizer = @import("tokenizer.zig");

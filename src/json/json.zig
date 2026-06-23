@@ -1,5 +1,5 @@
 const json = @This();
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 
 pub const Parser = @import("parser.zig");

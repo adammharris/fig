@@ -354,7 +354,7 @@ fn scanForDelim(source: []const u8, start: usize, d: Delimiter) ?Span {
 // --- tests ---------------------------------------------------------------
 
 const testing = std.testing;
-const AST = @import("ast.zig");
+const AST = @import("ast/ast.zig");
 
 fn rootKind(doc: Document) AST.Node.Kind {
     return doc.ast.nodes[doc.ast.root].kind;

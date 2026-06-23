@@ -22,7 +22,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Parser = @import("parser.zig");
 const JsonType = @import("json.zig").Type;
 

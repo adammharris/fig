@@ -22,7 +22,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const AST = @import("ast.zig");
+const AST = @import("ast/ast.zig");
 const Lossless = @import("lossless.zig");
 const Writer = std.Io.Writer;
 

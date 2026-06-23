@@ -5,7 +5,7 @@ pub const Language = @import("language.zig");
 
 pub const Editor = @import("editor.zig").Editor;
 pub const Document = @import("document.zig");
-pub const AST = @import("ast.zig");
+pub const AST = @import("ast/ast.zig");
 pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
 /// Serialization diagnostics: report what a cross-format conversion would lose.

@@ -1,6 +1,6 @@
 const xml = @This();
 const std = @import("std");
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 const Writer = std.Io.Writer;
 

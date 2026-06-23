@@ -13,7 +13,7 @@ const Parser = @This();
 
 const std = @import("std");
 const testing = std.testing;
-const AST = @import("../ast.zig");
+const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 const Type = @import("toml.zig").Type;
 const Span = @import("../util/span.zig");
