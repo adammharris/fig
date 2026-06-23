@@ -7,10 +7,7 @@ fn main() {
     let cargo_target = env::var("TARGET").expect("Cargo should set TARGET");
     let cargo_host = env::var("HOST").expect("Cargo should set HOST");
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let repo_root = manifest_dir
-        .ancestors()
-        .nth(3)
-        .expect("bindings/rust/fig should be three levels below the repository root");
+    let source_root = zig_source_root(&manifest_dir);
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let prefix = out_dir.join("zig-prefix");
 
@@ -53,7 +50,7 @@ fn main() {
     let status = command
         .arg("--prefix")
         .arg(&prefix)
-        .current_dir(repo_root)
+        .current_dir(&source_root)
         .status()
         .expect("failed to run `zig build`");
 
@@ -74,15 +71,68 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=fig");
 
+    println!("cargo:rerun-if-env-changed=FIG_ZIG_ROOT");
     println!(
         "cargo:rerun-if-changed={}",
-        repo_root.join("build.zig").display()
+        source_root.join("build.zig").display()
     );
-    println!("cargo:rerun-if-changed={}", repo_root.join("src").display());
     println!(
         "cargo:rerun-if-changed={}",
-        repo_root.join("include/fig.h").display()
+        source_root.join("src").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        source_root.join("include/fig.h").display()
+    );
+}
+
+/// Locate fig's Zig source tree — the working directory `zig build install-c-lib`
+/// runs in. Three strategies, in priority order:
+///
+///   1. `FIG_ZIG_ROOT` — an explicit override for unusual layouts.
+///   2. An ancestor directory that *is* the source tree — the in-repo case
+///      (`bindings/rust/fig` lives under the repo root). Preferred over the
+///      vendored copy so a working-tree build always uses live source, never a
+///      stale vendor.
+///   3. A `zig/` directory vendored next to this crate — the published case,
+///      where there is no repo above us. Populated by `vendor-zig.sh` before
+///      packaging and force-included via `Cargo.toml`'s `include`.
+fn zig_source_root(manifest_dir: &Path) -> PathBuf {
+    if let Some(dir) = env::var_os("FIG_ZIG_ROOT") {
+        let dir = PathBuf::from(dir);
+        assert!(
+            is_fig_zig_root(&dir),
+            "FIG_ZIG_ROOT={} is not a fig Zig source tree (no build.zig + src/c_api.zig)",
+            dir.display()
+        );
+        return dir;
+    }
+
+    for ancestor in manifest_dir.ancestors() {
+        if is_fig_zig_root(ancestor) {
+            return ancestor.to_path_buf();
+        }
+    }
+
+    let vendored = manifest_dir.join("zig");
+    if is_fig_zig_root(&vendored) {
+        return vendored;
+    }
+
+    panic!(
+        "could not locate fig's Zig source. In a checkout it is found by walking up \
+         from {}; in a published crate it is vendored at ./zig — run ./vendor-zig.sh \
+         to populate it, or set FIG_ZIG_ROOT to a fig source tree.",
+        manifest_dir.display()
+    );
+}
+
+/// Whether `dir` is the root of fig's Zig source: enough of a fingerprint that we
+/// won't mistake an unrelated `build.zig` for it.
+fn is_fig_zig_root(dir: &Path) -> bool {
+    dir.join("build.zig").is_file()
+        && dir.join("build.zig.zon").is_file()
+        && dir.join("src/c_api.zig").is_file()
 }
 
 /// Repackage a Zig-produced static archive so Apple's `ld` accepts it.

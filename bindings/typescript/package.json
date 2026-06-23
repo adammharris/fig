@@ -1,6 +1,6 @@
 {
   "name": "@adammharris/fig",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "JSON/JSONC/YAML/TOML/ZON parsing, comment-preserving editing, and serialization (WebAssembly).",
   "type": "module",
   "publishConfig": {

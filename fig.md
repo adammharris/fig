@@ -105,7 +105,7 @@ console.log(parse('{"name":"fig"}', Format.Json)); // { name: "fig" }
 - [x] Standardize/document errors
 - [x] Typescript bindings
 - [x] Serialization options
-- [ ] Pin C ABI surface
+- [x] Pin C ABI surface
 
 Other planned features:
 - Native `.fig` format

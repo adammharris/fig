@@ -96,6 +96,24 @@ pub fn build(b: *std.Build) void {
     const install_c_lib_step = b.step("install-c-lib", "Install the C ABI static library");
     install_c_lib_step.dependOn(&install_c_lib.step);
 
+    // Vendor this Zig source into the Rust crate (bindings/rust/fig/zig) so the
+    // published crate is self-contained — build.rs compiles the core from there
+    // when there is no repo above it. A small Zig program rather than a shell
+    // script, so it runs anywhere the crate's own `zig build` already does.
+    const vendor_rust = b.addExecutable(.{
+        .name = "vendor_rust",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/vendor-rust.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const vendor_rust_run = b.addRunArtifact(vendor_rust);
+    vendor_rust_run.addArg(b.pathFromRoot("."));
+    vendor_rust_run.addArg(b.pathFromRoot("bindings/rust/fig/zig"));
+    const vendor_rust_step = b.step("vendor-rust", "Vendor the Zig source into the Rust crate for publishing");
+    vendor_rust_step.dependOn(&vendor_rust_run.step);
+
     // WebAssembly build for the TypeScript bindings: compile the same C ABI to a
     // freestanding `reactor` module (no `_start`; `rdynamic` keeps every
     // exported `fig_*` symbol). `c_api.zig` already selects `wasm_allocator` and

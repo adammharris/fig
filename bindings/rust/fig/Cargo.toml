@@ -3,6 +3,22 @@ name = "fig"
 version.workspace = true
 edition.workspace = true
 links = "fig"
+# The crate builds the fig core from Zig source (see build.rs). That source is
+# not in this directory in a checkout — build.rs walks up to the repo root — so
+# `zig build vendor-rust` copies it into ./zig before publishing. ./zig is
+# git-ignored, so `include` (an allowlist that bypasses VCS rules) is what
+# actually puts it in the packaged tarball.
+# Precise paths (not `zig/**/*`) so a stray build cache — a `.zig-cache/` or
+# `zig-out/` left by running `zig build` inside the vendor dir — never lands in
+# the tarball. These mirror the set `vendor-rust` copies.
+include = [
+    "build.rs",
+    "src/**/*",
+    "zig/build.zig",
+    "zig/build.zig.zon",
+    "zig/src/**/*",
+    "zig/include/**/*",
+]
 
 [lib]
 name = "fig"
