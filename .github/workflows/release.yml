@@ -54,18 +54,42 @@ jobs:
       - name: Vendor the Zig source and licenses into the crates
         run: zig build vendor-rust
 
-      # fig-macros must be on crates.io before fig
+      # Publishes are idempotent: re-running the release for a version that's
+      # already on crates.io is a no-op, but auth/permission/network failures
+      # still fail the job. crates.io reports a duplicate as "already uploaded"
+      # / "already exists"; only that exact signal is swallowed.
+      # fig-macros must be on crates.io before fig.
       - name: Publish fig-macros
-        run: cargo publish -p fig-macros
         working-directory: bindings/rust
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if out=$(cargo publish -p fig-macros 2>&1); then
+            echo "$out"
+          else
+            echo "$out"
+            if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
+              echo "::notice::fig-macros version already on crates.io — skipping"
+            else
+              exit 1
+            fi
+          fi
 
       - name: Publish fig
-        run: cargo publish -p fig
         working-directory: bindings/rust
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if out=$(cargo publish -p fig 2>&1); then
+            echo "$out"
+          else
+            echo "$out"
+            if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
+              echo "::notice::fig version already on crates.io — skipping"
+            else
+              exit 1
+            fi
+          fi
 
   npm:
     name: Publish package (npm)
@@ -99,8 +123,22 @@ jobs:
         working-directory: bindings/typescript
       - run: npm test
         working-directory: bindings/typescript
+      # Idempotent like the crate publishes: npm reports a duplicate version as
+      # E403 "cannot publish over the previously published versions" — only that
+      # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
+      # (a different E403, e.g. "Forbidden"/"do not have permission") still fails.
       - name: Publish to npm
-        run: npm publish --access public
         working-directory: bindings/typescript
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if out=$(npm publish --access public 2>&1); then
+            echo "$out"
+          else
+            echo "$out"
+            if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
+              echo "::notice::npm version already published — skipping"
+            else
+              exit 1
+            fi
+          fi
