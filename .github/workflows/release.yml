@@ -6,9 +6,10 @@ name: Release (npm + crates.io)
 # workflow (homebrew.yml).
 #
 # DISABLED FOR NOW: runs only via manual `workflow_dispatch`. Re-enable automatic
-# tag releases by uncommenting the `push.tags` trigger below. Before enabling,
-# note the crate cannot publish until `bindings/rust/fig/Cargo.toml` gains a
-# `license`/`license-file` and `description` (crates.io rejects without them).
+# tag releases by uncommenting the `push.tags` trigger below. The crate carries
+# the `license`, `description`, and `readme` crates.io needs (the README and
+# license text are vendored in from the repo root by the `vendor-rust` step that
+# runs before `cargo publish`).
 #
 # Required repository secrets (when enabled):
 #   NPM_TOKEN             — npm automation token with publish rights

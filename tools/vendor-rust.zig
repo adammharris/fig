@@ -65,9 +65,17 @@ pub fn main(init: std.process.Init) !void {
         inline for (license_files) |name| {
             try src_root.copyFile(name, dir, name, io, .{ .make_path = true });
         }
+        // The crate README crates.io renders on the package page. The canonical
+        // text is the repo-root `fig.md` (the same content the npm package
+        // vendors as its own README). Only the top-level `fig` crate gets one —
+        // `fig-macros` is an internal helper re-exported through `fig`'s derive
+        // feature, so it stays README-less. Git-ignored here; `include`-added.
+        if (comptime std.mem.eql(u8, crate_dir, "bindings/rust/fig")) {
+            try src_root.copyFile("fig.md", dir, "README.md", io, .{ .make_path = true });
+        }
     }
 
-    std.debug.print("vendor-rust: copied {d} files + {d} trees + {d} licenses x{d} crates -> {s}\n", .{ files.len, trees.len, license_files.len, crate_dirs.len, dest_root_path });
+    std.debug.print("vendor-rust: copied {d} files + {d} trees + {d} licenses x{d} crates + 1 readme -> {s}\n", .{ files.len, trees.len, license_files.len, crate_dirs.len, dest_root_path });
 }
 
 /// Recursively copy `sub` from `src_root` to the same relative path under `dest_root`.

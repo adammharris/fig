@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "Parse, edit, and convert config files while preserving comments. Supports JSON, YAML, TOML, and more."
 repository = "https://github.com/adammharris/fig"
+# Rendered by crates.io on the package page. The file is the repo-root `fig.md`,
+# copied in by `zig build vendor-rust` before publishing (git-ignored here, so
+# `include` force-adds it to the tarball — see below). A local checkout that has
+# not run the vendor step simply has no README.md; cargo only requires it when
+# packaging/publishing, not for `build`/`test`.
+readme = "README.md"
 links = "fig"
 # The crate builds the fig core from Zig source (see build.rs). That source is
 # not in this directory in a checkout — build.rs walks up to the repo root — so
@@ -24,6 +30,7 @@ include = [
     # Vendored in by `zig build vendor-rust` from the repo root (git-ignored here).
     "LICENSE-MIT",
     "LICENSE-APACHE",
+    "README.md",
 ]
 
 [lib]

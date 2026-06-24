@@ -5,9 +5,11 @@ zig-out/*
 spec.md
 bindings/rust/target/
 bindings/rust/fig/zig/
-# License text vendored into each crate at publish time by `zig build vendor-rust`;
-# the canonical copies live at the repo root.
+# License text and README vendored into each crate at publish time by
+# `zig build vendor-rust`; the canonical copies live at the repo root
+# (LICENSE-MIT, LICENSE-APACHE, and fig.md → the crate's README.md).
 bindings/rust/fig/LICENSE-MIT
 bindings/rust/fig/LICENSE-APACHE
+bindings/rust/fig/README.md
 bindings/rust/fig-macros/LICENSE-MIT
 bindings/rust/fig-macros/LICENSE-APACHE
