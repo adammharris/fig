@@ -58,7 +58,10 @@ jobs:
           version: 0.16.0
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # Node 24+: the test suite uses `using` (explicit resource management),
+          # which only parses under `--experimental-transform-types` type
+          # stripping on Node 24 and later.
+          node-version: 24
           cache: npm
           cache-dependency-path: bindings/typescript/package-lock.json
       - run: npm ci

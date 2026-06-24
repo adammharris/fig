@@ -61,6 +61,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     mod.addImport("build_options", options_mod);
+    // `root.zig`'s `test {}` block pulls in `c_api.zig`, which uses
+    // `std.heap.c_allocator` on non-wasm targets — that allocator is only
+    // available when linking libc. macOS links libc implicitly, so the test
+    // suite builds there regardless, but Linux requires it to be explicit or the
+    // module-test compile fails. WebAssembly uses `wasm_allocator` and must not
+    // link libc, so gate on the architecture.
+    mod.link_libc = !resolved_target.cpu.arch.isWasm();
 
     const exe = b.addExecutable(.{
         .name = "fig",
