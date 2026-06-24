@@ -26,6 +26,7 @@ const CliAction = enum {
     edit,
     get,
     comment,
+    check,
 };
 
 const CliActionOptions = union(CliAction) {
@@ -94,6 +95,9 @@ const CliActionOptions = union(CliAction) {
         /// When set, delete the targeted comment instead of adding/setting it
         /// (then `text` is unused).
         delete: bool = false,
+        /// When set, print the targeted comment to stdout instead of editing it
+        /// (then `text` is unused, and the file is opened read-only).
+        get: bool = false,
         requested_help: bool = false,
         format: Format,
         /// Set when the format could not be inferred from the file extension:
@@ -102,6 +106,21 @@ const CliActionOptions = union(CliAction) {
         /// As in `edit`: when set, `file` is a host document and the comment is
         /// applied to the embedded config of this archetype, spliced back.
         embed: ?fig.Embed.Type = null,
+    },
+    check: struct {
+        /// One or more files to validate. `-` reads stdin (single document).
+        files: [][]const u8,
+        /// Explicit `--input` format applied to every file. When null, each
+        /// file's format is resolved from its extension, then by sniffing its
+        /// contents — the same precedence `get` uses.
+        format: ?Format = null,
+        /// `--spec` version string (e.g. "1.0" for TOML). Resolved per file
+        /// against the resolved format; null validates against the default
+        /// version of each format.
+        spec: ?[]const u8 = null,
+        /// Suppress the per-file `ok` lines on success; errors still print.
+        quiet: bool = false,
+        requested_help: bool = false,
     },
 };
 
@@ -134,6 +153,7 @@ const Help = struct {
             \\  edit: edits part of file
             \\  get: print a file or a specific part of a file to stdout
             \\  comment: add or edit a comment on part of a file
+            \\  check: validate that one or more files parse cleanly
             \\
             \\For information on action options, pass --help or -h
             \\to the action you would like to learn about.
@@ -156,12 +176,15 @@ const Help = struct {
 
     fn comment(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} comment [--inline] [--delete] <file> <path> [<text>]
+            \\Usage: {s} comment [--inline] [--delete | --get] <file> <path> [<text>]
             \\  default: add an own-line comment ABOVE the node at <path>
             \\  --inline: target the same-line trailing comment on the value at
             \\    <path> instead (set replaces any existing one on that line)
             \\  --delete: remove the targeted comment instead of adding it; <text>
             \\    is then omitted (a no-op when there is no such comment)
+            \\  --get: print the targeted comment to stdout (markers stripped) and
+            \\    make no change; <text> is then omitted (prints a blank line when
+            \\    there is no such comment)
             \\  the comment marker is added for you: # for YAML/TOML, // for
             \\    JSONC/JSON5/ZON. Strict JSON has no comments (rejected).
             \\  <text> may span multiple lines (leading only): one comment line each.
@@ -197,6 +220,26 @@ const Help = struct {
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: reads the YAML frontmatter
+            \\
+        , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn check(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} check [--input <format>] [-q|--quiet] <file>...
+            \\  Validate that each file parses cleanly as its format. Prints an
+            \\  `ok` line per file and exits 0 when all parse; prints an error
+            \\  line to stderr for each failing file and exits 1 if any fail.
+            \\  -i, --input: parse every file as this format (json, jsonc, json5,
+            \\    yaml, toml, zon, xml, native/fig). Default: infer from each
+            \\    file's extension, then by sniffing its contents.
+            \\  -s, --spec: validate against a specific language version, where one
+            \\    is selectable: TOML `1.0`/`1.1` (default 1.1), YAML `1.2.2`.
+            \\    JSON strictness is the format itself (json vs jsonc vs json5).
+            \\  -q, --quiet: suppress the per-file `ok` lines; errors still print.
+            \\  reads stdin when <file> is `-`.
+            \\  .md/.markdown files: validates the YAML frontmatter.
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -243,6 +286,10 @@ pub fn main(init: std.process.Init) !void {
         },
         ArgError.MissingCommentArgument => {
             try Help.comment(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingCheckArgument => {
+            try Help.check(&stderr_terminal, "fig");
             std.process.exit(2);
         },
         else => return err,
@@ -332,7 +379,7 @@ pub fn main(init: std.process.Init) !void {
                     from = try resolveFormatFromContent(init.arena.allocator(), content, opts.file);
                     if (!opts.output_explicit) to = from;
                 }
-                break :blk try parseSliceAs(from, init.arena.allocator(), content);
+                break :blk try parseSliceAs(from, .{}, init.arena.allocator(), content);
             };
 
             // XML is reader-only: a `--from`/detected source but never a `--to`
@@ -461,8 +508,45 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
             const a = init.arena.allocator();
-            const input = try getInput(io, opts.file, .read_write);
+            // `--get` only reads: open read-only and never write back.
+            const input = try getInput(io, opts.file, if (opts.get) .read_only else .read_write);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+
+            if (opts.get) {
+                const comment = if (opts.embed) |embed_type|
+                    try getCommentFromEmbed(a, io, input, embed_type, opts.path, opts.inline_comment)
+                else switch (resolved) {
+                    // Strict JSON has no comment syntax: there can be nothing to get.
+                    .json => {
+                        try stderr_terminal.writer.print("error: strict JSON has no comments; use a .jsonc or .json5 file instead.\n", .{});
+                        try stderr_terminal.writer.flush();
+                        std.process.exit(2);
+                    },
+                    .jsonc, .json5 => |f| if (comptime build_options.lang_json) try getCommentFromFile(fig.Language.JSON, a, io, input, opts.path, opts.inline_comment, jsonDialect(f)) else return error.FormatDisabled,
+                    .yaml, .yml => if (comptime build_options.lang_yaml)
+                        try getCommentFromFile(fig.Language.YAML, a, io, input, opts.path, opts.inline_comment, fig.Language.YAML.default_type)
+                    else
+                        return error.FormatDisabled,
+                    .toml => if (comptime build_options.lang_toml)
+                        try getCommentFromFile(fig.Language.TOML, a, io, input, opts.path, opts.inline_comment, fig.Language.TOML.default_type)
+                    else
+                        return error.FormatDisabled,
+                    .zon => if (comptime build_options.lang_zon)
+                        try getCommentFromFile(fig.Language.ZON, a, io, input, opts.path, opts.inline_comment, fig.Language.ZON.default_type)
+                    else
+                        return error.FormatDisabled,
+                    .xml => return error.UnsupportedXmlEdit,
+                    .native => return error.UnsupportedNativeEdit,
+                };
+                // Print the comment followed by a newline. An absent comment (null)
+                // and a present-but-empty one both print just the newline — the CLI
+                // can't distinguish them, but the bindings can (Option / null).
+                try stdout_terminal.writer.print("{s}\n", .{comment orelse ""});
+                try stdout_terminal.writer.flush();
+                return;
+            }
 
             // Pick the op from the two flags: `--inline` selects the trailing
             // (same-line) comment vs the leading block; `--delete` removes it
@@ -475,7 +559,7 @@ pub fn main(init: std.process.Init) !void {
 
             if (opts.embed) |embed_type| {
                 try applyToEmbed(a, io, input, embed_type, opts.path, opts.text, op);
-            } else switch (if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format) {
+            } else switch (resolved) {
                 // Strict JSON has no comment syntax: fail with a clear message
                 // rather than letting the editor surface a bare error.
                 .json => {
@@ -501,7 +585,95 @@ pub fn main(init: std.process.Init) !void {
                 .native => return error.UnsupportedNativeEdit,
             }
         },
+        .check => {
+            const opts = config.options.check;
+            if (opts.requested_help) {
+                try Help.check(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const a = init.arena.allocator();
+
+            // Validate every file, reporting each independently, so one bad file
+            // doesn't hide the status of the rest. Success lines go to stdout
+            // (silenced by `--quiet`); failures always go to stderr. A single
+            // bad file makes the whole run exit non-zero — the CI contract.
+            var any_failed = false;
+            for (opts.files) |file| {
+                if (checkOne(a, io, file, opts.format, opts.spec)) |fmt| {
+                    if (!opts.quiet) {
+                        try stdout_terminal.setColor(.green);
+                        try stdout_terminal.writer.writeAll("ok");
+                        try stdout_terminal.setColor(.reset);
+                        // Echo the pinned version alongside the format when one
+                        // was requested, so `ok` states exactly what was checked.
+                        if (opts.spec) |spec|
+                            try stdout_terminal.writer.print(": {s} ({s} {s})\n", .{ file, @tagName(fmt), spec })
+                        else
+                            try stdout_terminal.writer.print(": {s} ({s})\n", .{ file, @tagName(fmt) });
+                    }
+                } else |err| {
+                    any_failed = true;
+                    try stderr_terminal.setColor(.red);
+                    try stderr_terminal.writer.writeAll("error");
+                    try stderr_terminal.setColor(.reset);
+                    switch (err) {
+                        // A spec mismatch is a CLI usage error, not a malformed
+                        // document — say so plainly with the offending version.
+                        error.UnsupportedSpec => try stderr_terminal.writer.print(
+                            ": {s}: --spec '{s}' is not valid for this format\n",
+                            .{ file, opts.spec.? },
+                        ),
+                        else => try stderr_terminal.writer.print(": {s}: {s}\n", .{ file, @errorName(err) }),
+                    }
+                }
+            }
+            try stdout_terminal.writer.flush();
+            try stderr_terminal.writer.flush();
+            if (any_failed) std.process.exit(1);
+        },
     };
+}
+
+/// Validate that `file` parses cleanly, returning the resolved format on success.
+/// Format precedence mirrors `get`: an explicit `--input` `override`, else the
+/// file extension, else sniffing the contents. `spec_str` (from `--spec`) pins
+/// the language version to validate against and is resolved once the format is
+/// known — an unknown/inapplicable version is reported like a parse error. When
+/// the extension implies an embedded region (e.g. markdown frontmatter) the
+/// inner document is extracted and parsed. Any IO/parse/spec error propagates to
+/// the caller, which reports it.
+fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8) !Format {
+    const input = try getInput(io, file, .read_only);
+    defer if (!std.mem.eql(u8, file, "-")) input.close(io);
+    const content = try readAll(allocator, io, input);
+
+    var format: Format = undefined;
+    var embed: ?fig.Embed.Type = null;
+    if (override) |f| {
+        // An explicit format is taken at face value: no extension-driven embed
+        // extraction, so `--input yaml file.md` parses the whole file as YAML.
+        format = f;
+    } else if (detectLanguageFromFileEnding(file)) |d| {
+        format = d.format;
+        embed = d.embed;
+    } else {
+        format = try resolveFormatFromContent(allocator, content, file);
+    }
+
+    // Resolve `--spec` against the now-known format. This rejects a nonsense
+    // version (e.g. `--spec 1.0` on a JSON or markdown file) before parsing.
+    const spec = try resolveSpec(format, spec_str);
+
+    // `Embed.extract` parses the inner region; `parseSliceAs` parses the whole
+    // file. Either surfaces a parse error — all we need to validate. The parsed
+    // result is discarded; we only care that it parsed. (Embed extraction uses
+    // the inner format's default version; `spec` was still validated above.)
+    if (embed) |embed_type| {
+        _ = try fig.Embed.extract(allocator, content, embed_type);
+    } else {
+        _ = try parseSliceAs(format, spec, allocator, content);
+    }
+    return format;
 }
 
 fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
@@ -510,17 +682,52 @@ fn readAll(allocator: std.mem.Allocator, io: Io, file: Io.File) ![]u8 {
     return file_reader.interface.allocRemaining(allocator, max_size);
 }
 
-/// Parse already-read `content` as the CLI `format`. The content-based parser the
-/// `get` action uses: reading the input once means detection and parsing share
-/// the same bytes, so a piped stdin is consumed only once. `.jsonc`/`.json5`
-/// select the JSON dialect; `.yml` aliases YAML; `.native` is the `.fig` grammar.
-fn parseSliceAs(format: Format, allocator: std.mem.Allocator, content: []const u8) !fig.Document {
+/// Per-language version/dialect to parse under. Each field defaults to its
+/// language's `default_type`, so `parseSliceAs(fmt, .{}, …)` behaves exactly as
+/// before — only `check --spec` overrides a field. JSON strictness is carried by
+/// the `Format` itself (json/jsonc/json5); ZON/XML/native have one grammar each,
+/// so they need no field here.
+const Spec = struct {
+    toml: fig.Language.TOML.Type = fig.Language.TOML.default_type,
+    yaml: fig.Language.YAML.Type = fig.Language.YAML.default_type,
+};
+
+/// Resolve a `--spec` version string against the format it will parse. Null
+/// `spec_str` yields the default spec. Errors when the version is unknown for
+/// that format, or when the format exposes no selectable version (then `--spec`
+/// doesn't apply — JSON strictness is the format name, ZON/XML/native are
+/// single-grammar). YAML currently has only 1.2.2; 1.1 is not yet implemented.
+fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spec {
+    const s = spec_str orelse return .{};
+    const eq = std.mem.eql;
+    return switch (format) {
+        .toml => if (eq(u8, s, "1.0") or eq(u8, s, "1.0.0"))
+            .{ .toml = .TOML_1_0 }
+        else if (eq(u8, s, "1.1") or eq(u8, s, "1.1.0"))
+            .{ .toml = .TOML_1_1 }
+        else
+            error.UnsupportedSpec,
+        .yaml, .yml => if (eq(u8, s, "1.2") or eq(u8, s, "1.2.2"))
+            .{ .yaml = .v1_2_2 }
+        else
+            error.UnsupportedSpec,
+        .json, .jsonc, .json5, .zon, .xml, .native => error.UnsupportedSpec,
+    };
+}
+
+/// Parse already-read `content` as the CLI `format` under `spec`. The
+/// content-based parser the `get` and `check` actions use: reading the input
+/// once means detection and parsing share the same bytes, so a piped stdin is
+/// consumed only once. `.jsonc`/`.json5` select the JSON dialect; `.yml` aliases
+/// YAML; `.native` is the `.fig` grammar. `spec` picks the language version
+/// where one is selectable (TOML 1.0 vs 1.1, YAML version).
+fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8) !fig.Document {
     return switch (format) {
         .json => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON) else error.FormatDisabled,
         .jsonc => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSONC) else error.FormatDisabled,
         .json5 => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON5) else error.FormatDisabled,
-        .yaml, .yml => if (comptime build_options.lang_yaml) fig.Language.YAML.Parser.parse(allocator, content, fig.Language.YAML.default_type) else error.FormatDisabled,
-        .toml => if (comptime build_options.lang_toml) fig.Language.TOML.Parser.parse(allocator, content, fig.Language.TOML.default_type) else error.FormatDisabled,
+        .yaml, .yml => if (comptime build_options.lang_yaml) fig.Language.YAML.Parser.parse(allocator, content, spec.yaml) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) fig.Language.TOML.Parser.parse(allocator, content, spec.toml) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
         .native => fig.Native.parse(allocator, content),
@@ -613,6 +820,74 @@ fn applyToFile(
     const edited = try applyEdit(Lang, allocator, content, path, text, op, dialect);
     try file.writePositionalAll(io, edited, 0);
     try file.setLength(io, edited.len);
+}
+
+/// Read back a comment from `content` (parsed under `dialect`) without writing:
+/// the trailing (same-line) comment on the value at `path` when `inline_comment`,
+/// else the own-line block above the node. Returns `null` when there is no such
+/// comment (the CLI then prints a blank line). The read-only twin of `applyEdit`'s
+/// comment ops.
+fn getComment(
+    comptime Lang: type,
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    path: []fig.AST.PathSegment,
+    inline_comment: bool,
+    dialect: Lang.Type,
+) !?[]u8 {
+    var editor: fig.Editor(Lang) = .{ .allocator = allocator, .format = dialect };
+    try editor.init(content);
+    defer editor.deinit();
+    return if (inline_comment)
+        editor.getTrailingComment(path)
+    else
+        editor.getLeadingComment(path);
+}
+
+fn getCommentFromFile(
+    comptime Lang: type,
+    allocator: std.mem.Allocator,
+    io: Io,
+    file: Io.File,
+    path: []fig.AST.PathSegment,
+    inline_comment: bool,
+    dialect: Lang.Type,
+) !?[]u8 {
+    const content = try readAll(allocator, io, file);
+    defer allocator.free(content);
+    return getComment(Lang, allocator, content, path, inline_comment, dialect);
+}
+
+/// Read a comment from the embedded config of a host file: extract the region,
+/// parse only that slice as its inner format, and read the comment from it. The
+/// read-only twin of `applyToEmbed`.
+fn getCommentFromEmbed(
+    allocator: std.mem.Allocator,
+    io: Io,
+    file: Io.File,
+    embed_type: fig.Embed.Type,
+    path: []fig.AST.PathSegment,
+    inline_comment: bool,
+) !?[]u8 {
+    const content = try readAll(allocator, io, file);
+    defer allocator.free(content);
+
+    const embedded = try fig.Embed.extract(allocator, content, embed_type);
+    defer embedded.deinit(allocator);
+    const region = embedded.region;
+    const inner = content[region.content.start..region.content.end];
+
+    return switch (embed_type) {
+        .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
+            try getComment(fig.Language.YAML, allocator, inner, path, inline_comment, fig.Language.YAML.default_type)
+        else
+            return error.FormatDisabled,
+        // Strict JSON frontmatter has no comment syntax: nothing to read.
+        .FrontmatterJson => if (comptime build_options.lang_json)
+            try getComment(fig.Language.JSON, allocator, inner, path, inline_comment, .JSON)
+        else
+            return error.FormatDisabled,
+    };
 }
 
 /// Apply an edit to the embedded config of a host file in place: extract the
@@ -765,7 +1040,15 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     return .{ .format = format, .embed = null };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, MissingCommentArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+
+/// Map a `--input`/`-i` format name to a `Format`. Accepts every CLI format
+/// plus the `fig` alias for the native grammar. Returns null for an unknown
+/// name so callers can emit a tailored error.
+fn parseFormatName(name: []const u8) ?Format {
+    if (std.mem.eql(u8, name, "fig")) return .native;
+    return std.meta.stringToEnum(Format, name);
+}
 
 fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     const log = std.log.scoped(.parseConfig);
@@ -835,16 +1118,19 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     } else if (std.mem.eql(u8, action_str, "comment") or std.mem.eql(u8, action_str, "c")) {
         config.action = .comment;
 
-        // Leading flags, in any order: `--inline` and `--delete`. Consume them
-        // until the first non-flag token (the file).
+        // Leading flags, in any order: `--inline`, `--delete`, `--get`. Consume
+        // them until the first non-flag token (the file).
         var inline_comment = false;
         var delete = false;
+        var get = false;
         var file_path_arg = args.next();
         while (file_path_arg) |arg| {
             if (std.mem.eql(u8, arg, "--inline")) {
                 inline_comment = true;
             } else if (std.mem.eql(u8, arg, "--delete")) {
                 delete = true;
+            } else if (std.mem.eql(u8, arg, "--get")) {
+                get = true;
             } else break;
             file_path_arg = args.next();
         }
@@ -864,8 +1150,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             };
             path = try parsePath(allocator, path_str);
 
-            // Delete needs no text; add/set requires it.
-            if (!delete) {
+            // Delete/get need no text; add/set requires it.
+            if (!delete and !get) {
                 text = args.next() orelse {
                     log.err("No comment text provided.\n", .{});
                     return ArgError.MissingCommentArgument;
@@ -880,6 +1166,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .text = text,
             .inline_comment = inline_comment,
             .delete = delete,
+            .get = get,
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
@@ -1023,6 +1310,55 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .serialize = serialize,
             .quiet = quiet,
             .strict = strict,
+        } };
+    } else if (std.mem.eql(u8, action_str, "check") or std.mem.eql(u8, action_str, "ck")) {
+        config.action = .check;
+
+        var input_override: ?Format = null;
+        var spec: ?[]const u8 = null;
+        var quiet = false;
+        var requested_help = false;
+        var files: std.ArrayList([]const u8) = .empty;
+        defer files.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                requested_help = true;
+            } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--no-warnings")) {
+                quiet = true;
+            } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
+                const fmt = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingCheckArgument;
+                };
+                input_override = parseFormatName(fmt) orelse {
+                    log.err("Unsupported format: {s}\n", .{fmt});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--spec") or std.mem.eql(u8, arg, "-s")) {
+                spec = args.next() orelse {
+                    log.err("Missing version value after {s}\n", .{arg});
+                    return ArgError.MissingCheckArgument;
+                };
+            } else {
+                try files.append(allocator, arg);
+            }
+        }
+
+        if (!requested_help and files.items.len == 0) {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingCheckArgument;
+        }
+
+        config.options = .{ .check = .{
+            // toOwnedSlice: the whole slice (allocated in the arena passed to
+            // parseConfig) outlives this function, unlike `get` which only keeps
+            // copies of individual positional headers.
+            .files = try files.toOwnedSlice(allocator),
+            .format = input_override,
+            .spec = spec,
+            .quiet = quiet,
+            .requested_help = requested_help,
         } };
     } else {
         log.err("Action not recognized: {s}", .{action_str});

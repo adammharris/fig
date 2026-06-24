@@ -9,7 +9,7 @@
 // trailing newline) and lets the Zig editor re-frame indentation at the splice
 // site; the `*Raw` variants pass already-serialized text straight through.
 import { check, Format } from "./types.ts";
-import { Frame, encodePath, encodeKeyList, encodeIndexList, type Segment } from "./ffi.ts";
+import { Frame, encodePath, encodeKeyList, encodeIndexList, readOutSlice, Status, type Segment } from "./ffi.ts";
 import { V, valueText, type JsValue, type Value } from "./value.ts";
 
 /** The bound C ABI edit functions a concrete editor supplies. */
@@ -29,6 +29,8 @@ export interface EditFns {
   setTrailingComment(h: number, path: number, pathLen: number, text: number, textLen: number): number;
   deleteLeadingComments(h: number, path: number, pathLen: number): number;
   deleteTrailingComment(h: number, path: number, pathLen: number): number;
+  getLeadingComment(h: number, path: number, pathLen: number, outPtr: number, outLen: number): number;
+  getTrailingComment(h: number, path: number, pathLen: number, outPtr: number, outLen: number): number;
 }
 
 export { type Segment };
@@ -241,6 +243,38 @@ export abstract class Editable {
       const p = encodePath(frame, path);
       const t = frame.str(text);
       check(fn(this.live(), p.ptr, p.len, t.ptr, t.len), op);
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  // ── comment reading ─────────────────────────────────────────────────────
+
+  /** Read the own-line comment block above the node at `path` (lines joined by
+   *  `\n`, markers and indentation stripped). Returns `null` when there is no
+   *  such block, and `""` for a present-but-empty bare marker. Strict JSON
+   *  throws `UnsupportedFormat`. */
+  getLeadingComment(path: readonly Segment[]): string | null {
+    return this.commentRead(path, this.fns.getLeadingComment, "getLeadingComment");
+  }
+
+  /** Read the same-line trailing comment on the value at `path` (marker
+   *  stripped). Returns `null` when there is none, `""` for a bare marker. */
+  getTrailingComment(path: readonly Segment[]): string | null {
+    return this.commentRead(path, this.fns.getTrailingComment, "getTrailingComment");
+  }
+
+  private commentRead(path: readonly Segment[], fn: EditFns["getLeadingComment"], op: string): string | null {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      const scratch = frame.alloc(8);
+      // `NotFound` means the comment is absent (→ null); any other non-OK status
+      // is a real error. An OK with len 0 is a present-but-empty comment.
+      const status = fn(this.live(), p.ptr, p.len, scratch, scratch + 4);
+      if (status === Status.NotFound) return null;
+      check(status, op);
+      return readOutSlice(scratch);
     } finally {
       frame.dispose();
     }

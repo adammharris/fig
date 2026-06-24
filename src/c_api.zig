@@ -761,11 +761,16 @@ const EditorUnion = blk: {
 const EditorHandle = struct {
     allocator: std.mem.Allocator,
     inner: EditorUnion,
+    /// Reused buffer backing the borrowed bytes returned by the comment-read
+    /// exports (`fig_editor_get_*_comment`). Refilled per call; valid until the
+    /// next read call on this handle or `fig_editor_destroy`.
+    scratch: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *EditorHandle) void {
         switch (self.inner) {
             inline else => |*e| e.deinit(),
         }
+        self.scratch.deinit(self.allocator);
     }
 };
 
@@ -799,6 +804,9 @@ pub export fn fig_editor_create(
     const allocator = activeAllocator();
     const handle = allocator.create(EditorHandle) catch return .out_of_memory;
     handle.allocator = allocator;
+    // Field-by-field init (not a struct literal), so set the read scratch buffer's
+    // default explicitly — otherwise destroy frees uninitialized memory.
+    handle.scratch = .empty;
     handle.inner = switch (fig_format) {
         .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
         .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
@@ -933,6 +941,67 @@ pub export fn fig_editor_delete_trailing_comment(
     return switch (handle.inner) {
         inline else => |*e| if (e.deleteTrailingComment(path)) .ok else |err| editStatus(err),
     };
+}
+
+// ── Comment reading ─────────────────────────────────────────────────────────
+// Read back a comment without mutating the document. The returned bytes (marker
+// stripped) are BORROWED from the editor handle's scratch buffer: valid until the
+// next read call on this handle or `fig_editor_destroy`. The distinction between
+// an ABSENT comment and a PRESENT-BUT-EMPTY one (a bare `#`/`//`) is carried by
+// the status: `not_found` means absent; `ok` with `out_len == 0` means present and
+// empty. Strict JSON (no comment syntax) returns `unsupported_format`.
+
+fn editorGetComment(
+    handle: *EditorHandle,
+    path: []const AST.PathSegment,
+    trailing: bool,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const p = out_ptr orelse return .invalid_argument;
+    const l = out_len orelse return .invalid_argument;
+    const maybe = (switch (handle.inner) {
+        inline else => |*e| if (trailing) e.getTrailingComment(path) else e.getLeadingComment(path),
+    }) catch |err| return editStatus(err);
+    const bytes = maybe orelse return .not_found;
+    defer handle.allocator.free(bytes);
+    handle.scratch.clearRetainingCapacity();
+    // Keep a valid (non-dangling) pointer even for a zero-length present comment.
+    handle.scratch.ensureTotalCapacity(handle.allocator, bytes.len + 1) catch return .out_of_memory;
+    handle.scratch.appendSliceAssumeCapacity(bytes);
+    p.* = handle.scratch.items.ptr;
+    l.* = handle.scratch.items.len;
+    return .ok;
+}
+
+/// Read the own-line comment block immediately ABOVE the node at `path`, joined by
+/// '\n' with markers and indentation stripped. `not_found` when there is no block.
+pub export fn fig_editor_get_leading_comment(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return editorGetComment(handle, path, false, out_ptr, out_len);
+}
+
+/// Read the same-line trailing comment on the value at `path`, marker stripped.
+/// `not_found` when there is none.
+pub export fn fig_editor_get_trailing_comment(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return editorGetComment(handle, path, true, out_ptr, out_len);
 }
 
 pub export fn fig_editor_insert_key(
@@ -1176,12 +1245,16 @@ const EmbedHandle = struct {
     content: Span,
     editor: EditorUnion,
     rendered: std.ArrayList(u8) = .empty,
+    /// Reused buffer backing the borrowed bytes returned by the comment-read
+    /// exports (`fig_embed_get_*_comment`); see the editor-handle twin.
+    scratch: std.ArrayList(u8) = .empty,
 
     fn deinit(self: *EmbedHandle) void {
         switch (self.editor) {
             inline else => |*e| e.deinit(),
         }
         self.rendered.deinit(self.allocator);
+        self.scratch.deinit(self.allocator);
         self.allocator.free(self.host);
     }
 };
@@ -1350,6 +1423,58 @@ pub export fn fig_embed_delete_trailing_comment(
     return switch (handle.editor) {
         inline else => |*e| if (e.deleteTrailingComment(path)) .ok else |err| editStatus(err),
     };
+}
+
+// ── Comment reading (embed mirror of fig_editor_get_*) ──────────────────────
+// Same borrowed-bytes + `not_found`-means-absent contract as the editor reads;
+// the scratch buffer here lives on the embed handle.
+
+fn embedGetComment(
+    handle: *EmbedHandle,
+    path: []const AST.PathSegment,
+    trailing: bool,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const p = out_ptr orelse return .invalid_argument;
+    const l = out_len orelse return .invalid_argument;
+    const maybe = (switch (handle.editor) {
+        inline else => |*e| if (trailing) e.getTrailingComment(path) else e.getLeadingComment(path),
+    }) catch |err| return editStatus(err);
+    const bytes = maybe orelse return .not_found;
+    defer handle.allocator.free(bytes);
+    handle.scratch.clearRetainingCapacity();
+    handle.scratch.ensureTotalCapacity(handle.allocator, bytes.len + 1) catch return .out_of_memory;
+    handle.scratch.appendSliceAssumeCapacity(bytes);
+    p.* = handle.scratch.items.ptr;
+    l.* = handle.scratch.items.len;
+    return .ok;
+}
+
+pub export fn fig_embed_get_leading_comment(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return embedGetComment(handle, path, false, out_ptr, out_len);
+}
+
+pub export fn fig_embed_get_trailing_comment(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    out_ptr: ?*[*c]const u8,
+    out_len: ?*usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    return embedGetComment(handle, path, true, out_ptr, out_len);
 }
 
 pub export fn fig_embed_insert_key(
@@ -3087,4 +3212,44 @@ test "fig_editor comment ops reject strict JSON with unsupported_format" {
     const text = "x";
     try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_add_leading_comment(ed, &path, 1, text.ptr, text.len));
     try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_delete_trailing_comment(ed, &path, 1));
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_get_leading_comment(ed, &path, 1, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_editor_get_trailing_comment(ed, &path, 1, &ptr, &len));
+}
+
+test "fig_editor comment reads return bytes, distinguishing absent from empty" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const src = "# why\na: 1 # two\nb: 2 #\nc: 3\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &ed));
+    defer fig_editor_destroy(ed);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    const at = struct {
+        fn key(k: *[1]u8) [1]FigPathSegment {
+            return .{.{ .kind = 0, .key_ptr = k, .key_len = 1, .index = 0 }};
+        }
+    };
+
+    // a: present leading ("why") and present trailing ("two").
+    var ka = [_]u8{'a'};
+    const pa = at.key(&ka);
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_get_leading_comment(ed, &pa, 1, &ptr, &len));
+    try std.testing.expectEqualStrings("why", ptr[0..len]);
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_get_trailing_comment(ed, &pa, 1, &ptr, &len));
+    try std.testing.expectEqualStrings("two", ptr[0..len]);
+
+    // b: a bare `#` trailing → present but EMPTY (ok, len 0), not absent.
+    var kb = [_]u8{'b'};
+    const pb = at.key(&kb);
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_get_trailing_comment(ed, &pb, 1, &ptr, &len));
+    try std.testing.expectEqual(@as(usize, 0), len);
+
+    // c: no comment either way → not_found (absent).
+    var kc = [_]u8{'c'};
+    const pc = at.key(&kc);
+    try std.testing.expectEqual(FigStatus.not_found, fig_editor_get_leading_comment(ed, &pc, 1, &ptr, &len));
+    try std.testing.expectEqual(FigStatus.not_found, fig_editor_get_trailing_comment(ed, &pc, 1, &ptr, &len));
 }

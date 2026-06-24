@@ -175,6 +175,32 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(line_start, line_start), buf.items);
         }
 
+        /// The byte window `[start, line_end)` on the entry-at-`path`'s line where a
+        /// same-line trailing comment lives, shared by the set/delete/get trailing
+        /// ops. For a scalar or flow value the window runs from just past the value
+        /// to that line's newline. For a BLOCK-style mapping/sequence value — whose
+        /// node span begins at its first child on a later line — the trailing
+        /// comment instead rides the key's line (e.g. `contents: # note` above a
+        /// block sequence), so the window is the key line, starting just past the
+        /// key. `start` always sits before any comment marker and after the value
+        /// (scalar) or key (block), so a `#`/`//` inside the value can't false-match.
+        fn trailingCommentWindow(self: *Self, path: []const AST.PathSegment) !struct { start: usize, line_end: usize } {
+            const parsed = try self.getParsed();
+            const val = try parsed.ast.getValByPath(path);
+            const val_span = parsed.span(val);
+            const source = self.source.items;
+            const is_block_collection = switch (std.meta.activeTag(val.kind)) {
+                .mapping, .sequence => !isFlow(source, val_span),
+                else => false,
+            };
+            const start = if (is_block_collection)
+                parsed.span(try parsed.ast.getKeyByPath(path)).end
+            else
+                val_span.end;
+            const line_end = std.mem.indexOfScalarPos(u8, source, start, '\n') orelse source.len;
+            return .{ .start = start, .line_end = line_end };
+        }
+
         /// Set the same-line trailing comment on the value at `path`: replace an
         /// existing trailing comment on that line, or append one if there is none.
         /// `text` must be a single line. Returns `CommentsUnsupported` for a
@@ -183,22 +209,18 @@ pub fn Editor(comptime Language: type) type {
         pub fn setTrailingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
             const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
             if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.MultilineComment;
-            const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
-            const span = parsed.span(node);
+            const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
 
-            // The comment sits at the end of the value's last line. Find that
-            // line's newline (or EOF); if a comment marker already follows the
-            // value, splice from it (replace), else from the value's end (append).
-            const nl = std.mem.indexOfScalarPos(u8, source, span.end, '\n') orelse source.len;
-            var cut = if (std.mem.indexOf(u8, source[span.end..nl], marker)) |rel|
-                span.end + rel
+            // If a comment marker already follows on this line, splice from it
+            // (replace); otherwise splice from the line's end (append).
+            var cut = if (std.mem.indexOf(u8, source[win.start..win.line_end], marker)) |rel|
+                win.start + rel
             else
-                nl;
+                win.line_end;
             // Drop the run of spaces/tabs just before the splice so the rebuilt
             // " <marker> text" controls its own single leading space.
-            while (cut > span.end and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
+            while (cut > win.start and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
 
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(self.allocator);
@@ -208,7 +230,7 @@ pub fn Editor(comptime Language: type) type {
                 try buf.append(self.allocator, ' ');
                 try buf.appendSlice(self.allocator, text);
             }
-            try self.replaceAtSpan(Span.init(cut, nl), buf.items);
+            try self.replaceAtSpan(Span.init(cut, win.line_end), buf.items);
         }
 
         /// Remove the run of own-line comments immediately ABOVE the node at
@@ -233,16 +255,61 @@ pub fn Editor(comptime Language: type) type {
         /// without comment syntax (strict JSON).
         pub fn deleteTrailingComment(self: *Self, path: []const AST.PathSegment) !void {
             const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const win = try self.trailingCommentWindow(path);
+            const source = self.source.items;
+            const rel = std.mem.indexOf(u8, source[win.start..win.line_end], marker) orelse return; // none
+            var cut = win.start + rel;
+            // Take the whitespace separating the value from the comment with it.
+            while (cut > win.start and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
+            try self.replaceAtSpan(Span.init(cut, win.line_end), "");
+        }
+
+        /// Read back the own-line comment block immediately ABOVE the node at
+        /// `path` — the same owned block `deleteLeadingComments` removes — with each
+        /// line's indentation and `marker` (and one following space) stripped, lines
+        /// rejoined by '\n'. Returns `null` when there is no block above the node
+        /// (distinct from a present-but-empty comment — a bare `#` — which yields
+        /// ""). The caller owns the returned bytes. Returns `CommentsUnsupported`
+        /// for a dialect without comment syntax (strict JSON).
+        pub fn getLeadingComment(self: *Self, path: []const AST.PathSegment) !?[]u8 {
+            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
             const parsed = try self.getParsed();
-            const node = try parsed.ast.getValByPath(path);
+            const node = try parsed.ast.getNodeByPath(path);
             const span = parsed.span(node);
             const source = self.source.items;
-            const nl = std.mem.indexOfScalarPos(u8, source, span.end, '\n') orelse source.len;
-            const rel = std.mem.indexOf(u8, source[span.end..nl], marker) orelse return; // none
-            var cut = span.end + rel;
-            // Take the whitespace separating the value from the comment with it.
-            while (cut > span.end and (source[cut - 1] == ' ' or source[cut - 1] == '\t')) cut -= 1;
-            try self.replaceAtSpan(Span.init(cut, nl), "");
+            const line_start = lineStartBefore(source, span.start);
+            const block_start = commentBlockStart(source, line_start, comment_style);
+            if (block_start == line_start) return null; // no block above
+
+            var out: std.ArrayList(u8) = .empty;
+            errdefer out.deinit(self.allocator);
+            var it = std.mem.splitScalar(u8, source[block_start..line_start], '\n');
+            var first = true;
+            while (it.next()) |raw| {
+                const line = std.mem.trimEnd(u8, raw, "\r");
+                const trimmed = std.mem.trimStart(u8, line, " \t");
+                if (trimmed.len == 0) continue; // skip a trailing empty split slice
+                if (!first) try out.append(self.allocator, '\n');
+                first = false;
+                try out.appendSlice(self.allocator, stripLineCommentMarker(trimmed, marker));
+            }
+            return try out.toOwnedSlice(self.allocator);
+        }
+
+        /// Read back the same-line trailing comment on the value at `path` — the
+        /// one `setTrailingComment` sets and `deleteTrailingComment` removes — with
+        /// its `marker` (and one following space) stripped. Returns `null` when
+        /// there is no trailing comment (distinct from a present-but-empty bare `#`,
+        /// which yields ""). The caller owns the returned bytes. Returns
+        /// `CommentsUnsupported` for a dialect without comment syntax (strict JSON).
+        pub fn getTrailingComment(self: *Self, path: []const AST.PathSegment) !?[]u8 {
+            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const win = try self.trailingCommentWindow(path);
+            const source = self.source.items;
+            const rel = std.mem.indexOf(u8, source[win.start..win.line_end], marker) orelse
+                return null; // none
+            const after = std.mem.trimEnd(u8, source[win.start + rel .. win.line_end], " \t\r");
+            return try self.allocator.dupe(u8, stripLineCommentMarker(after, marker));
         }
 
         // ===============
@@ -926,6 +993,17 @@ pub fn appendBlockSep(out: *std.ArrayList(u8), allocator: std.mem.Allocator, blo
     try out.appendSlice(allocator, block);
 }
 
+/// Strip a leading line-comment `marker` (and one following space) from `line`,
+/// the inverse of how `renderLineComments`/`setTrailingComment` emit a comment.
+/// `line` must already have its leading whitespace trimmed. A line that doesn't
+/// start with `marker` is returned unchanged.
+fn stripLineCommentMarker(line: []const u8, marker: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, line, marker)) return line;
+    var rest = line[marker.len..];
+    if (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+    return rest;
+}
+
 /// Render `text` as one or more own-line comments into `out`, each line being
 /// `indent` + `marker` (+ a space and the line's text, unless the line is empty)
 /// + '\n'. A single trailing newline in `text` is ignored so it never yields a
@@ -1174,4 +1252,90 @@ test "comment delete ops are rejected for strict JSON" {
     defer ed.deinit();
     try testing.expectError(error.CommentsUnsupported, ed.deleteLeadingComments(&.{.{ .key = "a" }}));
     try testing.expectError(error.CommentsUnsupported, ed.deleteTrailingComment(&.{.{ .key = "a" }}));
+}
+
+fn expectCommentGet(
+    comptime Lang: type,
+    format: Lang.Type,
+    input: []const u8,
+    /// `null` asserts the comment is ABSENT; a string asserts it is present with
+    /// exactly those bytes (`""` = a present-but-empty bare marker).
+    expected: ?[]const u8,
+    op: enum { leading, trailing },
+    path: []const AST.PathSegment,
+) !void {
+    var ed: Editor(Lang) = .{ .allocator = testing.allocator, .format = format };
+    try ed.init(input);
+    defer ed.deinit();
+    const got = switch (op) {
+        .leading => try ed.getLeadingComment(path),
+        .trailing => try ed.getTrailingComment(path),
+    };
+    defer if (got) |g| testing.allocator.free(g);
+    if (expected) |want| {
+        try testing.expect(got != null);
+        try testing.expectEqualStrings(want, got.?);
+    } else {
+        try testing.expect(got == null);
+    }
+}
+
+test "getLeadingComment returns the owned block above a key, markers stripped" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectCommentGet(Yaml, .v1_2_2, "# one\n# two\na: 1\n", "one\ntwo", .leading, &.{.{ .key = "a" }});
+    // No block above → absent (null).
+    try expectCommentGet(Yaml, .v1_2_2, "a: 1\nb: 2\n", null, .leading, &.{.{ .key = "b" }});
+}
+
+test "getTrailingComment returns the same-line comment, marker stripped" {
+    if (comptime build_options.lang_yaml) {
+        try expectCommentGet(Yaml, .v1_2_2, "a: 1 # done\n", "done", .trailing, &.{.{ .key = "a" }});
+        // No trailing comment → absent (null).
+        try expectCommentGet(Yaml, .v1_2_2, "a: 1\n", null, .trailing, &.{.{ .key = "a" }});
+    }
+    // JSONC `//` trailing.
+    try expectCommentGet(json.Language, .JSONC, "{\n  \"a\": 1 // x\n}", "x", .trailing, &.{.{ .key = "a" }});
+}
+
+test "trailing comment on a block-collection key rides the key line" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const seq = "contents: # note\n- one\n- two\n";
+    // get: the comment after the colon on the key's line, not after the last item.
+    try expectCommentGet(Yaml, .v1_2_2, seq, "note", .trailing, &.{.{ .key = "contents" }});
+    // set: replaces the key-line comment in place (does not append after `two`).
+    try expectCommentEdit(Yaml, .v1_2_2, seq, "contents: # new\n- one\n- two\n", .trailing, &.{.{ .key = "contents" }}, "new");
+    // set on a block key with no existing comment lands on the key line.
+    try expectCommentEdit(Yaml, .v1_2_2, "k:\n- a\n- b\n", "k: # added\n- a\n- b\n", .trailing, &.{.{ .key = "k" }}, "added");
+    // delete: removes the key-line comment.
+    try expectCommentDelete(Yaml, .v1_2_2, seq, "contents:\n- one\n- two\n", .trailing, &.{.{ .key = "contents" }});
+}
+
+test "trailing comment on a parent key ignores a child's same-line comment" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // The `# bc` belongs to child `b`; the parent `a` has no trailing comment.
+    try expectCommentGet(Yaml, .v1_2_2, "a:\n  b: 1 # bc\n", null, .trailing, &.{.{ .key = "a" }});
+    try expectCommentGet(Yaml, .v1_2_2, "a:\n  b: 1 # bc\n", "bc", .trailing, &.{ .{ .key = "a" }, .{ .key = "b" } });
+}
+
+test "getLeadingComment round-trips an empty comment line" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // A bare `#` (no text) decodes to an empty line within the block.
+    try expectCommentGet(Yaml, .v1_2_2, "# one\n#\n# three\na: 1\n", "one\n\nthree", .leading, &.{.{ .key = "a" }});
+}
+
+test "get distinguishes a present-but-empty comment from an absent one" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // A bare `#` is PRESENT with empty text → "" (not null).
+    try expectCommentGet(Yaml, .v1_2_2, "a: 1 #\n", "", .trailing, &.{.{ .key = "a" }});
+    try expectCommentGet(Yaml, .v1_2_2, "#\na: 1\n", "", .leading, &.{.{ .key = "a" }});
+    // No marker at all → absent (null).
+    try expectCommentGet(Yaml, .v1_2_2, "a: 1\n", null, .trailing, &.{.{ .key = "a" }});
+}
+
+test "get comment ops are rejected for strict JSON" {
+    var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
+    try ed.init("{\"a\":1}");
+    defer ed.deinit();
+    try testing.expectError(error.CommentsUnsupported, ed.getLeadingComment(&.{.{ .key = "a" }}));
+    try testing.expectError(error.CommentsUnsupported, ed.getTrailingComment(&.{.{ .key = "a" }}));
 }

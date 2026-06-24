@@ -239,6 +239,30 @@ test("editor comments rejected for strict JSON", () => {
   );
 });
 
+test("editor reads comments, distinguishing absent from empty", () => {
+  // `a`: leading block + trailing comment; `b`: bare `#` (present-but-empty);
+  // `c`: none.
+  using ed = Editor.open("# why\na: 1 # two\nb: 2 #\nc: 3\n", Format.Yaml);
+  assert.equal(ed.getLeadingComment(["a"]), "why");
+  assert.equal(ed.getTrailingComment(["a"]), "two");
+  // Present-but-empty bare marker → "" (not null).
+  assert.equal(ed.getTrailingComment(["b"]), "");
+  // No comment → null.
+  assert.equal(ed.getLeadingComment(["c"]), null);
+  assert.equal(ed.getTrailingComment(["c"]), null);
+});
+
+test("editor reads a trailing comment riding a block-collection key", () => {
+  using ed = Editor.open("contents: # the list\n- one\n- two\n", Format.Yaml);
+  assert.equal(ed.getTrailingComment(["contents"]), "the list");
+});
+
+test("embed reads a frontmatter comment", () => {
+  using fm = Embed.frontmatter("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n");
+  assert.equal(fm.getLeadingComment(["tags"]), "keep");
+  assert.equal(fm.getLeadingComment(["title"]), null);
+});
+
 test("embed comments edit markdown frontmatter", () => {
   using fm = Embed.open("---\ntitle: Hi\ndraft: true\n---\n# Body\n", EmbedType.FrontmatterYaml);
   fm.addLeadingComment(["draft"], "WIP");

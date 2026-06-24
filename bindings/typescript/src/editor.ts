@@ -31,6 +31,8 @@ const EDITOR_FNS: EditFns = {
   setTrailingComment: fig.fig_editor_set_trailing_comment,
   deleteLeadingComments: fig.fig_editor_delete_leading_comments,
   deleteTrailingComment: fig.fig_editor_delete_trailing_comment,
+  getLeadingComment: fig.fig_editor_get_leading_comment,
+  getTrailingComment: fig.fig_editor_get_trailing_comment,
 };
 
 export class Editor extends Editable {

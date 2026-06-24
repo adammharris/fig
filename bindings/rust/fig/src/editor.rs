@@ -253,6 +253,43 @@ impl Editor {
         Error::from_status(status)
     }
 
+    /// Read the own-line comment block immediately above the node at `path`
+    /// (lines joined by `\n`, markers and indentation stripped). `None` when
+    /// there is no such block; `Some("")` for a present-but-empty bare marker.
+    /// Strict JSON returns [`Error::UnsupportedFormat`].
+    pub fn leading_comment(&self, path: &[Segment]) -> Result<Option<String>, Error> {
+        self.read_comment(path, false)
+    }
+
+    /// Read the same-line trailing comment on the value at `path` (marker
+    /// stripped). `None` when there is none; `Some("")` for a bare marker.
+    /// Strict JSON returns [`Error::UnsupportedFormat`].
+    pub fn trailing_comment(&self, path: &[Segment]) -> Result<Option<String>, Error> {
+        self.read_comment(path, true)
+    }
+
+    /// Shared body for the two comment reads. Returns an owned `String` (copied
+    /// out of the handle's reused scratch buffer) so the result stays valid
+    /// across later reads, and maps `NOT_FOUND` to `Ok(None)` — distinguishing an
+    /// absent comment from a present-but-empty one (`Some(String::new())`).
+    fn read_comment(&self, path: &[Segment], trailing: bool) -> Result<Option<String>, Error> {
+        let p = to_ffi_path(path);
+        let mut ptr: *const u8 = std::ptr::null();
+        let mut len: usize = 0;
+        let status = unsafe {
+            if trailing {
+                ffi::fig_editor_get_trailing_comment(self.ptr(), p.as_ptr(), p.len(), &mut ptr, &mut len)
+            } else {
+                ffi::fig_editor_get_leading_comment(self.ptr(), p.as_ptr(), p.len(), &mut ptr, &mut len)
+            }
+        };
+        if status.0 == ffi::FigStatus::NOT_FOUND {
+            return Ok(None);
+        }
+        Error::from_status(status)?;
+        Ok(Some(borrow_str(ptr, len)?.to_string()))
+    }
+
     // ── structural edits (no value) ─────────────────────────────────────────
 
     /// Delete the mapping entry named by `path`.

@@ -437,6 +437,20 @@ unsafe extern "C" {
         path: *const FigPathSegment,
         path_len: usize,
     ) -> FigStatus;
+    pub fn fig_editor_get_leading_comment(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
+    pub fn fig_editor_get_trailing_comment(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
     pub fn fig_editor_insert_key(
         editor: *mut FigEditor,
         path: *const FigPathSegment,
@@ -558,6 +572,20 @@ unsafe extern "C" {
         fm: *mut FigEmbed,
         path: *const FigPathSegment,
         path_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_get_leading_comment(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
+    ) -> FigStatus;
+    pub fn fig_embed_get_trailing_comment(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        out_ptr: *mut *const u8,
+        out_len: *mut usize,
     ) -> FigStatus;
     pub fn fig_embed_insert_key(
         fm: *mut FigEmbed,

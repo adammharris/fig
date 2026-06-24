@@ -29,6 +29,33 @@ fn editor_delete_keeps_owned_comment_with_key() {
 }
 
 #[test]
+fn editor_reads_comments_distinguishing_absent_from_empty() {
+    // `a` has both a leading block and a trailing comment; `b` has a bare `#`
+    // trailing (present but empty); `c` has neither (absent).
+    let ed = Editor::open(b"# why\na: 1 # two\nb: 2 #\nc: 3\n", Format::Yaml).unwrap();
+
+    assert_eq!(ed.leading_comment(&[Segment::Key("a")]).unwrap().as_deref(), Some("why"));
+    assert_eq!(ed.trailing_comment(&[Segment::Key("a")]).unwrap().as_deref(), Some("two"));
+
+    // Present-but-empty bare marker → Some(""), not None.
+    assert_eq!(ed.trailing_comment(&[Segment::Key("b")]).unwrap().as_deref(), Some(""));
+
+    // No comment at all → None.
+    assert_eq!(ed.leading_comment(&[Segment::Key("c")]).unwrap(), None);
+    assert_eq!(ed.trailing_comment(&[Segment::Key("c")]).unwrap(), None);
+}
+
+#[test]
+fn editor_reads_trailing_comment_on_a_block_collection_key() {
+    // The comment rides the `contents:` line above the block sequence.
+    let ed = Editor::open(b"contents: # the list\n- one\n- two\n", Format::Yaml).unwrap();
+    assert_eq!(
+        ed.trailing_comment(&[Segment::Key("contents")]).unwrap().as_deref(),
+        Some("the list"),
+    );
+}
+
+#[test]
 fn editor_sequence_ops() {
     let mut ed = Editor::open(b"items:\n- a\n- b\n", Format::Yaml).unwrap();
     ed.append(&[Segment::Key("items")], &"c").unwrap();
@@ -100,6 +127,19 @@ fn frontmatter_delete_then_read_back() {
     assert!(!rendered.contains("title:"));
     assert!(rendered.contains("# keep this comment"));
     assert!(rendered.contains("prose goes here"));
+}
+
+#[test]
+fn frontmatter_reads_a_leading_comment() {
+    let fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    // `# keep this comment` sits above `tags` in the frontmatter.
+    assert_eq!(
+        fm.leading_comment(&[Segment::Key("tags")]).unwrap().as_deref(),
+        Some("keep this comment"),
+    );
+    // `title` has no comment of its own.
+    assert_eq!(fm.leading_comment(&[Segment::Key("title")]).unwrap(), None);
+    assert_eq!(fm.trailing_comment(&[Segment::Key("title")]).unwrap(), None);
 }
 
 #[test]

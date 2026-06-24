@@ -28,6 +28,8 @@ const EMBED_FNS: EditFns = {
   setTrailingComment: fig.fig_embed_set_trailing_comment,
   deleteLeadingComments: fig.fig_embed_delete_leading_comments,
   deleteTrailingComment: fig.fig_embed_delete_trailing_comment,
+  getLeadingComment: fig.fig_embed_get_leading_comment,
+  getTrailingComment: fig.fig_embed_get_trailing_comment,
 };
 
 /** A half-open `[start, end)` byte span within the host file. */

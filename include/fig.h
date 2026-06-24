@@ -296,6 +296,19 @@ FigStatus fig_editor_delete_leading_comments(FigEditor *editor, const FigPathSeg
                                              size_t path_len);
 FigStatus fig_editor_delete_trailing_comment(FigEditor *editor, const FigPathSegment *path,
                                              size_t path_len);
+// Read a comment back without mutating. `get_leading` returns the own-line block
+// above `path` (lines joined by '\n'); `get_trailing` returns the value's
+// same-line comment. The marker (and one following space) is stripped. On
+// FIG_STATUS_OK the bytes are borrowed from the editor handle (valid until the
+// next get on this handle or fig_editor_destroy); `out_len == 0` means a present
+// but empty comment (a bare `#`/`//`). FIG_STATUS_NOT_FOUND means no such comment
+// exists; strict JSON returns FIG_STATUS_UNSUPPORTED_FORMAT.
+FigStatus fig_editor_get_leading_comment(FigEditor *editor, const FigPathSegment *path,
+                                         size_t path_len,
+                                         const uint8_t **out_ptr, size_t *out_len);
+FigStatus fig_editor_get_trailing_comment(FigEditor *editor, const FigPathSegment *path,
+                                          size_t path_len,
+                                          const uint8_t **out_ptr, size_t *out_len);
 FigStatus fig_editor_insert_key(FigEditor *editor, const FigPathSegment *path, size_t path_len,
                                 const uint8_t *key, size_t key_len,
                                 const uint8_t *val, size_t val_len);
@@ -377,6 +390,14 @@ FigStatus fig_embed_delete_leading_comments(FigEmbed *embed, const FigPathSegmen
                                             size_t path_len);
 FigStatus fig_embed_delete_trailing_comment(FigEmbed *embed, const FigPathSegment *path,
                                             size_t path_len);
+// Read a comment from the embedded config (mirrors fig_editor_get_*): borrowed
+// bytes on OK, FIG_STATUS_NOT_FOUND when absent, len 0 when present-but-empty.
+FigStatus fig_embed_get_leading_comment(FigEmbed *embed, const FigPathSegment *path,
+                                        size_t path_len,
+                                        const uint8_t **out_ptr, size_t *out_len);
+FigStatus fig_embed_get_trailing_comment(FigEmbed *embed, const FigPathSegment *path,
+                                         size_t path_len,
+                                         const uint8_t **out_ptr, size_t *out_len);
 FigStatus fig_embed_insert_key(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
                                const uint8_t *key, size_t key_len,
                                const uint8_t *val, size_t val_len);
