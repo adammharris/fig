@@ -1,0 +1,63 @@
+name: Homebrew
+
+# Release the `fig` CLI to Homebrew. Two jobs:
+#   1. build a prebuilt universal (arm64 + x86_64) macOS binary with the pinned
+#      Zig toolchain and attach it to this repo's GitHub Release, then
+#   2. bump url/sha256/version of Formula/fig.rb in the tap repo.
+#
+# A prebuilt binary (not a source `depends_on "zig"` formula) is deliberate:
+# Homebrew-core's zig tracks stable releases and won't reliably have the version
+# fig needs.
+#
+# Prerequisites before the first tagged release succeeds:
+#   1. Create the tap repo `adammharris/homebrew-tap` and seed it with
+#      Formula/fig.rb (copy this repo's Formula/fig.rb). Users then install with
+#      `brew install adammharris/tap/fig`.
+#   2. Add a HOMEBREW_TAP_TOKEN secret: a PAT with contents:write on the tap.
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # the binary job attaches an asset to the GitHub Release
+
+jobs:
+  macos-binary:
+    name: Build + attach macOS binary
+    runs-on: macos-latest
+    if: github.ref_type == 'tag'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Build universal (arm64 + x86_64) binary
+        run: |
+          zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=aarch64-macos --prefix zig-out/arm
+          zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-macos --prefix zig-out/x86
+          mkdir -p dist
+          lipo -create -output dist/fig zig-out/arm/bin/fig zig-out/x86/bin/fig
+          lipo -info dist/fig
+          tar -czf fig-macos.tar.gz -C dist fig
+      - name: Attach to the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: fig-macos.tar.gz
+
+  bump-formula:
+    name: Bump tap formula
+    runs-on: ubuntu-latest
+    needs: macos-binary # the formula points at the Release asset that job uploads
+    if: github.ref_type == 'tag'
+    steps:
+      # Updates url/sha256/version in Formula/fig.rb on adammharris/homebrew-tap.
+      - uses: mislav/bump-homebrew-formula-action@v3
+        with:
+          formula-name: fig
+          formula-path: Formula/fig.rb
+          homebrew-tap: adammharris/homebrew-tap
+          download-url: https://github.com/adammharris/fig/releases/download/${{ github.ref_name }}/fig-macos.tar.gz
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

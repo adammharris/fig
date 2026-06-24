@@ -1,7 +1,7 @@
 .{
     .name = .fig,
     .version = "1.0.0",
-    //.license = Not licensed for now.
+    .license = "MIT OR Apache-2.0",
     .fingerprint = 0xd4f24a95e29f7b74, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
@@ -10,5 +10,7 @@
         "build.zig.zon",
         "src",
         "fig.md",
+        "LICENSE-MIT",
+        "LICENSE-APACHE"
     },
 }

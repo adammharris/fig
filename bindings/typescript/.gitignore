@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 src/wasm-bytes.ts
+# Docs/license text vendored in at pack time by scripts/vendor-publish-files.mjs;
+# the canonical copies live at the repo root (README.md <- fig.md).
+LICENSE-MIT
+LICENSE-APACHE
+README.md

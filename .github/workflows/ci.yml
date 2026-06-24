@@ -1,0 +1,69 @@
+name: CI
+
+# Build + test the core and both bindings, and keep the C ABI surface honest
+# (zig build abi-check: symbol diff + C/C++ header probe + version-drift check).
+#
+# DISABLED FOR NOW: runs only via manual `workflow_dispatch`. This workflow needs
+# no secrets and is safe to re-enable any time — restore the push/pull_request
+# triggers below to run it automatically.
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch/PR supersedes any in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zig:
+    name: Zig — test + abi-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - run: zig build test
+      - run: zig build abi-check
+
+  rust:
+    name: Rust — cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # build.rs compiles the fig core with `zig build`, so Zig is required here
+      # even though this is a Rust job.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/rust
+      - run: cargo test --workspace
+        working-directory: bindings/rust
+
+  typescript:
+    name: TypeScript — build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # `npm run build` runs `zig build wasm` to (re)generate the embedded module.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: bindings/typescript/package-lock.json
+      - run: npm ci
+        working-directory: bindings/typescript
+      - run: npm run build
+        working-directory: bindings/typescript
+      - run: npm test
+        working-directory: bindings/typescript

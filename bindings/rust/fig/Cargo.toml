@@ -2,6 +2,9 @@
 name = "fig"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+description = "Parse, edit, and convert config files while preserving comments. Supports JSON, YAML, TOML, and more."
+repository = "https://github.com/adammharris/fig"
 links = "fig"
 # The crate builds the fig core from Zig source (see build.rs). That source is
 # not in this directory in a checkout — build.rs walks up to the repo root — so
@@ -18,6 +21,9 @@ include = [
     "zig/build.zig.zon",
     "zig/src/**/*",
     "zig/include/**/*",
+    # Vendored in by `zig build vendor-rust` from the repo root (git-ignored here).
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
 ]
 
 [lib]

@@ -21,6 +21,13 @@ const Dir = std.Io.Dir;
 const files = [_][]const u8{ "build.zig", "build.zig.zon" };
 const trees = [_][]const u8{ "src", "include" };
 
+// Dual license, single source of truth at the repo root. crates.io takes the
+// SPDX `license` field, but a published crate should also carry the license
+// *text*; copy it into each crate dir (git-ignored, `include`-added for fig,
+// default-packaged for fig-macros) so neither has to vendor its own copy.
+const license_files = [_][]const u8{ "LICENSE-MIT", "LICENSE-APACHE" };
+const crate_dirs = [_][]const u8{ "bindings/rust/fig", "bindings/rust/fig-macros" };
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     var arena_state = std.heap.ArenaAllocator.init(init.gpa);
@@ -50,7 +57,17 @@ pub fn main(init: std.process.Init) !void {
         try copyTree(io, arena, src_root, dest_root, name);
     }
 
-    std.debug.print("vendor-rust: copied {d} files + {d} trees -> {s}\n", .{ files.len, trees.len, dest_root_path });
+    // Fan the root license files out into each crate dir (paths relative to the
+    // repo root we were handed as src_root).
+    inline for (crate_dirs) |crate_dir| {
+        var dir = try cwd.openDir(io, try std.fs.path.join(arena, &.{ src_root_path, crate_dir }), .{});
+        defer dir.close(io);
+        inline for (license_files) |name| {
+            try src_root.copyFile(name, dir, name, io, .{ .make_path = true });
+        }
+    }
+
+    std.debug.print("vendor-rust: copied {d} files + {d} trees + {d} licenses x{d} crates -> {s}\n", .{ files.len, trees.len, license_files.len, crate_dirs.len, dest_root_path });
 }
 
 /// Recursively copy `sub` from `src_root` to the same relative path under `dest_root`.

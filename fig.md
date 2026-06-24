@@ -2,31 +2,32 @@
 title: fig
 author: adammharris
 created: 2026-05-08
-updated: 2026-06-22T23:47:50-06:00
+updated: 2026-06-23T17:03:45-06:00
 ---
 
 # `fig`
 
 `fig` is a Zig library for parsing and editing config files.
 
-It intends to support editing frontmatter in markdown files, as well as other kinds of embedded metadata.
+Originally made for [Diaryx](https://diaryx.org), `fig` allows editing frontmatter in markdown files without reserializing the data, preserving comments and other trivia. `fig` has since been expanded to include many different kinds of configuration formats and different kinds of embedding.
 
 It currently supports the following formats:
 
-- YAML
+- YAML (1.2.2)
 - JSON (strict, JSONC, JSON5)
 - TOML (1.1 and 1.2)
-- ZON (Zig Object Notation) (read, write, but no editing)
+- ZON (Zig Object Notation) (read, write, but no editing yet)
 - XML (experimental, read-only)
 
 ## Usage
 
-The same core — parse into a format-agnostic AST, then re-emit in any format — is exposed natively in Zig and through the C ABI to Rust and TypeScript. Each example below parses JSON and converts it to YAML.
+`fig` has a feature-complete C ABI as well as bindings in Rust and Typescript. Use `fig.Language.detect()` to discover the kind of format a document is. Use the language's parser (for example, `fig.Language.JSON.parse()`) to convert the document to an AST. Or use `fig.Embed.extract(allocator, content, .FrontmatterYaml)` to extract a document from a markdown file's frontmatter. Then, edit with `fig.Editor(fig.Language.YAML)` or convert with `document.ast.serialize(&writer, .<format>)`.
+
+There are no docs at the moment, but I have endeavored to make the code readable and well-organized. Don't be scared to take a peek! (Unless it is the YAML parser! 😵‍💫)
 
 ### Zig
 
-Add `fig` as a dependency (`zig fetch --save <url>`), wire the module up in `build.zig`
-(`exe.root_module.addImport("fig", fig_dep.module("fig"))`), then:
+To add `fig` as a dependency, run `zig fetch --save https://github.com/adammharris/fig`. Then you can reference it in `build.zig`: `exe.root_module.addImport("fig", fig_dep.module("fig"))`
 
 ```zig
 const std = @import("std");
@@ -41,7 +42,7 @@ pub fn main() !void {
     const doc = try fig.Language.JSON.Parser.parse(allocator, "{\"name\":\"fig\",\"nums\":[1,2]}", .JSON);
     defer doc.deinit(allocator);
 
-    // Re-emit the same AST as YAML.
+    // Convert to YAML
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     try doc.ast.serialize(&out.writer, .yaml);
@@ -51,9 +52,9 @@ pub fn main() !void {
 
 ### Rust
 
+`fig` can be compiled without certain languages as features. Note that you need Zig installed in order to install `fig` into your project. `fig`'s Rust bindings also carry a `serde` feature. Alternatively, `fig` has `serde`-like features and may be able to replace `serde` in your project. Diaryx currently uses `fig` in production as a `serde` replacement.
+
 ```toml
-# Cargo.toml — non-JSON formats are gated by features of the same name
-# (yaml, toml, zon, xml), all on by default.
 [dependencies]
 fig = { git = "https://github.com/adammharris/fig" }
 ```
@@ -94,20 +95,8 @@ try {
 console.log(parse('{"name":"fig"}', Format.Json)); // { name: "fig" }
 ```
 
-## Progress to 1.0
+## Planned features
 
-- [x] Design token, parser, document architecture
-- [x] Design cross-config interface (public Zig API)
-- [x] Embedded config (i.e. markdown frontmatter)
-- [x] Command-line interface
-- [x] C ABI
-- [x] Serialization
-- [x] Standardize/document errors
-- [x] Typescript bindings
-- [x] Serialization options
-- [x] Pin C ABI surface
-
-Other planned features:
 - Native `.fig` format
 - Expand editor to include ZON
 - Publish Rust crate
@@ -123,18 +112,15 @@ Contributions are welcome, subject to my approval.
 
 `fig`, like many deceptively simple systems-level codebases, require careful thought and intention. AI tools can generate code rapidly, often at the cost of this important design thinking. Therefore, I have chosen to limit the use of AI code generation in this codebase.
 
-I started writing this library by hand (no AI) for my own education, and for use in my larger project, [Diaryx](https://diaryx.org). After writing a JSON tokenizer and parser by hand, and designing the Document, Token, and Language abstractions, I have decided to make use of the Codex AI tool to generate specific portions of the code that would otherwise require hours of tedious, repetitive work. So far, this includes:
+I started writing this library by hand (no AI) for my own education, and for use in my larger project, [Diaryx](https://diaryx.org). After writing a JSON tokenizer and parser by hand, and designing the Document, Token, and Language abstractions, I decided to make use of the Codex AI tool to generate specific portions of the code that would otherwise require hours of tedious, repetitive work.
 
-- Portions of `src/yaml/tokenizer.zig`. (GPT-5.5-medium, [commit 776ca93](https://github.com/adammharris/fig/commit/776ca93de564e146fd31bacdf64448ab8ee1643c))
-- Most of `src/yaml/parser.zig`. (GPT-5.5-medium, [commit a6dceb2](https://github.com/adammharris/fig/commit/a6dceb2a654524ab27f276d27603ff7411344155), [commit 963bfb3](https://github.com/adammharris/fig/commit/963bfb34c95d07ee2efceb0dceb398fb6e986205), others)
-- The Rust bindings (GPT-5.5-medium, [commit fbf4c82](https://github.com/adammharris/fig/commit/fbf4c82eeb5a73937db28745b1ba72037ade0e64), others).
-- Easily verifiable work that follows from the core has been implemented by Claude Opus 4.8, including TOML, bindings.
+Using Codex, I was able to make a compliant YAML parser much faster than I would have been able to otherwise. Later, I used Claude Code to do the same for TOML, ZON, and JSON5. For each of these, I made a conformance suite in order to ensure a correct implementation.
 
-This code was carefully reviewed and edited according to my taste before being accepted.
+All of the code generated was carefully reviewed and edited according to my taste before being accepted. I take full responsibility and ownership of the code in this repository. If you have any questions or concerns about AI use in this project, [please contact me!](<#Contact Me>)
 
 **License**
 
-Not licensed for now. Please contact me at amh421@icloud.com if you would like to use this code in your work!
+MIT or Apache 2.0, at your discretion. If you use fig in your work, I would love to hear from you and feature you here! [Please contact me!](<#Contact Me>)
 
 **Credits**
 
@@ -143,3 +129,7 @@ I took the JSON test suite at `testdata/json` from [Nicolas Seriot's JSONTestSui
 Likewise, test suite licenses are included for JSON5, TOML, and YAML. I am thankful for each of them.
 
 I am also thankful for the `toml-edit` Rust crate, which provided inspiration for the complex structural edits required by any format-preserving TOML editor.
+
+## Contact Me
+
+<adam@diaryx.org>, or leave an issue.
