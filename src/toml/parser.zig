@@ -16,7 +16,12 @@ const testing = std.testing;
 const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
 const Type = @import("toml.zig").Type;
+const util = @import("../util/util.zig");
 const Span = @import("../util/span.zig");
+const ascii = util.ascii;
+const datetime = util.datetime;
+const Unicode = util.Unicode;
+const eqAny = util.eqlAny;
 const Tokenizer = @import("tokenizer.zig");
 const Token = Tokenizer.Token;
 
@@ -747,10 +752,10 @@ fn decodeBasic(self: *Parser, inner: []const u8, multiline: bool) ParserError![]
 fn appendUnicode(self: *Parser, out: *std.ArrayList(u8), inner: []const u8, at: usize, n: usize) ParserError!usize {
     if (at + n > inner.len) return error.BadEscape;
     const cp = std.fmt.parseInt(u21, inner[at .. at + n], 16) catch return error.InvalidUnicode;
-    if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) return error.InvalidUnicode;
-    var buf: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidUnicode;
-    try out.appendSlice(self.allocator, buf[0..len]);
+    Unicode.encodeAppend(out, self.allocator, cp) catch |err| switch (err) {
+        error.InvalidCodepoint => return error.InvalidUnicode,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     return at + n;
 }
 
@@ -766,9 +771,9 @@ fn classifyNumber(raw: []const u8) ParserError!NumberKind {
 
     // Radix-prefixed integers (no sign permitted).
     if (raw.len >= 2 and raw[0] == '0') switch (raw[1]) {
-        'x' => return if (validUnderscored(raw[2..], isHex)) .integer else error.InvalidNumber,
-        'o' => return if (validUnderscored(raw[2..], isOctal)) .integer else error.InvalidNumber,
-        'b' => return if (validUnderscored(raw[2..], isBinary)) .integer else error.InvalidNumber,
+        'x' => return if (validUnderscored(raw[2..], ascii.isHex)) .integer else error.InvalidNumber,
+        'o' => return if (validUnderscored(raw[2..], ascii.isOctal)) .integer else error.InvalidNumber,
+        'b' => return if (validUnderscored(raw[2..], ascii.isBinary)) .integer else error.InvalidNumber,
         else => {},
     };
 
@@ -795,13 +800,13 @@ fn classifyNumber(raw: []const u8) ParserError!NumberKind {
     if (!validDecimalInt(int_part)) return error.InvalidNumber;
     var is_float = false;
     if (frac_part) |f| {
-        if (!validUnderscored(f, isDecimal)) return error.InvalidNumber;
+        if (!validUnderscored(f, ascii.isDigit)) return error.InvalidNumber;
         is_float = true;
     }
     if (exponent) |e| {
         var exp = e;
         if (exp.len > 0 and (exp[0] == '+' or exp[0] == '-')) exp = exp[1..];
-        if (!validUnderscored(exp, isDecimal)) return error.InvalidNumber;
+        if (!validUnderscored(exp, ascii.isDigit)) return error.InvalidNumber;
         is_float = true;
     }
     return if (is_float) .float else .integer;
@@ -811,7 +816,7 @@ fn classifyNumber(raw: []const u8) ParserError!NumberKind {
 /// the standalone integer and for a float's integer part (leading zeros banned
 /// in both: `01` and `03.14` are invalid).
 fn validDecimalInt(s: []const u8) bool {
-    if (!validUnderscored(s, isDecimal)) return false;
+    if (!validUnderscored(s, ascii.isDigit)) return false;
     if (s.len > 1 and s[0] == '0') return false; // no leading zeros
     return true;
 }
@@ -833,23 +838,6 @@ fn validUnderscored(s: []const u8, comptime pred: fn (u8) bool) bool {
     return true;
 }
 
-fn isDecimal(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
-fn isHex(c: u8) bool {
-    return isDecimal(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-}
-fn isOctal(c: u8) bool {
-    return c >= '0' and c <= '7';
-}
-fn isBinary(c: u8) bool {
-    return c == '0' or c == '1';
-}
-
-fn eqAny(s: []const u8, options: []const []const u8) bool {
-    for (options) |o| if (std.mem.eql(u8, s, o)) return true;
-    return false;
-}
 
 /// Canonicalize an integer literal (any radix, underscores, sign) to a decimal
 /// string. Returns `raw` unchanged when already canonical, else an owned copy.
@@ -901,86 +889,19 @@ fn intern(self: *Parser, s: []const u8) ParserError![]const u8 {
 // four. (TOML never produces the enum/char-literal ExtKinds — those are ZON.)
 const Shape = AST.Node.Kind.Extended.ExtKind;
 
+/// Validate + classify a datetime token via the shared `util.datetime` helper.
+/// TOML accepts a bare time and (in 1.1) minute precision; seconds are mandatory
+/// in 1.0. The `util.datetime.Kind` lines up with `Shape` member-for-member.
 fn classifyDatetime(self: *Parser, raw: []const u8) ParserError!Shape {
-    // Time-only: HH:MM...
-    if (raw.len >= 3 and raw[2] == ':') {
-        try self.validateTime(raw);
-        return .local_time;
-    }
-    // Date present: YYYY-MM-DD.
-    if (raw.len < 10) return error.InvalidDatetime;
-    try validateDate(raw[0..10]);
-    if (raw.len == 10) return .local_date;
-
-    // Separator then time (+ optional offset).
-    const sep = raw[10];
-    if (sep != 'T' and sep != 't' and sep != ' ') return error.InvalidDatetime;
-    const rest = raw[11..];
-
-    // Offset: trailing Z/z, or ±HH:MM at the end.
-    var time_str = rest;
-    var has_offset = false;
-    if (rest.len > 0 and (rest[rest.len - 1] == 'Z' or rest[rest.len - 1] == 'z')) {
-        time_str = rest[0 .. rest.len - 1];
-        has_offset = true;
-    } else if (rest.len >= 6 and (rest[rest.len - 6] == '+' or rest[rest.len - 6] == '-') and rest[rest.len - 3] == ':') {
-        try validateOffset(rest[rest.len - 6 ..]);
-        time_str = rest[0 .. rest.len - 6];
-        has_offset = true;
-    }
-    try self.validateTime(time_str);
-    return if (has_offset) .offset_datetime else .local_datetime;
-}
-
-fn twoDigit(s: []const u8, at: usize) u8 {
-    return (s[at] - '0') * 10 + (s[at + 1] - '0');
-}
-
-fn validateDate(s: []const u8) ParserError!void {
-    if (s.len != 10 or s[4] != '-' or s[7] != '-') return error.InvalidDatetime;
-    const year = @as(u16, twoDigit(s, 0)) * 100 + twoDigit(s, 2);
-    const month = twoDigit(s, 5);
-    const day = twoDigit(s, 8);
-    if (month < 1 or month > 12) return error.InvalidDatetime;
-    if (day < 1 or day > daysInMonth(year, month)) return error.InvalidDatetime;
-}
-
-fn daysInMonth(year: u16, month: u8) u8 {
-    return switch (month) {
-        1, 3, 5, 7, 8, 10, 12 => 31,
-        4, 6, 9, 11 => 30,
-        2 => if (isLeapYear(year)) @as(u8, 29) else 28,
-        else => 0,
+    const kind = datetime.classify(raw, .{
+        .allow_minute_precision = self.version != .TOML_1_0,
+    }) catch return error.InvalidDatetime;
+    return switch (kind) {
+        .offset_datetime => .offset_datetime,
+        .local_datetime => .local_datetime,
+        .local_date => .local_date,
+        .local_time => .local_time,
     };
-}
-
-fn isLeapYear(year: u16) bool {
-    return (year % 4 == 0 and year % 100 != 0) or year % 400 == 0;
-}
-
-/// HH:MM[:SS[.fraction]]; seconds 00-60 (leap second allowed). Seconds are
-/// required in TOML 1.0 but optional in 1.1.
-fn validateTime(self: *Parser, s: []const u8) ParserError!void {
-    if (s.len < 5 or s[2] != ':') return error.InvalidDatetime;
-    const hour = twoDigit(s, 0);
-    const minute = twoDigit(s, 3);
-    if (hour > 23 or minute > 59) return error.InvalidDatetime;
-    if (s.len == 5) {
-        if (self.version == .TOML_1_0) return error.InvalidDatetime; // seconds required
-        return;
-    }
-    if (s[5] != ':') return error.InvalidDatetime;
-    if (s.len < 8) return error.InvalidDatetime;
-    if (twoDigit(s, 6) > 60) return error.InvalidDatetime;
-    if (s.len == 8) return;
-    if (s[8] != '.' or s.len < 10) return error.InvalidDatetime;
-    for (s[9..]) |c| if (!isDecimal(c)) return error.InvalidDatetime;
-}
-
-/// ±HH:MM offset; hour 00-23, minute 00-59.
-fn validateOffset(s: []const u8) ParserError!void {
-    if (s.len != 6 or s[3] != ':') return error.InvalidDatetime;
-    if (twoDigit(s, 1) > 23 or twoDigit(s, 4) > 59) return error.InvalidDatetime;
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

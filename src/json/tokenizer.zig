@@ -10,6 +10,7 @@ const log = std.log.scoped(.tokenizer);
 const testing = std.testing;
 const JsonFormat = @import("json.zig").Type;
 const Span = @import("../util/span.zig");
+const ascii = @import("../util/util.zig").ascii;
 pub const Token = @import("../token.zig").Token(Kind);
 
 pub const Kind = enum {
@@ -176,9 +177,7 @@ fn matches(self: *const Tokenizer, str: []const u8) bool {
     return true;
 }
 
-fn isDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
+const isDigit = ascii.isDigit;
 
 /// ASCII subset of an ECMAScript IdentifierStart (`$`, `_`, letters). Unicode and
 /// `\u` escapes in identifiers are out of scope (the suite's `todo/` cases).
@@ -211,9 +210,7 @@ fn identifierOrKeyword(self: *Tokenizer) TokenizeError!Token {
     return .init(kind, .init(start, self.index));
 }
 
-fn isHexDigit(c: u8) bool {
-    return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
-}
+const isHexDigit = ascii.isHex;
 
 // ========================
 // TERMINAL TOKEN FUNCTIONS

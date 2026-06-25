@@ -4,8 +4,11 @@
 const std = @import("std");
 const AST = @import("../ast/ast.zig");
 const Document = @import("../document.zig");
+const util = @import("../util/util.zig");
 const Span = @import("../util/span.zig");
-const Unicode = @import("../util/util.zig").Unicode;
+const Unicode = util.Unicode;
+const ascii = util.ascii;
+const datetime = util.datetime;
 const testing = std.testing;
 const Tokenizer = @import("tokenizer.zig");
 const Token = Tokenizer.Token;
@@ -1602,10 +1605,6 @@ fn bool1_1(source: []const u8) ?bool {
     return null;
 }
 
-fn isDecDigit(c: u8) bool {
-    return c >= '0' and c <= '9';
-}
-
 /// Every char of `s` is a `pred` digit or a `_` separator, with at least one
 /// real digit (so `0x` / `0b` with an empty body is rejected).
 fn digitRun(s: []const u8, comptime pred: fn (u8) bool) bool {
@@ -1623,7 +1622,7 @@ fn digitRun(s: []const u8, comptime pred: fn (u8) bool) bool {
 /// radix prefixes before the decimal/octal/float fork.
 fn classify1_1Number(source: []const u8) NumberClass {
     if (source.len == 0) return .not_number;
-    if (is1_1InfNan(source)) return .float;
+    if (isInfNan(source)) return .float;
 
     var s = source;
     if (s[0] == '+' or s[0] == '-') s = s[1..];
@@ -1634,9 +1633,9 @@ fn classify1_1Number(source: []const u8) NumberClass {
 
     // Radix-prefixed integers: hex `0x…`, binary `0b…`.
     if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X'))
-        return if (digitRun(s[2..], std.ascii.isHex)) .integer else .not_number;
+        return if (digitRun(s[2..], ascii.isHex)) .integer else .not_number;
     if (s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B'))
-        return if (digitRun(s[2..], isBinDigit)) .integer else .not_number;
+        return if (digitRun(s[2..], ascii.isBinary)) .integer else .not_number;
 
     // A `.` makes it a base-10 float (1.1 requires the dot; `1e3` is a string).
     if (std.mem.indexOfScalar(u8, s, '.') != null)
@@ -1644,29 +1643,15 @@ fn classify1_1Number(source: []const u8) NumberClass {
 
     // Leading-zero octal `0[0-7_]+` (1.1 has no `0o`; `08` is therefore a string).
     if (s.len >= 2 and s[0] == '0')
-        return if (digitRun(s[1..], isOctDigit)) .integer else .not_number;
+        return if (digitRun(s[1..], ascii.isOctal)) .integer else .not_number;
 
     // Plain decimal `0 | [1-9][0-9_]*`.
     if (s.len == 1 and s[0] == '0') return .integer;
     if (s[0] >= '1' and s[0] <= '9') {
-        for (s[1..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+        for (s[1..]) |c| if (!(ascii.isDigit(c) or c == '_')) return .not_number;
         return .integer;
     }
     return .not_number;
-}
-
-fn isBinDigit(c: u8) bool {
-    return c == '0' or c == '1';
-}
-
-fn isOctDigit(c: u8) bool {
-    return c >= '0' and c <= '7';
-}
-
-/// `[-+]?\.(inf|Inf|INF)` / `\.(nan|NaN|NAN)` — the 1.1 spelling keeps the
-/// leading `.` (same as 1.2's core schema).
-fn is1_1InfNan(source: []const u8) bool {
-    return isInfNan(source);
 }
 
 /// 1.1 base-10 float: `([0-9][0-9_]*)?\.[0-9_]*([eE][-+][0-9]+)?` (sign already
@@ -1674,22 +1659,22 @@ fn is1_1InfNan(source: []const u8) bool {
 fn is1_1Base10Float(s: []const u8) bool {
     var i: usize = 0;
     // Optional integer part.
-    if (i < s.len and isDecDigit(s[i])) {
+    if (i < s.len and ascii.isDigit(s[i])) {
         i += 1;
-        while (i < s.len and (isDecDigit(s[i]) or s[i] == '_')) i += 1;
+        while (i < s.len and (ascii.isDigit(s[i]) or s[i] == '_')) i += 1;
     }
     // Mandatory `.`.
     if (i >= s.len or s[i] != '.') return false;
     i += 1;
     // Fractional digits (may be empty: `5.`).
-    while (i < s.len and (isDecDigit(s[i]) or s[i] == '_')) i += 1;
+    while (i < s.len and (ascii.isDigit(s[i]) or s[i] == '_')) i += 1;
     // Optional signed exponent.
     if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
         i += 1;
         if (i >= s.len or (s[i] != '+' and s[i] != '-')) return false;
         i += 1;
         var exp_digits: usize = 0;
-        while (i < s.len and isDecDigit(s[i])) : (i += 1) exp_digits += 1;
+        while (i < s.len and ascii.isDigit(s[i])) : (i += 1) exp_digits += 1;
         if (exp_digits == 0) return false;
     }
     return i == s.len;
@@ -1702,7 +1687,7 @@ fn classify1_1Base60(s: []const u8) NumberClass {
     var is_float = false;
     if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
         is_float = true;
-        for (s[dot + 1 ..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+        for (s[dot + 1 ..]) |c| if (!(ascii.isDigit(c) or c == '_')) return .not_number;
         body = s[0..dot];
     }
 
@@ -1713,13 +1698,13 @@ fn classify1_1Base60(s: []const u8) NumberClass {
         if (g.len == 0) return .not_number;
         if (idx == 0) {
             // First group `[1-9][0-9_]*` (int) / `[0-9][0-9_]*` (float).
-            if (!isDecDigit(g[0])) return .not_number;
+            if (!ascii.isDigit(g[0])) return .not_number;
             if (!is_float and g[0] == '0') return .not_number;
-            for (g[1..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+            for (g[1..]) |c| if (!(ascii.isDigit(c) or c == '_')) return .not_number;
         } else {
             // Subsequent groups `[0-5]?[0-9]`.
             if (g.len < 1 or g.len > 2) return .not_number;
-            for (g) |c| if (!isDecDigit(c)) return .not_number;
+            for (g) |c| if (!ascii.isDigit(c)) return .not_number;
             if (g.len == 2 and g[0] > '5') return .not_number;
             trailing += 1;
         }
@@ -1728,67 +1713,25 @@ fn classify1_1Base60(s: []const u8) NumberClass {
     return if (is_float) .float else .integer;
 }
 
-/// YAML 1.1 `!!timestamp`: a full date-time (`YYYY-MM-DD` + `T`/`t`/space +
-/// `HH:MM:SS[.frac]` + optional `Z`/`±HH[:MM]` zone) or a bare `YYYY-MM-DD`
-/// date. Returns the matching extended kind, or null for a non-timestamp.
-fn classify1_1Timestamp(s: []const u8) ?AST.Node.Kind.Extended.ExtKind {
-    if (s.len < 10 or !isDatePrefix(s)) return null;
-    if (s.len == 10) return .local_date;
-
-    const sep = s[10];
-    if (sep != 'T' and sep != 't' and sep != ' ') return null;
-    var rest = s[11..];
-
-    // Skip leading spaces before the time (1.1 allows ` 21:59:43`).
-    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
-
-    var has_offset = false;
-    // Trailing `Z`/`z`, then ` ±H[H][:MM]` or `±H[H][:MM]`.
-    if (rest.len > 0 and (rest[rest.len - 1] == 'Z' or rest[rest.len - 1] == 'z')) {
-        has_offset = true;
-        rest = rest[0 .. rest.len - 1];
-    } else if (std.mem.lastIndexOfScalar(u8, rest, '+') orelse std.mem.lastIndexOfScalar(u8, rest, '-')) |zi| {
-        if (zi > 0 and !isValidZone(rest[zi..])) return null;
-        if (zi > 0) {
-            has_offset = true;
-            rest = rest[0..zi];
-        }
-    }
-    while (rest.len > 0 and rest[rest.len - 1] == ' ') rest = rest[0 .. rest.len - 1];
-
-    if (!isValidTime(rest)) return null;
-    return if (has_offset) .offset_datetime else .local_datetime;
+/// YAML 1.1 `!!timestamp`: a `YYYY-MM-DD` date or a full date-time with an
+/// optional `Z`/`±HH:MM` zone, via the shared datetime validator. Time-only and
+/// minute-precision forms are refused — a bare `:`-run is a sexagesimal number
+/// in 1.1 (resolved earlier), and the canonical timestamp carries seconds.
+/// Returns the matching extended kind, or null for a non-timestamp.
+fn classify1_1Timestamp(source: []const u8) ?AST.Node.Kind.Extended.ExtKind {
+    const kind = datetime.classify(source, .{
+        .allow_time_only = false,
+        .allow_minute_precision = false,
+    }) catch return null;
+    return switch (kind) {
+        .offset_datetime => .offset_datetime,
+        .local_datetime => .local_datetime,
+        .local_date => .local_date,
+        .local_time => .local_time,
+    };
 }
 
-/// `YYYY-MM-DD` occupying the first 10 bytes of `s`.
-fn isDatePrefix(s: []const u8) bool {
-    if (s.len < 10 or s[4] != '-' or s[7] != '-') return false;
-    for ([_]usize{ 0, 1, 2, 3, 5, 6, 8, 9 }) |i| if (!isDecDigit(s[i])) return false;
-    return true;
-}
-
-/// `HH:MM:SS` with optional `.frac`.
-fn isValidTime(s: []const u8) bool {
-    if (s.len < 8 or s[2] != ':' or s[5] != ':') return false;
-    for ([_]usize{ 0, 1, 3, 4, 6, 7 }) |i| if (!isDecDigit(s[i])) return false;
-    if (s.len == 8) return true;
-    if (s[8] != '.') return false;
-    return digitRun(s[9..], isDecDigit);
-}
-
-/// `±H`, `±HH`, or `±HH:MM` numeric zone offset.
-fn isValidZone(s: []const u8) bool {
-    if (s.len < 2 or (s[0] != '+' and s[0] != '-')) return false;
-    for (s[1..]) |c| if (!isDecDigit(c) and c != ':') return false;
-    return true;
-}
-
-fn eqlAny(source: []const u8, options: []const []const u8) bool {
-    for (options) |option| {
-        if (std.mem.eql(u8, source, option)) return true;
-    }
-    return false;
-}
+const eqlAny = util.eqlAny;
 
 /// Folds a multi-line plain scalar: line breaks fold like flow scalars (a lone
 /// break becomes a space, a blank line a newline) with continuation-line
@@ -1963,13 +1906,10 @@ fn parseHexEscape(source: []const u8, start: usize, digits: usize) ParserError!u
 }
 
 fn appendCodepoint(decoded: *std.ArrayList(u8), allocator: std.mem.Allocator, codepoint: u21) ParserError!void {
-    if (Unicode.isHighSurrogate(codepoint) or Unicode.isLowSurrogate(codepoint)) {
-        return ParseError.InvalidUnicodeEscape;
-    }
-
-    var buf: [4]u8 = undefined;
-    const written = std.unicode.utf8Encode(codepoint, &buf) catch return ParseError.InvalidUnicodeEscape;
-    try decoded.appendSlice(allocator, buf[0..written]);
+    Unicode.encodeAppend(decoded, allocator, codepoint) catch |err| switch (err) {
+        error.InvalidCodepoint => return ParseError.InvalidUnicodeEscape,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
 }
 
 const NumberClass = enum { not_number, integer, float };
@@ -1987,7 +1927,7 @@ fn classifyNumber(source: []const u8) NumberClass {
         const hex = source[1] == 'x';
         var i: usize = 2;
         while (i < source.len) : (i += 1) {
-            const ok = if (hex) std.ascii.isHex(source[i]) else (source[i] >= '0' and source[i] <= '7');
+            const ok = if (hex) ascii.isHex(source[i]) else ascii.isOctal(source[i]);
             if (!ok) return .not_number;
         }
         return .integer;
