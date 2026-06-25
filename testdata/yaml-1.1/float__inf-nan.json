@@ -1,0 +1,8 @@
+{
+  "pos_inf":   {"type": "float", "value": "inf"},
+  "neg_inf":   {"type": "float", "value": "-inf"},
+  "upper_inf": {"type": "float", "value": "inf"},
+  "nan_lower": {"type": "float", "value": "nan"},
+  "nan_title": {"type": "float", "value": "nan"},
+  "nan_upper": {"type": "float", "value": "nan"}
+}

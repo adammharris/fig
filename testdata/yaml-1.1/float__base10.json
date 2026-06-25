@@ -1,0 +1,7 @@
+{
+  "canonical":   {"type": "float", "value": "685230.15"},
+  "exponential": {"type": "float", "value": "685230.15"},
+  "fixed":       {"type": "float", "value": "685230.15"},
+  "leading_dot": {"type": "float", "value": "0.5"},
+  "neg_zero":    {"type": "float", "value": "-0.0"}
+}

@@ -1,0 +1,7 @@
+{
+  "zero":        {"type": "integer", "value": "0"},
+  "plain":       {"type": "integer", "value": "685230"},
+  "signed_pos":  {"type": "integer", "value": "685230"},
+  "neg":         {"type": "integer", "value": "-7"},
+  "underscores": {"type": "integer", "value": "1000000"}
+}

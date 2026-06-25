@@ -1,0 +1,3 @@
+binary: 0b1010
+canonical_example: 0b1010_0111_0100_1010_1110
+signed_neg: -0b101

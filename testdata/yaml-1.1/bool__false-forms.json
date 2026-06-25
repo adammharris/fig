@@ -1,0 +1,13 @@
+{
+  "a": {"type": "bool", "value": "false"},
+  "b": {"type": "bool", "value": "false"},
+  "c": {"type": "bool", "value": "false"},
+  "d": {"type": "bool", "value": "false"},
+  "e": {"type": "bool", "value": "false"},
+  "f": {"type": "bool", "value": "false"},
+  "g": {"type": "bool", "value": "false"},
+  "h": {"type": "bool", "value": "false"},
+  "i": {"type": "bool", "value": "false"},
+  "j": {"type": "bool", "value": "false"},
+  "k": {"type": "bool", "value": "false"}
+}

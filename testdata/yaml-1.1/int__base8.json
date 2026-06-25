@@ -1,0 +1,6 @@
+{
+  "octal":             {"type": "integer", "value": "511"},
+  "canonical_example": {"type": "integer", "value": "685230"},
+  "signed_neg":        {"type": "integer", "value": "-8"},
+  "underscored":       {"type": "integer", "value": "15"}
+}

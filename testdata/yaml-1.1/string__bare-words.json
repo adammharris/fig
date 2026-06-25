@@ -1,0 +1,6 @@
+{
+  "greeting":   {"type": "string", "value": "hello"},
+  "near_bool":  {"type": "string", "value": "yes_please"},
+  "versionish": {"type": "string", "value": "v1.2"},
+  "not_bool":   {"type": "string", "value": "truthy"}
+}

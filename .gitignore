@@ -13,3 +13,5 @@ bindings/rust/fig/LICENSE-APACHE
 bindings/rust/fig/README.md
 bindings/rust/fig-macros/LICENSE-MIT
 bindings/rust/fig-macros/LICENSE-APACHE
+src/yaml/spec-1.1-tag-repository.md
+src/yaml/spec-1.1.md

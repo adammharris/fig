@@ -8,7 +8,15 @@ pub const Printer = @import("printer.zig");
 pub const Materialize = @import("materialize.zig");
 pub const Type = enum {
     v1_2_2,
-    // TODO: earlier versions of YAML spec?
+    /// YAML 1.1 (2005). Differs from 1.2 almost entirely in *scalar type
+    /// resolution* (the tag repository at yaml.org/type): `yes/no/on/off/y/n`
+    /// booleans, leading-zero octal (`0777`) + binary (`0b…`) + sexagesimal
+    /// (`190:20:30`) ints, `_` digit separators, mandatory-sign float exponents,
+    /// and `!!timestamp` auto-resolution. Structure/syntax is unchanged.
+    /// Resolution differences are pinned by the spec fixtures in
+    /// `testdata/yaml-1.1/` (see `conformance_1_1.zig`); the resolver itself is
+    /// still being filled in, so selecting this currently parses like 1.2.
+    v1_1,
 };
 
 pub const Language = struct {

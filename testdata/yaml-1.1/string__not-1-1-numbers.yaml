@@ -1,0 +1,4 @@
+exp_without_sign: 1e3
+prefixed_octal: 0o17
+bare_hex: 0x
+invalid_octal: 08

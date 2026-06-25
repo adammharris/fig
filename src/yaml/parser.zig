@@ -119,6 +119,11 @@ yaml_directive_seen: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
+/// The YAML version whose scalar-resolution rules `scalarKind` should apply.
+/// Set from the `format` passed to `parseOnce`. Resolution does not branch on
+/// it yet (1.1 support is in progress); the spec fixtures under
+/// `testdata/yaml-1.1/` define the target behavior.
+version: Type = .v1_2_2,
 
 const PendingTag = struct { text: []const u8, span: Span };
 const PendingAnchor = struct { name: []const u8, span: Span };
@@ -148,6 +153,7 @@ pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Doc
 /// Caller must handle memory by calling `defer deinit` or similar.
 pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
     self.source = input;
+    self.version = format;
 
     var tokenizer: Tokenizer = .{
         .allocator = self.allocator,

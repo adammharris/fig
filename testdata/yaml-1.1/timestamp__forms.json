@@ -1,0 +1,4 @@
+{
+  "canonical": {"type": "datetime",   "value": "2001-12-15T02:59:43.1Z"},
+  "date_only": {"type": "date-local", "value": "2002-12-14"}
+}

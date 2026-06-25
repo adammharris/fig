@@ -1,0 +1,6 @@
+{
+  "exp_without_sign": {"type": "string", "value": "1e3"},
+  "prefixed_octal":   {"type": "string", "value": "0o17"},
+  "bare_hex":         {"type": "string", "value": "0x"},
+  "invalid_octal":    {"type": "string", "value": "08"}
+}

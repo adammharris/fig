@@ -1,0 +1,5 @@
+{
+  "hex":         {"type": "integer", "value": "685230"},
+  "underscored": {"type": "integer", "value": "685230"},
+  "neg":         {"type": "integer", "value": "-255"}
+}

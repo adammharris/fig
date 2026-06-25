@@ -41,6 +41,7 @@ test {
     }
     if (build_options.yaml_conformance) {
         _ = @import("yaml/conformance.zig");
+        _ = @import("yaml/conformance_1_1.zig");
     }
     if (build_options.toml_conformance) {
         _ = @import("toml/conformance.zig");

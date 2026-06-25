@@ -1,0 +1,6 @@
+pos_inf: .inf
+neg_inf: -.inf
+upper_inf: +.INF
+nan_lower: .nan
+nan_title: .NaN
+nan_upper: .NAN
