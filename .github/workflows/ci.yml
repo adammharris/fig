@@ -55,6 +55,47 @@ jobs:
       - run: cargo test --workspace
         working-directory: bindings/rust
 
+  # cargo-semver-checks guards the *native Rust* public surface (Value, Document,
+  # the editor, the #[derive] macros, serde impls, cargo features) — the contract
+  # the Zig `semver-check` cannot see, since none of it crosses the C ABI. Like
+  # semver-check it is version-aware: it only fails if the API delta exceeds what
+  # the crate's current version bump allows, and it diffs against the same `v*`
+  # tag baseline (not crates.io) so the two checks share one source of truth.
+  rust-semver:
+    name: Rust — cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needs full history + tags: the baseline is the most recent `v*` tag,
+          # discovered the same way semver-check discovers it.
+          fetch-depth: 0
+      # build.rs compiles the fig core with `zig build`, so building the crate's
+      # rustdoc (current AND the baseline rev) needs Zig.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: dtolnay/rust-toolchain@stable
+      # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits.
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bindings/rust
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Check the fig crate's Rust API against the last release tag
+        working-directory: bindings/rust
+        run: |
+          set -euo pipefail
+          tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          if [ -z "$tag" ]; then
+            echo "cargo-semver-checks: no v* tag found — skipping (nothing to diff against)."
+            exit 0
+          fi
+          echo "cargo-semver-checks: baseline $tag"
+          cargo semver-checks --package fig --baseline-rev "$tag"
+
   typescript:
     name: TypeScript — build + test
     runs-on: ubuntu-latest
