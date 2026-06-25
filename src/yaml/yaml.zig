@@ -14,8 +14,8 @@ pub const Type = enum {
     /// (`190:20:30`) ints, `_` digit separators, mandatory-sign float exponents,
     /// and `!!timestamp` auto-resolution. Structure/syntax is unchanged.
     /// Resolution differences are pinned by the spec fixtures in
-    /// `testdata/yaml-1.1/` (see `conformance_1_1.zig`); the resolver itself is
-    /// still being filled in, so selecting this currently parses like 1.2.
+    /// `testdata/yaml-1.1/` (see `conformance_1_1.zig`) and implemented by
+    /// `scalarKind1_1` in `parser.zig`. Structure/syntax is shared with 1.2.
     v1_1,
 };
 

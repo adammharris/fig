@@ -51,6 +51,6 @@ ratchet targets as the 1.1 resolver is implemented.
 
 ## Status
 
-The 1.1 resolver is still being filled in, so `Type.v1_1` currently parses like
-1.2. The scoreboard is a **ratchet**: it asserts the pass count never drops
-below a recorded baseline, and the baseline is raised as resolution lands.
+The 1.1 resolver (`scalarKind1_1` in `src/yaml/parser.zig`) is implemented:
+**14/14** fixtures pass. The scoreboard is a **ratchet** — it asserts the pass
+count never drops below the recorded baseline (now 14).

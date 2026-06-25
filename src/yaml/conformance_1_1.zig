@@ -29,15 +29,14 @@ const JsonType = @import("../json/json.zig").Type;
 const max_fixture_size = 1024 * 1024;
 
 // Ratchet baseline: the number of `testdata/yaml-1.1/` fixtures whose every
-// scalar already resolves to the 1.1-expected type+value. Raise this as the 1.1
+// scalar resolves to the 1.1-expected type+value. Raise this as the 1.1
 // resolver lands; never lower it without a deliberate reason.
 //
-// 3/14 today, all pure 1.1↔1.2 overlap (no resolver work yet): `null__forms`
-// (~/null/empty), `float__inf-nan` (.inf/.nan), `string__bare-words` (plain
-// words). The other 11 need 1.1-specific resolution (yes→bool, leading-zero/
-// binary/sexagesimal/underscored ints, underscored floats, 1e3→string,
-// 0o17→string, timestamps) and are the ratchet targets.
-const valid_1_1_baseline = 3;
+// 14/14: the full `scalarKind1_1` resolver is in (`src/yaml/parser.zig`) —
+// yes/no/on/off booleans, leading-zero octal + binary + hex + sexagesimal
+// (underscored) ints, `.`-required signed-exponent floats, and `!!timestamp`
+// auto-resolution; `1e3`/`0o17`/`08`/`0x` correctly stay strings.
+const valid_1_1_baseline = 14;
 
 const Score = struct { correct: usize = 0, total: usize = 0 };
 

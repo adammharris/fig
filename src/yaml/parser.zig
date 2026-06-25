@@ -119,10 +119,10 @@ yaml_directive_seen: bool = false,
 
 allocator: std.mem.Allocator,
 source: []const u8 = "",
-/// The YAML version whose scalar-resolution rules `scalarKind` should apply.
-/// Set from the `format` passed to `parseOnce`. Resolution does not branch on
-/// it yet (1.1 support is in progress); the spec fixtures under
-/// `testdata/yaml-1.1/` define the target behavior.
+/// The YAML version whose scalar-resolution rules `scalarKind` applies. Set
+/// from the `format` passed to `parseOnce`. `.v1_1` routes plain scalars
+/// through `scalarKind1_1` (1.1 tag-repository resolution); `.v1_2_2` uses the
+/// 1.2 core schema. The spec fixtures under `testdata/yaml-1.1/` pin 1.1.
 version: Type = .v1_2_2,
 
 const PendingTag = struct { text: []const u8, span: Span };
@@ -1560,6 +1560,7 @@ fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
     // A multi-line plain scalar folds its line breaks; it is always a string
     // (no number/bool/null spans lines).
     if (std.mem.indexOfScalar(u8, source, '\n') != null) return .{ .string = try self.foldPlainScalar(source) };
+    if (self.version == .v1_1) return scalarKind1_1(source);
     if (eqlAny(source, &.{ "null", "Null", "NULL", "~" })) return .null_;
     if (eqlAny(source, &.{ "true", "True", "TRUE" })) return .{ .boolean = true };
     if (eqlAny(source, &.{ "false", "False", "FALSE" })) return .{ .boolean = false };
@@ -1569,6 +1570,217 @@ fn scalarKind(self: *Parser, source: []const u8) ParserError!AST.Node.Kind {
         .not_number => {},
     }
     return .{ .string = source };
+}
+
+// ── YAML 1.1 scalar type resolution ─────────────────────────────────────────
+//
+// 1.1 resolves plain scalars by the tag repository (yaml.org/type), which
+// diverges from 1.2's core schema: `yes`/`no`/`on`/`off`/`y`/`n` booleans,
+// leading-zero octal (`0777`) + binary (`0b…`) + sexagesimal (`190:20:30`)
+// ints, `_` digit separators, floats requiring a `.` with a *signed* exponent,
+// and `!!timestamp` auto-resolution. The lexeme stays in `number.raw` /
+// `extended.text`; value normalization (radix, `_`, base-60) is the consumer's
+// job — see `conformance_1_1.zig`, which recomputes from the raw.
+fn scalarKind1_1(source: []const u8) AST.Node.Kind {
+    if (eqlAny(source, &.{ "null", "Null", "NULL", "~" })) return .null_;
+    if (bool1_1(source)) |b| return .{ .boolean = b };
+    switch (classify1_1Number(source)) {
+        .integer => return .{ .number = .{ .raw = source, .kind = .integer } },
+        .float => return .{ .number = .{ .raw = source, .kind = .float } },
+        .not_number => {},
+    }
+    if (classify1_1Timestamp(source)) |kind| return .{ .extended = .{ .kind = kind, .text = source } };
+    return .{ .string = source };
+}
+
+/// YAML 1.1 boolean tag: `y|Y|yes|Yes|YES|true|True|TRUE|on|On|ON` (true) and
+/// the matching negatives (false). Only these exact spellings; `yes_please`
+/// stays a string.
+fn bool1_1(source: []const u8) ?bool {
+    if (eqlAny(source, &.{ "y", "Y", "yes", "Yes", "YES", "true", "True", "TRUE", "on", "On", "ON" })) return true;
+    if (eqlAny(source, &.{ "n", "N", "no", "No", "NO", "false", "False", "FALSE", "off", "Off", "OFF" })) return false;
+    return null;
+}
+
+fn isDecDigit(c: u8) bool {
+    return c >= '0' and c <= '9';
+}
+
+/// Every char of `s` is a `pred` digit or a `_` separator, with at least one
+/// real digit (so `0x` / `0b` with an empty body is rejected).
+fn digitRun(s: []const u8, comptime pred: fn (u8) bool) bool {
+    var any = false;
+    for (s) |c| {
+        if (c == '_') continue;
+        if (!pred(c)) return false;
+        any = true;
+    }
+    return any;
+}
+
+/// Classify a plain scalar against the YAML 1.1 int/float tags. Order matters:
+/// `.inf`/`.nan` and sexagesimal are checked before the radix prefixes, and the
+/// radix prefixes before the decimal/octal/float fork.
+fn classify1_1Number(source: []const u8) NumberClass {
+    if (source.len == 0) return .not_number;
+    if (is1_1InfNan(source)) return .float;
+
+    var s = source;
+    if (s[0] == '+' or s[0] == '-') s = s[1..];
+    if (s.len == 0) return .not_number;
+
+    // Sexagesimal (`H:MM:SS[.frac]`) — int or float depending on a trailing `.`.
+    if (std.mem.indexOfScalar(u8, s, ':') != null) return classify1_1Base60(s);
+
+    // Radix-prefixed integers: hex `0x…`, binary `0b…`.
+    if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X'))
+        return if (digitRun(s[2..], std.ascii.isHex)) .integer else .not_number;
+    if (s.len >= 2 and s[0] == '0' and (s[1] == 'b' or s[1] == 'B'))
+        return if (digitRun(s[2..], isBinDigit)) .integer else .not_number;
+
+    // A `.` makes it a base-10 float (1.1 requires the dot; `1e3` is a string).
+    if (std.mem.indexOfScalar(u8, s, '.') != null)
+        return if (is1_1Base10Float(s)) .float else .not_number;
+
+    // Leading-zero octal `0[0-7_]+` (1.1 has no `0o`; `08` is therefore a string).
+    if (s.len >= 2 and s[0] == '0')
+        return if (digitRun(s[1..], isOctDigit)) .integer else .not_number;
+
+    // Plain decimal `0 | [1-9][0-9_]*`.
+    if (s.len == 1 and s[0] == '0') return .integer;
+    if (s[0] >= '1' and s[0] <= '9') {
+        for (s[1..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+        return .integer;
+    }
+    return .not_number;
+}
+
+fn isBinDigit(c: u8) bool {
+    return c == '0' or c == '1';
+}
+
+fn isOctDigit(c: u8) bool {
+    return c >= '0' and c <= '7';
+}
+
+/// `[-+]?\.(inf|Inf|INF)` / `\.(nan|NaN|NAN)` — the 1.1 spelling keeps the
+/// leading `.` (same as 1.2's core schema).
+fn is1_1InfNan(source: []const u8) bool {
+    return isInfNan(source);
+}
+
+/// 1.1 base-10 float: `([0-9][0-9_]*)?\.[0-9_]*([eE][-+][0-9]+)?` (sign already
+/// stripped). The dot is mandatory; an exponent, if present, must carry a sign.
+fn is1_1Base10Float(s: []const u8) bool {
+    var i: usize = 0;
+    // Optional integer part.
+    if (i < s.len and isDecDigit(s[i])) {
+        i += 1;
+        while (i < s.len and (isDecDigit(s[i]) or s[i] == '_')) i += 1;
+    }
+    // Mandatory `.`.
+    if (i >= s.len or s[i] != '.') return false;
+    i += 1;
+    // Fractional digits (may be empty: `5.`).
+    while (i < s.len and (isDecDigit(s[i]) or s[i] == '_')) i += 1;
+    // Optional signed exponent.
+    if (i < s.len and (s[i] == 'e' or s[i] == 'E')) {
+        i += 1;
+        if (i >= s.len or (s[i] != '+' and s[i] != '-')) return false;
+        i += 1;
+        var exp_digits: usize = 0;
+        while (i < s.len and isDecDigit(s[i])) : (i += 1) exp_digits += 1;
+        if (exp_digits == 0) return false;
+    }
+    return i == s.len;
+}
+
+/// Sexagesimal: `[1-9][0-9_]*(:[0-5]?[0-9])+` (int) or the same with a trailing
+/// `.[0-9_]*` fractional (float). `s` is sign-stripped and known to contain `:`.
+fn classify1_1Base60(s: []const u8) NumberClass {
+    var body = s;
+    var is_float = false;
+    if (std.mem.indexOfScalar(u8, s, '.')) |dot| {
+        is_float = true;
+        for (s[dot + 1 ..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+        body = s[0..dot];
+    }
+
+    var groups = std.mem.splitScalar(u8, body, ':');
+    var idx: usize = 0;
+    var trailing: usize = 0;
+    while (groups.next()) |g| : (idx += 1) {
+        if (g.len == 0) return .not_number;
+        if (idx == 0) {
+            // First group `[1-9][0-9_]*` (int) / `[0-9][0-9_]*` (float).
+            if (!isDecDigit(g[0])) return .not_number;
+            if (!is_float and g[0] == '0') return .not_number;
+            for (g[1..]) |c| if (!(isDecDigit(c) or c == '_')) return .not_number;
+        } else {
+            // Subsequent groups `[0-5]?[0-9]`.
+            if (g.len < 1 or g.len > 2) return .not_number;
+            for (g) |c| if (!isDecDigit(c)) return .not_number;
+            if (g.len == 2 and g[0] > '5') return .not_number;
+            trailing += 1;
+        }
+    }
+    if (trailing == 0) return .not_number;
+    return if (is_float) .float else .integer;
+}
+
+/// YAML 1.1 `!!timestamp`: a full date-time (`YYYY-MM-DD` + `T`/`t`/space +
+/// `HH:MM:SS[.frac]` + optional `Z`/`±HH[:MM]` zone) or a bare `YYYY-MM-DD`
+/// date. Returns the matching extended kind, or null for a non-timestamp.
+fn classify1_1Timestamp(s: []const u8) ?AST.Node.Kind.Extended.ExtKind {
+    if (s.len < 10 or !isDatePrefix(s)) return null;
+    if (s.len == 10) return .local_date;
+
+    const sep = s[10];
+    if (sep != 'T' and sep != 't' and sep != ' ') return null;
+    var rest = s[11..];
+
+    // Skip leading spaces before the time (1.1 allows ` 21:59:43`).
+    while (rest.len > 0 and rest[0] == ' ') rest = rest[1..];
+
+    var has_offset = false;
+    // Trailing `Z`/`z`, then ` ±H[H][:MM]` or `±H[H][:MM]`.
+    if (rest.len > 0 and (rest[rest.len - 1] == 'Z' or rest[rest.len - 1] == 'z')) {
+        has_offset = true;
+        rest = rest[0 .. rest.len - 1];
+    } else if (std.mem.lastIndexOfScalar(u8, rest, '+') orelse std.mem.lastIndexOfScalar(u8, rest, '-')) |zi| {
+        if (zi > 0 and !isValidZone(rest[zi..])) return null;
+        if (zi > 0) {
+            has_offset = true;
+            rest = rest[0..zi];
+        }
+    }
+    while (rest.len > 0 and rest[rest.len - 1] == ' ') rest = rest[0 .. rest.len - 1];
+
+    if (!isValidTime(rest)) return null;
+    return if (has_offset) .offset_datetime else .local_datetime;
+}
+
+/// `YYYY-MM-DD` occupying the first 10 bytes of `s`.
+fn isDatePrefix(s: []const u8) bool {
+    if (s.len < 10 or s[4] != '-' or s[7] != '-') return false;
+    for ([_]usize{ 0, 1, 2, 3, 5, 6, 8, 9 }) |i| if (!isDecDigit(s[i])) return false;
+    return true;
+}
+
+/// `HH:MM:SS` with optional `.frac`.
+fn isValidTime(s: []const u8) bool {
+    if (s.len < 8 or s[2] != ':' or s[5] != ':') return false;
+    for ([_]usize{ 0, 1, 3, 4, 6, 7 }) |i| if (!isDecDigit(s[i])) return false;
+    if (s.len == 8) return true;
+    if (s[8] != '.') return false;
+    return digitRun(s[9..], isDecDigit);
+}
+
+/// `±H`, `±HH`, or `±HH:MM` numeric zone offset.
+fn isValidZone(s: []const u8) bool {
+    if (s.len < 2 or (s[0] != '+' and s[0] != '-')) return false;
+    for (s[1..]) |c| if (!isDecDigit(c) and c != ':') return false;
+    return true;
 }
 
 fn eqlAny(source: []const u8, options: []const []const u8) bool {
@@ -3350,4 +3562,57 @@ test "yaml plain scalar continuation may start with an indicator" {
     const doc = try Parser.parse(testing.allocator, "safe: a b\n      !c d\nnext: 1\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "a b !c d", (try doc.ast.getValByPath(&.{.{ .key = "safe" }})).kind.string);
+}
+
+test "yaml 1.1 resolves booleans, radix ints, sexagesimal, and timestamps" {
+    const src =
+        \\flag: yes
+        \\off_flag: Off
+        \\octal: 0777
+        \\binary: 0b1010
+        \\hex: 0x_0A
+        \\under: 1_000
+        \\base60: 190:20:30
+        \\fixed: 685_230.15
+        \\when: 2001-12-15T02:59:43.1Z
+        \\day: 2002-12-14
+        \\
+    ;
+    var doc = try Parser.parse(testing.allocator, src, .v1_1);
+    defer doc.deinit(testing.allocator);
+    const ast = &doc.ast;
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "flag" }})).kind.boolean == true);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "off_flag" }})).kind.boolean == false);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "octal" }})).kind.number.kind == .integer);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "binary" }})).kind.number.kind == .integer);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "hex" }})).kind.number.kind == .integer);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "under" }})).kind.number.kind == .integer);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "base60" }})).kind.number.kind == .integer);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "fixed" }})).kind.number.kind == .float);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "when" }})).kind.extended.kind == .offset_datetime);
+    try testing.expect((try ast.getValByPath(&.{.{ .key = "day" }})).kind.extended.kind == .local_date);
+}
+
+test "yaml 1.1 vs 1.2 scalar divergence" {
+    // Tokens typed in 1.2 but kept as strings in 1.1 (and vice versa). The same
+    // source resolves differently per version.
+    const src =
+        \\exp: 1e3
+        \\prefixed_octal: 0o17
+        \\bare_hex: 0x
+        \\invalid_octal: 08
+        \\
+    ;
+    var v11 = try Parser.parse(testing.allocator, src, .v1_1);
+    defer v11.deinit(testing.allocator);
+    // 1.1: all four are plain strings (no `.`+signed-exp float, no `0o`, etc.).
+    inline for (.{ "exp", "prefixed_octal", "bare_hex", "invalid_octal" }) |key| {
+        try testing.expect(std.meta.activeTag((try v11.ast.getValByPath(&.{.{ .key = key }})).kind) == .string);
+    }
+
+    var v12 = try Parser.parse(testing.allocator, src, .v1_2_2);
+    defer v12.deinit(testing.allocator);
+    // 1.2 core schema: `1e3` is a float and `0o17` an octal int.
+    try testing.expect((try v12.ast.getValByPath(&.{.{ .key = "exp" }})).kind.number.kind == .float);
+    try testing.expect((try v12.ast.getValByPath(&.{.{ .key = "prefixed_octal" }})).kind.number.kind == .integer);
 }
