@@ -10,7 +10,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fig"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "fig-macros",
  "indexmap",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "fig-macros"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "proc-macro2",
  "quote",

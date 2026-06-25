@@ -294,6 +294,30 @@ pub fn build(b: *std.Build) void {
     abi_check_step.dependOn(&abi_probe_c.step);
     abi_check_step.dependOn(&abi_probe_cpp.step);
 
+    // SemVer gate: diff the current C ABI against the most recent `v*` git tag
+    // and turn the delta into a version verdict (removed/changed symbol -> major,
+    // added-only -> minor, none -> patch), then assert build.zig.zon's version is
+    // high enough to cover it. Discovers the baseline itself via `git describe` +
+    // `git show`, so it needs the repo root and the canonical version. With no git
+    // history / no tags it prints a note and passes. Run: zig build semver-check.
+    const semver_check = b.addExecutable(.{
+        .name = "semver_check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/semver-check.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const semver_check_run = b.addRunArtifact(semver_check);
+    // Cache-key on the header it inspects; the baseline comes from git at run time.
+    semver_check_run.addFileArg(b.path("include/fig.h"));
+    semver_check_run.addArg(b.fmt("{d}.{d}.{d}", .{ version.major, version.minor, version.patch }));
+    semver_check_run.addArg(b.pathFromRoot("."));
+    // git state isn't a declared input, so never serve this from cache.
+    semver_check_run.has_side_effects = true;
+    const semver_check_step = b.step("semver-check", "Diff the C ABI vs the last release tag and verify the version bump");
+    semver_check_step.dependOn(&semver_check_run.step);
+
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
         orelse &.{};

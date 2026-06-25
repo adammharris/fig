@@ -24,11 +24,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # semver-check diffs the C ABI against the most recent `v*` tag via
+          # `git describe`/`git show`, so it needs full history + tags, not the
+          # default shallow checkout.
+          fetch-depth: 0
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
       - run: zig build test
       - run: zig build abi-check
+      # Turn the C ABI delta since the last release into a SemVer verdict and fail
+      # if build.zig.zon hasn't been bumped far enough to cover it.
+      - run: zig build semver-check
 
   rust:
     name: Rust — cargo test
