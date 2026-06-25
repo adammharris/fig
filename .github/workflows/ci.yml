@@ -84,7 +84,11 @@ jobs:
       # nightly comfortably within v57 (rustdoc-types 0.57.x ran through 2026-06-19).
       # When you bump cargo-semver-checks to a release that supports a newer format,
       # advance this date to a nightly that emits it.
-      - uses: dtolnay/rust-toolchain@nightly-2026-06-15
+      # NB: the @<ref> selects a *branch* of the action repo (no per-date branch
+      # exists), so a dated nightly must go through @master + the `toolchain` input.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-15
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/rust
