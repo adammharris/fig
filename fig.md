@@ -13,7 +13,7 @@ Originally made for [Diaryx](https://diaryx.org), `fig` allows editing frontmatt
 
 It currently supports the following formats:
 
-- YAML (1.2.2)
+- YAML (1.2.2 and 1.1)
 - JSON (strict, JSONC, JSON5)
 - TOML (1.1 and 1.2)
 - ZON (Zig Object Notation) (read, write, but no editing yet)

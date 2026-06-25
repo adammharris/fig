@@ -235,7 +235,8 @@ const Help = struct {
             \\    yaml, toml, zon, xml, native/fig). Default: infer from each
             \\    file's extension, then by sniffing its contents.
             \\  -s, --spec: validate against a specific language version, where one
-            \\    is selectable: TOML `1.0`/`1.1` (default 1.1), YAML `1.2.2`.
+            \\    is selectable: TOML `1.0`/`1.1` (default 1.1), YAML `1.2.2`/`1.1`
+            \\    (default 1.2.2).
             \\    JSON strictness is the format itself (json vs jsonc vs json5).
             \\  -q, --quiet: suppress the per-file `ok` lines; errors still print.
             \\  reads stdin when <file> is `-`.
@@ -696,7 +697,8 @@ const Spec = struct {
 /// `spec_str` yields the default spec. Errors when the version is unknown for
 /// that format, or when the format exposes no selectable version (then `--spec`
 /// doesn't apply — JSON strictness is the format name, ZON/XML/native are
-/// single-grammar). YAML currently has only 1.2.2; 1.1 is not yet implemented.
+/// single-grammar). YAML selects 1.2.2 (default) or 1.1; the versions differ in
+/// scalar type resolution (see `scalarKind1_1` in the YAML parser).
 fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spec {
     const s = spec_str orelse return .{};
     const eq = std.mem.eql;
@@ -709,6 +711,8 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
             error.UnsupportedSpec,
         .yaml, .yml => if (eq(u8, s, "1.2") or eq(u8, s, "1.2.2"))
             .{ .yaml = .v1_2_2 }
+        else if (eq(u8, s, "1.1") or eq(u8, s, "1.1.0"))
+            .{ .yaml = .v1_1 }
         else
             error.UnsupportedSpec,
         .json, .jsonc, .json5, .zon, .xml, .native => error.UnsupportedSpec,
@@ -1367,4 +1371,19 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     }
 
     return config;
+}
+
+test "resolveSpec maps YAML version strings" {
+    const t = std.testing;
+    // Default (no --spec) yields each language's default; YAML default is 1.2.2.
+    try t.expectEqual(fig.Language.YAML.default_type, (try resolveSpec(.yaml, null)).yaml);
+    try t.expectEqual(@as(fig.Language.YAML.Type, .v1_2_2), (try resolveSpec(.yaml, "1.2.2")).yaml);
+    try t.expectEqual(@as(fig.Language.YAML.Type, .v1_2_2), (try resolveSpec(.yaml, "1.2")).yaml);
+    // 1.1 is now selectable (was previously rejected as UnsupportedSpec).
+    try t.expectEqual(@as(fig.Language.YAML.Type, .v1_1), (try resolveSpec(.yaml, "1.1")).yaml);
+    try t.expectEqual(@as(fig.Language.YAML.Type, .v1_1), (try resolveSpec(.yaml, "1.1.0")).yaml);
+    try t.expectEqual(@as(fig.Language.YAML.Type, .v1_1), (try resolveSpec(.yml, "1.1")).yaml);
+    // Unknown YAML versions still error.
+    try t.expectError(error.UnsupportedSpec, resolveSpec(.yaml, "1.3"));
+    try t.expectError(error.UnsupportedSpec, resolveSpec(.yaml, "2"));
 }
