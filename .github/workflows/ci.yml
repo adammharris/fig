@@ -77,7 +77,14 @@ jobs:
           version: 0.16.0
       - uses: dtolnay/rust-toolchain@stable
       # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits.
-      - uses: dtolnay/rust-toolchain@nightly
+      # PINNED, not @nightly: rustdoc's JSON format is unstable and nightly ships a
+      # new FORMAT_VERSION days-to-weeks before cargo-semver-checks learns to read
+      # it. `@nightly` raced ahead to v58 (rustdoc-types 0.58.0, 2026-06-24) while
+      # the released tool only reads v56/v57, breaking CI. This pin is the last
+      # nightly comfortably within v57 (rustdoc-types 0.57.x ran through 2026-06-19).
+      # When you bump cargo-semver-checks to a release that supports a newer format,
+      # advance this date to a nightly that emits it.
+      - uses: dtolnay/rust-toolchain@nightly-2026-06-15
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: bindings/rust
