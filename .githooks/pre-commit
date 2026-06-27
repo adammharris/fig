@@ -1,12 +1,13 @@
 #!/bin/sh
-# Pre-commit: keep the C ABI surface consistent. Runs `zig build abi-check` (the
-# symbol diff in tools/abi-check.zig + the C/C++ header probe wired in build.zig)
-# only when the implementation or header is part of this commit, so commits that
-# don't touch the ABI pay nothing. Bypass with `git commit --no-verify` if needed.
+# Pre-commit: keep the C ABI surface and the cross-artifact versions consistent.
+# Each check runs only when files it cares about are part of this commit, so a
+# commit that touches neither pays nothing. Bypass with `git commit --no-verify`.
 #
-# This shim is the one piece that must stay shell: a git hook is exec'd as a
-# program and a .zig file cannot carry a shebang, so the Zig logic lives behind
-# `zig build abi-check` and this just dispatches to it.
+# The policy these enforce is the *code*, not VERSIONING.md (which just describes
+# it): tools/abi-check.zig and tools/version-floor.zig are the source of truth, run
+# here and in CI. This shim is the one piece that must stay shell — a git hook is
+# exec'd as a program and a .zig file cannot carry a shebang — so the Zig logic
+# lives behind `zig build <step>` and this just dispatches to it.
 #
 # Enable once per clone:  git config core.hooksPath .githooks
 set -eu
@@ -14,11 +15,25 @@ set -eu
 root=$(git rev-parse --show-toplevel)
 staged=$(git diff --cached --name-only --diff-filter=ACM)
 
+# C ABI symbol/header consistency when the implementation or header is staged.
 case "$staged" in
     *src/c_api.zig* | *include/fig.h*)
         printf 'pre-commit: C ABI files staged — running abi-check\n'
         ( cd "$root" && zig build abi-check ) || {
             printf 'pre-commit: abi-check failed; commit aborted (use --no-verify to bypass)\n' >&2
+            exit 1
+        }
+        ;;
+esac
+
+# Cross-artifact version floor (binding >= embedded core) + the fig-macros pin,
+# when any version-bearing manifest is staged. Cheap and tag-independent, unlike
+# semver-check (a release gate that needs git tags), which stays CI-only.
+case "$staged" in
+    *build.zig.zon* | *bindings/rust/Cargo.toml* | *bindings/typescript/package.json*)
+        printf 'pre-commit: version manifest staged — running version-floor\n'
+        ( cd "$root" && zig build version-floor ) || {
+            printf 'pre-commit: version-floor failed; commit aborted (use --no-verify to bypass)\n' >&2
             exit 1
         }
         ;;

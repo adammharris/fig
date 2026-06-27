@@ -6,6 +6,15 @@ const std = @import("std");
 const version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch
     @compileError("invalid `.version` in build.zig.zon");
 
+/// The binary C ABI contract version (see `FIG_ABI_VERSION` in include/fig.h).
+/// Canonical source of truth — surfaced to the C ABI as `fig_abi_version()` and
+/// pinned to the header macro by `zig build abi-check`. A monotonic counter,
+/// bumped ONLY on a breaking ABI change (which fig's forward-compat policy makes
+/// rare); decoupled from the marketing `.version` above so a feature release does
+/// not move it. `zig build semver-check` requires it to increment whenever the C
+/// ABI diff against the last release tag is breaking.
+const abi_version: u8 = 1;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -49,6 +58,9 @@ pub fn build(b: *std.Build) void {
     options.addOption(u8, "version_major", @intCast(version.major));
     options.addOption(u8, "version_minor", @intCast(version.minor));
     options.addOption(u8, "version_patch", @intCast(version.patch));
+    // The binary C ABI contract version, surfaced through `fig_abi_version()`.
+    // `zig build abi-check` asserts include/fig.h's FIG_ABI_VERSION matches this.
+    options.addOption(u8, "abi_version", abi_version);
 
     // Build the options module once and share the single instance across every
     // target. Calling `addOptions` per-module would generate a fresh module from
@@ -272,6 +284,9 @@ pub fn build(b: *std.Build) void {
     // The canonical version (from build.zig.zon) so the tool can assert that
     // fig.h's FIG_VERSION_* macros have not drifted from it.
     abi_check_run.addArg(b.fmt("{d}.{d}.{d}", .{ version.major, version.minor, version.patch }));
+    // The canonical ABI version so the tool can assert fig.h's FIG_ABI_VERSION
+    // macro matches the value compiled into `fig_abi_version()`.
+    abi_check_run.addArg(b.fmt("{d}", .{abi_version}));
 
     const abi_probe_c = b.addExecutable(.{
         .name = "abi_probe_c",
@@ -318,6 +333,106 @@ pub fn build(b: *std.Build) void {
     const semver_check_step = b.step("semver-check", "Diff the C ABI vs the last release tag and verify the version bump");
     semver_check_step.dependOn(&semver_check_run.step);
 
+    // Cross-artifact version floor. fig versions each artifact independently —
+    // the Zig core (build.zig.zon), the Rust crate (bindings/rust/Cargo.toml),
+    // and the npm package (bindings/typescript/package.json) move on their own
+    // SemVer tracks so a binding-only change need not bump the core. The one
+    // invariant: a binding's version must be >= the core version it embeds, so a
+    // breaking core bump always pulls the bindings' major up and a binding can
+    // never silently ship a newer core behind an older-looking number. This tool
+    // enforces that floor. Run: zig build version-floor.
+    const version_floor = b.addExecutable(.{
+        .name = "version_floor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/version-floor.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const version_floor_run = b.addRunArtifact(version_floor);
+    // Cache-keyed on the three manifests it compares.
+    version_floor_run.addFileArg(b.path("build.zig.zon"));
+    version_floor_run.addFileArg(b.path("bindings/rust/Cargo.toml"));
+    version_floor_run.addFileArg(b.path("bindings/typescript/package.json"));
+    const version_floor_step = b.step("version-floor", "Check each binding's version is >= the core version it embeds");
+    version_floor_step.dependOn(&version_floor_run.step);
+
+    // One-stop release gate: every version/ABI guard behind a single command, so
+    // "did I bump correctly?" is `zig build check` instead of remembering four
+    // separate invocations across two build systems. It depends on the three Zig
+    // guards above and additionally shells out to cargo-semver-checks — the only
+    // guard that lives in cargo's world rather than zig's (it diffs the native
+    // Rust API, which never crosses the C ABI the Zig tools inspect). A
+    // TypeScript API guard can hang off this same step later the same way.
+    const check_step = b.step("check", "Pre-release gate: zig test + abi/semver/floor guards + cargo-semver-checks + rust & typescript tests (binding suites skip with a note if their toolchain is missing)");
+    check_step.dependOn(abi_check_step);
+    check_step.dependOn(semver_check_step);
+    check_step.dependOn(version_floor_step);
+
+    // cargo-semver-checks guards the native Rust public surface. Mirror CI: pick
+    // the most recent `v*` tag as the baseline and skip cleanly when there is
+    // none yet (a fresh repo has nothing to diff against). Runs in bindings/rust;
+    // requires a nightly toolchain (cargo-semver-checks reads rustdoc JSON) and
+    // the cargo-semver-checks subcommand installed. git state is not a declared
+    // input, so it must never be served from cache.
+    const cargo_semver_script =
+        \\set -eu
+        \\if ! command -v cargo-semver-checks >/dev/null 2>&1; then
+        \\  echo "cargo-semver-checks: not installed — skipping (install: cargo install cargo-semver-checks)."
+        \\  exit 0
+        \\fi
+        \\tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+        \\if [ -z "$tag" ]; then
+        \\  echo "cargo-semver-checks: no v* tag found — skipping (nothing to diff against)."
+        \\  exit 0
+        \\fi
+        \\echo "cargo-semver-checks: baseline $tag"
+        \\cargo semver-checks --package fig --baseline-rev "$tag"
+    ;
+    const cargo_semver = b.addSystemCommand(&.{ "sh", "-c", cargo_semver_script });
+    cargo_semver.setCwd(b.path("bindings/rust"));
+    cargo_semver.has_side_effects = true;
+    check_step.dependOn(&cargo_semver.step);
+
+    // Rust binding test suite, gated on a local cargo toolchain. A contributor
+    // who only touches the Zig core (and has no Rust installed) still gets a
+    // useful `check`; the step warns and skips rather than failing. CI installs
+    // cargo, so there the suite runs for real.
+    const rust_test_script =
+        \\set -eu
+        \\if ! command -v cargo >/dev/null 2>&1; then
+        \\  echo "rust tests: cargo not found — skipping (install Rust to run them)."
+        \\  exit 0
+        \\fi
+        \\cargo test --workspace
+    ;
+    const rust_test = b.addSystemCommand(&.{ "sh", "-c", rust_test_script });
+    rust_test.setCwd(b.path("bindings/rust"));
+    rust_test.has_side_effects = true;
+    check_step.dependOn(&rust_test.step);
+
+    // TypeScript binding test suite, gated on a local npm toolchain AND installed
+    // deps. The tests import the built wasm module, so build first. Skips (with a
+    // note) when npm is absent or `node_modules` hasn't been populated, so the
+    // gate degrades gracefully on a partial checkout; CI runs `npm ci` first.
+    const ts_test_script =
+        \\set -eu
+        \\if ! command -v npm >/dev/null 2>&1; then
+        \\  echo "typescript tests: npm not found — skipping (install Node.js to run them)."
+        \\  exit 0
+        \\fi
+        \\if [ ! -d node_modules ]; then
+        \\  echo "typescript tests: node_modules missing — skipping (run 'npm ci' in bindings/typescript first)."
+        \\  exit 0
+        \\fi
+        \\npm run build
+        \\npm test
+    ;
+    const ts_test = b.addSystemCommand(&.{ "sh", "-c", ts_test_script });
+    ts_test.setCwd(b.path("bindings/typescript"));
+    ts_test.has_side_effects = true;
+    check_step.dependOn(&ts_test.step);
+
     const test_filters =
         b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
         orelse &.{};
@@ -346,6 +461,10 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+
+    // The release gate runs the test suite too, so `zig build check` is the single
+    // pre-release command: tests pass AND every version/ABI guard is satisfied.
+    check_step.dependOn(test_step);
 
     const install_tests_step = b.step("install-tests", "Install test executables for debugging");
     install_tests_step.dependOn(&install_mod_tests.step);

@@ -15,6 +15,13 @@
 //! far enough. 0.x baselines follow SemVer's "anything goes in 0.x" rule (a
 //! breaking change is a minor bump, a feature is a patch bump).
 //!
+//! When the delta is breaking (MAJOR), it ALSO requires the header's
+//! `FIG_ABI_VERSION` — the binary C ABI contract counter, distinct from the
+//! marketing version — to have incremented past the baseline's, so a breaking ABI
+//! change can never ship under the same ABI-version number. (A baseline tag that
+//! predates the macro carries no number to compare against, so the requirement is
+//! waived for it.)
+//!
 //! Baseline discovery is automatic: `git describe --tags --abbrev=0 --match 'v*'`
 //! finds the most recent release reachable from HEAD, and `git show <tag>:include/
 //! fig.h` reads that release's header. With no git / no tags (e.g. a source
@@ -174,6 +181,19 @@ pub fn main(init: std.process.Init) !void {
     const agg = try diffAggregates(arena, base_aggs, cur_aggs);
     verdict = worse(verdict, agg.verdict);
 
+    // --- C ABI contract version (FIG_ABI_VERSION). A breaking delta must bump it.
+    // A baseline that predates the macro has no number to compare, so the rule is
+    // waived there (null base); a present baseline with a missing current is a
+    // failure (the macro must not be removed). ---
+    const base_abi = macroInt(baseline_header, "FIG_ABI_VERSION");
+    const cur_abi = macroInt(current_header, "FIG_ABI_VERSION");
+    const abi_ok = if (verdict != .major)
+        true // only a breaking change demands an ABI-version bump
+    else if (base_abi) |ba|
+        (if (cur_abi) |ca| ca > ba else false)
+    else
+        true; // baseline predates FIG_ABI_VERSION — nothing to compare
+
     // --- Report. ---
     std.debug.print("semver-check: C ABI diff (function surface)\n", .{});
     std.debug.print("  baseline {s} ({d} symbols)  ->  working tree ({d} symbols)\n", .{
@@ -197,6 +217,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("  (no change to struct layout or enum values)\n", .{});
     }
 
+    std.debug.print("semver-check: C ABI contract version (FIG_ABI_VERSION)\n", .{});
+    std.debug.print("  baseline {s}  ->  working tree {s}\n", .{
+        if (base_abi) |ba| std.fmt.allocPrint(arena, "v{d}", .{ba}) catch "?" else "(absent)",
+        if (cur_abi) |ca| std.fmt.allocPrint(arena, "v{d}", .{ca}) catch "?" else "(absent)",
+    });
+
     const suggested = bump(baseline_version, verdict);
     const required = switch (verdict) {
         .major, .minor => suggested, // an API delta demands at least this version
@@ -207,21 +233,35 @@ pub fn main(init: std.process.Init) !void {
         @tagName(verdict), suggested.major, suggested.minor, suggested.patch,
     });
 
+    var failed = false;
+
     if (want_version.order(required) == .lt) {
         std.debug.print(
             "build.zig.zon: {d}.{d}.{d}  ->  FAIL: bump to >= {d}.{d}.{d} before release\n",
             .{ want_version.major, want_version.minor, want_version.patch, required.major, required.minor, required.patch },
         );
+        failed = true;
+    } else {
+        std.debug.print("build.zig.zon: {d}.{d}.{d}  ->  OK (covers the ABI delta)\n", .{
+            want_version.major, want_version.minor, want_version.patch,
+        });
+    }
+
+    if (!abi_ok) {
+        std.debug.print(
+            "FIG_ABI_VERSION  ->  FAIL: a breaking (MAJOR) ABI change must increment it past the baseline ({s})\n",
+            .{if (base_abi) |ba| std.fmt.allocPrint(arena, "v{d}", .{ba}) catch "?" else "(absent)"},
+        );
+        failed = true;
+    }
+
+    if (failed) {
         std.debug.print(
             "note: typedef/macro aliases and #if-gated declarations are not expanded — review those by hand for a major bump.\n",
             .{},
         );
         std.process.exit(1);
     }
-
-    std.debug.print("build.zig.zon: {d}.{d}.{d}  ->  OK (covers the ABI delta)\n", .{
-        want_version.major, want_version.minor, want_version.patch,
-    });
 }
 
 /// Run `git -C <root> <args...>`, returning trimmed-nothing stdout on a clean

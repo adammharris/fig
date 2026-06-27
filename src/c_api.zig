@@ -111,6 +111,15 @@ pub export fn fig_version_string() [*:0]const u8 {
     return s;
 }
 
+/// Binary C ABI contract version (see `FIG_ABI_VERSION` in fig.h) — a monotonic
+/// counter that moves only on a breaking ABI change, distinct from the marketing
+/// version. Sourced from `build.zig`; `zig build abi-check` asserts the fig.h
+/// macro matches this, and `semver-check` requires it to increment on any
+/// breaking ABI diff.
+pub export fn fig_abi_version() u32 {
+    return build_options.abi_version;
+}
+
 /// Capability bits returned (OR-combined) by `fig_format_capabilities`.
 pub const FigCapability = enum(u32) {
     /// `fig_parse` accepts this format.

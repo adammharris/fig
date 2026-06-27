@@ -95,7 +95,7 @@ fn main() {
 ///      vendored copy so a working-tree build always uses live source, never a
 ///      stale vendor.
 ///   3. A `zig/` directory vendored next to this crate — the published case,
-///      where there is no repo above us. Populated by `vendor-zig.sh` before
+///      where there is no repo above us. Populated by `zig build vendor-rust` before
 ///      packaging and force-included via `Cargo.toml`'s `include`.
 fn zig_source_root(manifest_dir: &Path) -> PathBuf {
     if let Some(dir) = env::var_os("FIG_ZIG_ROOT") {
@@ -121,7 +121,7 @@ fn zig_source_root(manifest_dir: &Path) -> PathBuf {
 
     panic!(
         "could not locate fig's Zig source. In a checkout it is found by walking up \
-         from {}; in a published crate it is vendored at ./zig — run ./vendor-zig.sh \
+         from {}; in a published crate it is vendored at ./zig — run `zig build vendor-rust` \
          to populate it, or set FIG_ZIG_ROOT to a fig source tree.",
         manifest_dir.display()
     );

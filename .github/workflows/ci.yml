@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   zig:
-    name: Zig — test + abi-check
+    name: Zig — check (test + abi/semver/floor guards)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,11 +32,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
-      - run: zig build test
-      - run: zig build abi-check
-      # Turn the C ABI delta since the last release into a SemVer verdict and fail
-      # if build.zig.zon hasn't been bumped far enough to cover it.
-      - run: zig build semver-check
+      # The one pre-release gate: zig test + abi-check + semver-check +
+      # version-floor. `check` also folds in cargo-semver-checks and the Rust/TS
+      # test suites, but those degrade gracefully — with no cargo/npm toolchain in
+      # this job they skip with a note, and the dedicated jobs below run them for
+      # real (in parallel, with their pinned toolchains). See VERSIONING.md.
+      - run: zig build check
 
   rust:
     name: Rust — cargo test

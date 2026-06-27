@@ -23,11 +23,27 @@ extern "C" {
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
                          (uint32_t)FIG_VERSION_PATCH)
 
+// Binary C ABI contract version — a monotonic counter, distinct from the
+// marketing FIG_VERSION_* above. It identifies the *shape* of this header's ABI
+// (symbols, struct layouts, enum values) the way an ELF SONAME does, and is
+// bumped ONLY when that shape changes incompatibly. fig's forward-compat policy
+// (size-gated structs, decode-unknown enums, add-never-remove functions) is
+// designed so additions are non-breaking, so this stays put across feature
+// releases and moves only on a true break. A host that dynamically loads libfig
+// can compare fig_abi_version() against the FIG_ABI_VERSION it compiled with: a
+// runtime value LOWER than the compile-time one means missing ABI it may rely
+// on; a HIGHER value is an incompatible ABI it was not built for. (`zig build
+// abi-check` pins this macro to the library; `zig build semver-check` requires
+// it to increment whenever the ABI diff against the last release is breaking.)
+#define FIG_ABI_VERSION 1
+
 // Linked-library version, packed as (major << 16) | (minor << 8) | patch.
 uint32_t fig_version(void);
 // Linked-library version as a null-terminated "major.minor.patch" string. Static
 // storage owned by the library; do not free.
 const char *fig_version_string(void);
+// Binary C ABI contract version of the linked library (see FIG_ABI_VERSION).
+uint32_t fig_abi_version(void);
 
 // ============================================================================
 // Threading and memory ownership

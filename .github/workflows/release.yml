@@ -16,8 +16,8 @@ name: Release (npm + crates.io)
 #   CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights
 on:
   workflow_dispatch: {}
-  # push:
-  #   tags: ['v*.*.*']
+  push:
+    tags: ['v*.*.*']
 
 permissions:
   contents: read

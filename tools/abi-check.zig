@@ -13,9 +13,11 @@
 //!
 //! It also verifies that the header's FIG_VERSION_MAJOR/MINOR/PATCH macros match
 //! the canonical version (parsed from build.zig.zon and passed in by build.zig),
-//! so the C header cannot silently drift from the package version.
+//! so the C header cannot silently drift from the package version, and that the
+//! header's FIG_ABI_VERSION macro matches the canonical ABI version compiled into
+//! `fig_abi_version()` (likewise passed in by build.zig).
 //!
-//! Usage (driven by build.zig): abi-check <header.h> <impl.zig> <major.minor.patch>
+//! Usage (driven by build.zig): abi-check <header.h> <impl.zig> <major.minor.patch> <abi-version>
 
 const std = @import("std");
 
@@ -33,6 +35,7 @@ pub fn main(init: std.process.Init) !void {
     const header_path = args.next() orelse return error.MissingArgument;
     const impl_path = args.next() orelse return error.MissingArgument;
     const want_version = args.next() orelse return error.MissingArgument;
+    const want_abi = args.next() orelse return error.MissingArgument;
 
     const cwd = std.Io.Dir.cwd();
     const header = try cwd.readFileAlloc(io, header_path, arena, .limited(max_file));
@@ -70,8 +73,22 @@ pub fn main(init: std.process.Init) !void {
         fail = true;
     }
 
+    // ABI-version drift: fig.h's FIG_ABI_VERSION must match the value compiled
+    // into `fig_abi_version()` (build.zig's `abi_version`), so the macro a caller
+    // compiles against and the integer the library reports cannot disagree.
+    const header_abi = macroInt(header, "FIG_ABI_VERSION") orelse return error.MissingAbiMacro;
+    const want_abi_int = std.fmt.parseInt(u32, want_abi, 10) catch return error.BadAbiArg;
+    if (header_abi != want_abi_int) {
+        if (!fail) std.debug.print("abi-check: FAIL\n", .{});
+        std.debug.print(
+            "  ABI-version drift: fig.h FIG_ABI_VERSION is {d} but build.zig is {d} (update the macro or the abi_version constant)\n",
+            .{ header_abi, want_abi_int },
+        );
+        fail = true;
+    }
+
     if (fail) std.process.exit(1);
-    std.debug.print("abi-check: symbol diff OK ({d} symbols), version {s}\n", .{ exported.len, want_version });
+    std.debug.print("abi-check: symbol diff OK ({d} symbols), version {s}, ABI v{d}\n", .{ exported.len, want_version, want_abi_int });
 }
 
 /// The `major.minor.patch` spelled by the header's `#define FIG_VERSION_*` lines.
