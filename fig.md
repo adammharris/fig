@@ -5,6 +5,7 @@ created: 2026-05-08
 updated: 2026-06-23T17:03:45-06:00
 contents:
   - "[VERSIONING](/VERSIONING.md)"
+  - "[CHANGELOG](/CHANGELOG.md)"
 ---
 
 # `fig`

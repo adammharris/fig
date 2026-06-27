@@ -24,6 +24,8 @@ const CliAction = enum {
     help,
     version,
     edit,
+    insert,
+    delete,
     get,
     comment,
     check,
@@ -46,6 +48,35 @@ const CliActionOptions = union(CliAction) {
         detect: bool = false,
         /// When set, `file` is a host document (e.g. markdown) and edits apply
         /// to the embedded config of this archetype, spliced back in place.
+        embed: ?fig.Embed.Type = null,
+    },
+    insert: struct {
+        file: []const u8,
+        /// The destination *slot*, not an existing node: the last segment names
+        /// what to create. A trailing key (`a.b.newkey`) inserts that key into
+        /// the mapping at the parent path; a trailing index (`a.list[0]` /
+        /// `a.list[-]`) prepends/appends to the sequence at the parent path. An
+        /// empty parent means the root container, so the root's actual kind
+        /// (mapping vs sequence) decides which applies — not the file format.
+        path: []fig.AST.PathSegment,
+        value: []const u8,
+        requested_help: bool = false,
+        format: Format,
+        /// Set when the format could not be inferred from the extension; the
+        /// handler then sniffs the contents with `Language.detect`.
+        detect: bool = false,
+        /// As in `edit`: when set, edit the embedded config of this archetype.
+        embed: ?fig.Embed.Type = null,
+    },
+    delete: struct {
+        file: []const u8,
+        /// The node to remove. A trailing key deletes that mapping entry (with
+        /// its owned leading comments); a trailing index removes that sequence
+        /// item from the parent sequence.
+        path: []fig.AST.PathSegment,
+        requested_help: bool = false,
+        format: Format,
+        detect: bool = false,
         embed: ?fig.Embed.Type = null,
     },
     get: struct {
@@ -133,7 +164,24 @@ const EditOp = union(enum) {
     set_trailing_comment,
     delete_leading_comments,
     delete_trailing_comment,
+    /// Insert `key: text` into the mapping at `path`. The payload is the new
+    /// key's text; the value rides in `applyEdit`'s `text` argument.
+    insert_key: []const u8,
+    /// Append `text` as a new last item to the sequence at `path`.
+    append_seq,
+    /// Insert `text` as the new first item of the sequence at `path`.
+    prepend_seq,
+    /// Delete the mapping entry named by `path` (text unused).
+    delete_key,
+    /// Remove the item at this index from the sequence at `path` (text unused).
+    remove_seq_item: usize,
 };
+
+/// Sentinel sequence index meaning "the end" — produced by `parsePath` for the
+/// `[-]`/`[$]` append tokens and consumed by the `insert` handler to pick
+/// `append_seq` over `prepend_seq`. Out of range for any real index, so it never
+/// collides with an addressable item.
+const append_index = std.math.maxInt(usize);
 
 const CliConfig = struct {
     action: CliAction = .help,
@@ -151,6 +199,8 @@ const Help = struct {
             \\  help: prints this text (default action)
             \\  version: prints version number
             \\  edit: edits part of file
+            \\  insert: add a new key or list item to a file
+            \\  delete: remove a key or list item from a file
             \\  get: print a file or a specific part of a file to stdout
             \\  comment: add or edit a comment on part of a file
             \\  check: validate that one or more files parse cleanly
@@ -169,6 +219,39 @@ const Help = struct {
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: edits the YAML frontmatter in place
+            \\
+        , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn insert(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} insert <file> <path> <value>
+            \\  Adds a new entry. The last path segment names the slot to create:
+            \\    a.b.newkey   -> insert key `newkey` into the mapping at a.b
+            \\    a.list[0]    -> prepend <value> as the first item of a.list
+            \\    a.list[-]    -> append <value> as the last item ([$] also works)
+            \\  An empty parent targets the root container, so the document's own
+            \\    root (mapping vs list) decides which form applies — not the format.
+            \\  Mid-sequence insert (e.g. list[2]) is not yet supported.
+            \\  value: a literal in the file's format (YAML/TOML/ZON verbatim); for
+            \\    JSON it is quoted as a string, as with `edit`.
+            \\  path format: dot syntax for keys, bracket syntax for indices.
+            \\  .md/.markdown files: edits the YAML frontmatter in place.
+            \\
+        , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn delete(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} delete <file> <path>
+            \\  Removes the entry the path points at. The last path segment decides:
+            \\    a.b.key      -> delete that mapping entry (with its own comments)
+            \\    a.list[2]    -> remove item 2 from the sequence a.list
+            \\  path format: dot syntax for keys, bracket syntax for indices
+            \\    example: school.class[0].student[3]
+            \\  .md/.markdown files: edits the YAML frontmatter in place.
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -281,6 +364,14 @@ pub fn main(init: std.process.Init) !void {
             try Help.edit(&stderr_terminal, "fig");
             std.process.exit(2);
         },
+        ArgError.MissingInsertArgument => {
+            try Help.insert(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingDeleteArgument => {
+            try Help.delete(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
         ArgError.MissingGetArgument => {
             try Help.get(&stderr_terminal, "fig");
             std.process.exit(2);
@@ -351,6 +442,67 @@ pub fn main(init: std.process.Init) !void {
                 // The native format is a parse/print pair with no span-splicing
                 // editor; convert via `get` instead of editing in place.
                 .native => return error.UnsupportedNativeEdit,
+            }
+        },
+        .insert => {
+            const opts = config.options.insert;
+            if (opts.requested_help) {
+                try Help.insert(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const a = init.arena.allocator();
+            const input = try getInput(io, opts.file, .read_write);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            // The destination is the *parent* container plus the trailing slot.
+            // A trailing key inserts into a mapping; a trailing index pre/appends
+            // to a sequence. An empty parent is the root container.
+            if (opts.path.len == 0) {
+                try stderr_terminal.writer.print("error: insert needs a destination path (e.g. a.b.newkey or list[-]).\n", .{});
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+            const parent = opts.path[0 .. opts.path.len - 1];
+            const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+            switch (opts.path[opts.path.len - 1]) {
+                .key => |key| try applyStructuralEdit(a, io, input, resolved, opts.embed, parent, opts.value, .{ .insert_key = key }),
+                .index => |index| {
+                    // The editor only prepends or appends; an addressable middle
+                    // index has no primitive, so reject it rather than guess.
+                    const op: EditOp = if (index == 0)
+                        .prepend_seq
+                    else if (index == append_index)
+                        .append_seq
+                    else {
+                        try stderr_terminal.writer.print("error: sequence insert supports only [0] (prepend) or [-]/[$] (append); mid-sequence insert is not yet available.\n", .{});
+                        try stderr_terminal.writer.flush();
+                        std.process.exit(2);
+                    };
+                    try applyStructuralEdit(a, io, input, resolved, opts.embed, parent, opts.value, op);
+                },
+            }
+        },
+        .delete => {
+            const opts = config.options.delete;
+            if (opts.requested_help) {
+                try Help.delete(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const a = init.arena.allocator();
+            const input = try getInput(io, opts.file, .read_write);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            if (opts.path.len == 0) {
+                try stderr_terminal.writer.print("error: delete needs a path to the entry or item to remove.\n", .{});
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+            const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+            // A trailing index removes that item from the parent sequence; a
+            // trailing key deletes the mapping entry named by the full path.
+            switch (opts.path[opts.path.len - 1]) {
+                .index => |index| try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path[0 .. opts.path.len - 1], "", .{ .remove_seq_item = index }),
+                .key => try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, "", .delete_key),
             }
         },
         .get => {
@@ -804,6 +956,11 @@ fn applyEdit(
         .set_trailing_comment => try editor.setTrailingComment(path, text),
         .delete_leading_comments => try editor.deleteLeadingComments(path),
         .delete_trailing_comment => try editor.deleteTrailingComment(path),
+        .insert_key => |key| try editor.insertKey(path, key, text),
+        .append_seq => try editor.appendToSeq(path, text),
+        .prepend_seq => try editor.prependToSeq(path, text),
+        .delete_key => try editor.deleteKey(path),
+        .remove_seq_item => |index| try editor.removeSeqItem(path, index),
     }
     return allocator.dupe(u8, editor.source.items);
 }
@@ -919,16 +1076,12 @@ fn applyToEmbed(
             try applyEdit(fig.Language.YAML, allocator, inner, path, text, op, fig.Language.YAML.default_type)
         else
             return error.FormatDisabled,
-        // JSON frontmatter is plain (strict) JSON: a replacement value is quoted
-        // as a JSON string, while a comment op rides through unquoted and the
-        // editor rejects it (strict JSON has no comment syntax).
+        // JSON frontmatter is plain (strict) JSON: an inserted/replaced key or
+        // value is quoted as a JSON string, while a comment op rides through
+        // unquoted and the editor rejects it (strict JSON has no comment syntax).
         .FrontmatterJson => if (comptime build_options.lang_json) blk: {
-            const value_text = switch (op) {
-                .replace_value, .replace_key => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
-                // Comment ops pass their text (or none, for deletes) through as-is.
-                .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment => text,
-            };
-            break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, value_text, op, .JSON);
+            const j = try jsonifyEdit(allocator, op, text);
+            break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, j.text, j.op, .JSON);
         } else return error.FormatDisabled,
     };
 
@@ -940,6 +1093,63 @@ fn applyToEmbed(
 
     try file.writePositionalAll(io, out.items, 0);
     try file.setLength(io, out.items.len);
+}
+
+/// Recast an edit for a JSON-family target: strict JSON has no bare literals,
+/// so an inserted/replaced key or value must be wrapped as a JSON string (parity
+/// with `edit`'s value replacement). Comment and delete ops carry no value and
+/// pass through untouched. Returns the (possibly requoted) text and op.
+fn jsonifyEdit(allocator: std.mem.Allocator, op: EditOp, text: []const u8) !struct { text: []const u8, op: EditOp } {
+    const text_out = switch (op) {
+        .replace_value, .replace_key, .insert_key, .append_seq, .prepend_seq => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+        // Comment ops and structural deletes carry no value text.
+        .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment, .delete_key, .remove_seq_item => text,
+    };
+    const op_out: EditOp = switch (op) {
+        .insert_key => |key| .{ .insert_key = try std.fmt.allocPrint(allocator, "\"{s}\"", .{key}) },
+        else => op,
+    };
+    return .{ .text = text_out, .op = op_out };
+}
+
+/// Shared per-format routing for the structural `insert`/`delete` actions —
+/// the `edit` handler's format switch, minus the value-replacement specifics.
+/// JSON-family inputs requote the inserted key/value via `jsonifyEdit`; YAML,
+/// TOML, and ZON take the text verbatim as a literal. `embed` routes through the
+/// host-document splicer instead. `op` already encodes which editor primitive
+/// runs and `path` is the container path it operates on.
+fn applyStructuralEdit(
+    allocator: std.mem.Allocator,
+    io: Io,
+    input: Io.File,
+    resolved: Format,
+    embed: ?fig.Embed.Type,
+    path: []fig.AST.PathSegment,
+    text: []const u8,
+    op: EditOp,
+) !void {
+    if (embed) |embed_type| return applyToEmbed(allocator, io, input, embed_type, path, text, op);
+    switch (resolved) {
+        .json, .jsonc => |f| if (comptime build_options.lang_json) {
+            const j = try jsonifyEdit(allocator, op, text);
+            try applyToFile(fig.Language.JSON, allocator, io, input, path, j.text, j.op, jsonDialect(f));
+        } else return error.FormatDisabled,
+        .yaml, .yml => if (comptime build_options.lang_yaml)
+            try applyToFile(fig.Language.YAML, allocator, io, input, path, text, op, fig.Language.YAML.default_type)
+        else
+            return error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml)
+            try applyToFile(fig.Language.TOML, allocator, io, input, path, text, op, fig.Language.TOML.default_type)
+        else
+            return error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon)
+            try applyToFile(fig.Language.ZON, allocator, io, input, path, text, op, fig.Language.ZON.default_type)
+        else
+            return error.FormatDisabled,
+        .xml => return error.UnsupportedXmlEdit,
+        .json5 => return error.UnsupportedJson5Edit,
+        .native => return error.UnsupportedNativeEdit,
+    }
 }
 
 /// Map the CLI's JSON-family `Format` to the parser dialect the editor reparses
@@ -996,9 +1206,16 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
                 while (i < path.len and path[i] != ']') : (i += 1) {}
                 if (i >= path.len or i == start) return error.InvalidPath;
 
-                // Add number to path_in_progress
-                log.debug("number: {s}", .{path[start..i]});
-                try path_in_progress.append(allocator, .{ .index = try std.fmt.parseInt(usize, path[start..i], 10) });
+                // `[-]` and `[$]` are the "end" tokens used by `insert` to append;
+                // everything else is a literal index. The sentinel resolves to no
+                // real item, so non-insert callers just see a NotFound.
+                const inner = path[start..i];
+                log.debug("number: {s}", .{inner});
+                const seg: fig.AST.PathSegment = if (std.mem.eql(u8, inner, "-") or std.mem.eql(u8, inner, "$"))
+                    .{ .index = append_index }
+                else
+                    .{ .index = try std.fmt.parseInt(usize, inner, 10) };
+                try path_in_progress.append(allocator, seg);
                 // Skip close bracket
                 i += 1;
             },
@@ -1044,7 +1261,7 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     return .{ .format = format, .embed = null };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 /// Map a `--input`/`-i` format name to a `Format`. Accepts every CLI format
 /// plus the `fig` alias for the native grammar. Returns null for an unknown
@@ -1114,6 +1331,67 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .path = path,
             .replacement = replacement,
             .key = edit_key,
+            .requested_help = requested_help,
+            .format = if (ext) |d| d.format else .json,
+            .detect = !requested_help and ext == null,
+            .embed = if (ext) |d| d.embed else null,
+        } };
+    } else if (std.mem.eql(u8, action_str, "insert") or std.mem.eql(u8, action_str, "i")) {
+        config.action = .insert;
+
+        const file_path = args.next() orelse {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingInsertArgument;
+        };
+        const requested_help = std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h");
+
+        var path: []fig.AST.PathSegment = &.{};
+        var value: []const u8 = "";
+        if (!requested_help) {
+            const path_str = args.next() orelse {
+                log.err("No path provided.\n", .{});
+                return ArgError.MissingInsertArgument;
+            };
+            path = try parsePath(allocator, path_str);
+
+            value = args.next() orelse {
+                log.err("No value provided.\n", .{});
+                return ArgError.MissingInsertArgument;
+            };
+        }
+
+        const ext = if (requested_help) null else detectLanguageFromFileEnding(file_path);
+        config.options = .{ .insert = .{
+            .file = file_path,
+            .path = path,
+            .value = value,
+            .requested_help = requested_help,
+            .format = if (ext) |d| d.format else .json,
+            .detect = !requested_help and ext == null,
+            .embed = if (ext) |d| d.embed else null,
+        } };
+    } else if (std.mem.eql(u8, action_str, "delete") or std.mem.eql(u8, action_str, "d")) {
+        config.action = .delete;
+
+        const file_path = args.next() orelse {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingDeleteArgument;
+        };
+        const requested_help = std.mem.eql(u8, file_path, "--help") or std.mem.eql(u8, file_path, "-h");
+
+        var path: []fig.AST.PathSegment = &.{};
+        if (!requested_help) {
+            const path_str = args.next() orelse {
+                log.err("No path provided.\n", .{});
+                return ArgError.MissingDeleteArgument;
+            };
+            path = try parsePath(allocator, path_str);
+        }
+
+        const ext = if (requested_help) null else detectLanguageFromFileEnding(file_path);
+        config.options = .{ .delete = .{
+            .file = file_path,
+            .path = path,
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
@@ -1371,6 +1649,115 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
     }
 
     return config;
+}
+
+// A slice-backed stand-in for the process arg iterator `parseConfig` consumes.
+const TestArgs = struct {
+    items: []const []const u8,
+    i: usize = 0,
+    fn next(self: *TestArgs) ?[]const u8 {
+        if (self.i >= self.items.len) return null;
+        defer self.i += 1;
+        return self.items[self.i];
+    }
+};
+
+test "parsePath reads the [-]/[$] append sentinel and literal indices" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const dash = try parsePath(a, "list[-]");
+    try t.expectEqual(@as(usize, 2), dash.len);
+    try t.expectEqualStrings("list", dash[0].key);
+    try t.expectEqual(append_index, dash[1].index);
+
+    const dollar = try parsePath(a, "list[$]");
+    try t.expectEqual(append_index, dollar[1].index);
+
+    const literal = try parsePath(a, "a.b[2]");
+    try t.expectEqual(@as(usize, 2), literal[2].index);
+}
+
+test "parseConfig routes insert/delete to the right action and path tail" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // insert into a mapping: trailing key, value captured.
+    var ins = TestArgs{ .items = &.{ "fig", "insert", "f.yaml", "a.newkey", "42" } };
+    const ic = try parseConfig(a, &ins);
+    try t.expectEqual(CliAction.insert, ic.action);
+    try t.expectEqualStrings("newkey", ic.options.insert.path[1].key);
+    try t.expectEqualStrings("42", ic.options.insert.value);
+    try t.expectEqual(Format.yaml, ic.options.insert.format);
+
+    // insert append onto a sequence: trailing sentinel index.
+    var app = TestArgs{ .items = &.{ "fig", "insert", "f.yaml", "list[-]", "z" } };
+    const ac = try parseConfig(a, &app);
+    try t.expectEqual(append_index, ac.options.insert.path[1].index);
+
+    // delete by index: format sniffed later, path tail is an index.
+    var del = TestArgs{ .items = &.{ "fig", "delete", "f.toml", "list[1]" } };
+    const dc = try parseConfig(a, &del);
+    try t.expectEqual(CliAction.delete, dc.action);
+    try t.expectEqual(@as(usize, 1), dc.options.delete.path[1].index);
+    try t.expectEqual(Format.toml, dc.options.delete.format);
+}
+
+test "applyEdit performs the structural ops on YAML" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const t = std.testing;
+    const Y = fig.Language.YAML;
+    const dia = Y.default_type;
+
+    // insert_key appends a mapping entry.
+    {
+        const out = try applyEdit(Y, t.allocator, "a: 1\n", &.{}, "2", .{ .insert_key = "b" }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("a: 1\nb: 2\n", out);
+    }
+    // append_seq / prepend_seq on a block sequence.
+    {
+        const app = try applyEdit(Y, t.allocator, "- x\n- y\n", &.{}, "z", .append_seq, dia);
+        defer t.allocator.free(app);
+        try t.expectEqualStrings("- x\n- y\n- z\n", app);
+
+        const pre = try applyEdit(Y, t.allocator, "- x\n- y\n", &.{}, "w", .prepend_seq, dia);
+        defer t.allocator.free(pre);
+        try t.expectEqualStrings("- w\n- x\n- y\n", pre);
+    }
+    // delete_key removes a mapping entry; remove_seq_item drops an item.
+    {
+        var dk_path = [_]fig.AST.PathSegment{.{ .key = "a" }};
+        const dk = try applyEdit(Y, t.allocator, "a: 1\nb: 2\n", &dk_path, "", .delete_key, dia);
+        defer t.allocator.free(dk);
+        try t.expectEqualStrings("b: 2\n", dk);
+
+        const ri = try applyEdit(Y, t.allocator, "- x\n- y\n- z\n", &.{}, "", .{ .remove_seq_item = 1 }, dia);
+        defer t.allocator.free(ri);
+        try t.expectEqualStrings("- x\n- z\n", ri);
+    }
+}
+
+test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const ins = try jsonifyEdit(a, .{ .insert_key = "k" }, "v");
+    try t.expectEqualStrings("\"v\"", ins.text);
+    try t.expectEqualStrings("\"k\"", ins.op.insert_key);
+
+    const app = try jsonifyEdit(a, .append_seq, "v");
+    try t.expectEqualStrings("\"v\"", app.text);
+
+    const del = try jsonifyEdit(a, .delete_key, "");
+    try t.expectEqualStrings("", del.text);
+    try t.expectEqual(EditOp.delete_key, del.op);
 }
 
 test "resolveSpec maps YAML version strings" {
