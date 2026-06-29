@@ -364,6 +364,31 @@ impl Editor {
         Error::from_status(status)
     }
 
+    /// Reconcile the sequence at `path` so its items are exactly `items`, while
+    /// preserving the comments on items that survive the change. Items are
+    /// matched to the current ones by value (kind + value, honoring
+    /// multiplicity), so a kept or merely reordered item keeps its leading and
+    /// trailing comments; only genuinely new values are inserted and only
+    /// genuinely dropped values are deleted. The result order matches `items`.
+    /// This is the comment-preserving alternative to replacing the whole list.
+    ///
+    /// Declines with [`Error::InvalidArgument`] (the caller should fall back to
+    /// replacing the whole value) when the shape can't be safely diffed: an
+    /// empty `items`, an empty current list, a non-scalar item on either side, a
+    /// non-sequence target, or a format whose scalars can't stand alone (TOML).
+    pub fn set_sequence(&mut self, path: &[Segment], items: &[Value]) -> Result<(), Error> {
+        let texts: Vec<String> = items
+            .iter()
+            .map(|v| value_text(v, self.format))
+            .collect::<Result<_, _>>()?;
+        let strs = to_ffi_keys(&texts);
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_editor_set_sequence(self.ptr(), p.as_ptr(), p.len(), strs.as_ptr(), strs.len())
+        };
+        Error::from_status(status)
+    }
+
     /// The current source. Borrows editor memory; invalidated by the next edit.
     pub fn source(&self) -> Result<&str, Error> {
         let mut ptr: *const u8 = std::ptr::null();

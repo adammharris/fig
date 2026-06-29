@@ -352,6 +352,19 @@ FigStatus fig_editor_move_item(FigEditor *editor, const FigPathSegment *path, si
                                size_t from, size_t to);
 FigStatus fig_editor_reorder_items(FigEditor *editor, const FigPathSegment *path, size_t path_len,
                                    const size_t *indices, size_t indices_len);
+// Reconcile the sequence at `path` so its items are exactly `items` (each an
+// already-serialized scalar value in the document's format), preserving the
+// comments on items that survive. Items are matched to the current items by
+// value (kind + value, honoring multiplicity), so a kept or reordered item
+// keeps its comments; only genuinely new values are inserted and only dropped
+// values are deleted. The result order matches `items`. The compound edit is
+// atomic. Declines with FIG_STATUS_INVALID_ARGUMENT when it cannot safely diff
+// the shape (empty `items`, an empty current list, a non-scalar item on either
+// side, or a format whose scalars can't stand alone, e.g. TOML); the caller
+// should then replace the whole value instead. A non-sequence target is also
+// FIG_STATUS_INVALID_ARGUMENT.
+FigStatus fig_editor_set_sequence(FigEditor *editor, const FigPathSegment *path, size_t path_len,
+                                  const FigStr *items, size_t items_len);
 
 // Borrow the editor's current source bytes. Valid until the next mutation or
 // fig_editor_destroy.
@@ -433,6 +446,9 @@ FigStatus fig_embed_move_item(FigEmbed *embed, const FigPathSegment *path, size_
                               size_t from, size_t to);
 FigStatus fig_embed_reorder_items(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
                                   const size_t *indices, size_t indices_len);
+// Comment-preserving sequence reconcile (see fig_editor_set_sequence).
+FigStatus fig_embed_set_sequence(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
+                                 const FigStr *items, size_t items_len);
 
 // Render the full host file with the edited embed. Borrowed bytes, valid
 // until the next call or fig_embed_destroy.

@@ -600,3 +600,77 @@ test "yaml reorder items empty list keeps original order" {
     try ed.reorderItems(&.{}, &.{});
     try expectSource(&ed, "- a\n- b\n");
 }
+
+// --- setSequence: comment-preserving list reconcile ---
+
+test "yaml setSequence keeps surviving items' comments while reordering" {
+    var ed = try newYamlEditor("tags:\n- a # first\n- b # second\n- c # third\n");
+    defer ed.deinit();
+    // Drop b, add d, and reorder to [c, a, d]. a and c keep their comments.
+    try ed.setSequence(&.{.{ .key = "tags" }}, &.{ "c", "a", "d" });
+    try expectSource(&ed, "tags:\n- c # third\n- a # first\n- d\n");
+}
+
+test "yaml setSequence pure reorder preserves every comment" {
+    var ed = try newYamlEditor("- a # ca\n- b # cb\n- c # cc\n");
+    defer ed.deinit();
+    try ed.setSequence(&.{}, &.{ "c", "b", "a" });
+    try expectSource(&ed, "- c # cc\n- b # cb\n- a # ca\n");
+}
+
+test "yaml setSequence is a byte-identical no-op when unchanged" {
+    var ed = try newYamlEditor("- a\n# note\n- b\n");
+    defer ed.deinit();
+    try ed.setSequence(&.{}, &.{ "a", "b" });
+    try expectSource(&ed, "- a\n# note\n- b\n");
+}
+
+test "yaml setSequence appends a new item keeping existing comments" {
+    var ed = try newYamlEditor("- a # ka\n- b # kb\n");
+    defer ed.deinit();
+    try ed.setSequence(&.{}, &.{ "a", "b", "c" });
+    try expectSource(&ed, "- a # ka\n- b # kb\n- c\n");
+}
+
+test "yaml setSequence handles a full replacement (no survivors)" {
+    var ed = try newYamlEditor("- a\n- b\n");
+    defer ed.deinit();
+    try ed.setSequence(&.{}, &.{ "c", "d" });
+    try expectSource(&ed, "- c\n- d\n");
+}
+
+test "yaml setSequence dedups by occurrence (keeps the right duplicate's comment)" {
+    var ed = try newYamlEditor("- a # one\n- a # two\n- b\n");
+    defer ed.deinit();
+    // Two a's -> one a: the first occurrence survives, the second is dropped.
+    try ed.setSequence(&.{}, &.{ "a", "b" });
+    try expectSource(&ed, "- a # one\n- b\n");
+}
+
+test "yaml setSequence matches by value, not lexical form (int vs string)" {
+    var ed = try newYamlEditor("- 1 # int\n- '1' # str\n");
+    defer ed.deinit();
+    // Swap order; int 1 and string '1' are distinct identities and keep comments.
+    try ed.setSequence(&.{}, &.{ "'1'", "1" });
+    try expectSource(&ed, "- '1' # str\n- 1 # int\n");
+}
+
+test "yaml setSequence declines an empty target" {
+    var ed = try newYamlEditor("- a\n- b\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.UnsupportedShape, ed.setSequence(&.{}, &.{}));
+    try expectSource(&ed, "- a\n- b\n");
+}
+
+test "yaml setSequence declines a non-scalar current item" {
+    var ed = try newYamlEditor("- a\n- k: v\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.UnsupportedShape, ed.setSequence(&.{}, &.{ "a", "z" }));
+    try expectSource(&ed, "- a\n- k: v\n");
+}
+
+test "yaml setSequence declines a non-sequence target" {
+    var ed = try newYamlEditor("a: 1\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.NotASequence, ed.setSequence(&.{.{ .key = "a" }}, &.{"x"}));
+}

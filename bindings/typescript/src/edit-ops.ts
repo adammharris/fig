@@ -25,6 +25,7 @@ export interface EditFns {
   reorderKeys(h: number, path: number, pathLen: number, keys: number, keysLen: number): number;
   moveItem(h: number, path: number, pathLen: number, from: number, to: number): number;
   reorderItems(h: number, path: number, pathLen: number, indices: number, indicesLen: number): number;
+  setSequence(h: number, path: number, pathLen: number, items: number, itemsLen: number): number;
   addLeadingComment(h: number, path: number, pathLen: number, text: number, textLen: number): number;
   setTrailingComment(h: number, path: number, pathLen: number, text: number, textLen: number): number;
   deleteLeadingComments(h: number, path: number, pathLen: number): number;
@@ -194,6 +195,27 @@ export abstract class Editable {
       const p = encodePath(frame, path);
       const idx = encodeIndexList(frame, indices);
       check(this.fns.reorderItems(this.live(), p.ptr, p.len, idx.ptr, idx.len), "reorderItems");
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  /** Reconcile the sequence at `path` so its items are exactly `items`, while
+   *  preserving the comments on items that survive. Items are matched to the
+   *  current ones by value (kind + value, honoring multiplicity), so a kept or
+   *  merely reordered item keeps its leading and trailing comments; only
+   *  genuinely new values are inserted and only dropped values are deleted. The
+   *  result order matches `items`. Throws (invalid argument) when the shape
+   *  can't be safely diffed — an empty list, an empty current list, a non-scalar
+   *  item on either side, a non-sequence target, or a format whose scalars can't
+   *  stand alone (TOML); the caller should then replace the whole value. */
+  setSequence(path: readonly Segment[], items: readonly (Value | JsValue)[]): void {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      const texts = items.map((v) => valueText(v, this.textFormat));
+      const it = encodeKeyList(frame, texts);
+      check(this.fns.setSequence(this.live(), p.ptr, p.len, it.ptr, it.len), "setSequence");
     } finally {
       frame.dispose();
     }

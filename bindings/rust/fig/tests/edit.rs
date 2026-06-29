@@ -65,6 +65,73 @@ fn editor_sequence_ops() {
     assert_eq!(ed.source().unwrap(), "items:\n- z\n- a\n- c\n");
 }
 
+#[test]
+fn editor_set_sequence_reconciles_preserving_comments() {
+    use fig::Value;
+    let mut ed = Editor::open(
+        b"tags:\n- a # first\n- b # second\n- c # third\n",
+        Format::Yaml,
+    )
+    .unwrap();
+    // -> [c, a, d]: drop b, add d, reorder. Survivors keep their comments.
+    let target = [
+        Value::Str("c".into()),
+        Value::Str("a".into()),
+        Value::Str("d".into()),
+    ];
+    ed.set_sequence(&[Segment::Key("tags")], &target).unwrap();
+    assert_eq!(
+        ed.source().unwrap(),
+        "tags:\n- c # third\n- a # first\n- d\n",
+    );
+}
+
+#[test]
+fn editor_set_sequence_declines_empty_target() {
+    let mut ed = Editor::open(b"tags:\n- a\n- b\n", Format::Yaml).unwrap();
+    let err = ed.set_sequence(&[Segment::Key("tags")], &[]).unwrap_err();
+    assert!(matches!(err, fig::Error::InvalidArgument));
+    // Document untouched on a declined reconcile.
+    assert_eq!(ed.source().unwrap(), "tags:\n- a\n- b\n");
+}
+
+#[test]
+fn frontmatter_set_sequence_preserves_item_comments_and_body() {
+    use fig::Value;
+    const DOC: &str = "\
+---
+title: Hello
+tags:
+- a # alpha
+- b # beta
+- c # gamma
+---
+# Body
+
+prose goes here
+";
+    let mut fm = Embed::frontmatter(DOC.as_bytes()).unwrap();
+    let target = [
+        Value::Str("c".into()),
+        Value::Str("a".into()),
+        Value::Str("d".into()),
+    ];
+    fm.set_sequence(&[Segment::Key("tags")], &target).unwrap();
+    let expected = "\
+---
+title: Hello
+tags:
+- c # gamma
+- a # alpha
+- d
+---
+# Body
+
+prose goes here
+";
+    assert_eq!(fm.render().unwrap(), expected);
+}
+
 const NOTE: &str = "\
 ---
 title: Hello

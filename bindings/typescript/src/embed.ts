@@ -24,6 +24,7 @@ const EMBED_FNS: EditFns = {
   reorderKeys: fig.fig_embed_reorder_keys,
   moveItem: fig.fig_embed_move_item,
   reorderItems: fig.fig_embed_reorder_items,
+  setSequence: fig.fig_embed_set_sequence,
   addLeadingComment: fig.fig_embed_add_leading_comment,
   setTrailingComment: fig.fig_embed_set_trailing_comment,
   deleteLeadingComments: fig.fig_embed_delete_leading_comments,

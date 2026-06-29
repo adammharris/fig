@@ -441,6 +441,194 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(line_start, del_end), "");
         }
 
+        /// Reconcile the sequence at `path` so its items are exactly `items` —
+        /// each an already-serialized *scalar* value in this document's format —
+        /// while preserving the comments on items that survive the change.
+        ///
+        /// Items are matched to the current items by abstract value (kind +
+        /// value, honoring multiplicity), so an item that is kept or merely
+        /// reordered keeps its leading and trailing comments; only a genuinely
+        /// new value is inserted and only a genuinely dropped value is deleted.
+        /// The final item order matches `items`. This is the comment-preserving
+        /// alternative to replacing the whole list value (which would blow every
+        /// item's comments away).
+        ///
+        /// It is a thin orchestration over `appendToSeq` / `removeSeqItem` /
+        /// `reorderItems`: append the new values, delete the dropped ones, then
+        /// reorder to `items`. The compound edit is atomic — on any error the
+        /// document is restored byte-for-byte.
+        ///
+        /// Declines (errors) rather than guessing when the shape isn't a flat
+        /// scalar list it can safely diff:
+        ///   * a target that isn't a sequence value -> `NotASequence`;
+        ///   * empty `items`, an empty current list, or any non-scalar item on
+        ///     either side -> `UnsupportedShape` — the caller should fall back to
+        ///     replacing the whole value (e.g. with `[]` for the empty case).
+        /// A format whose scalars cannot stand alone as a document (TOML) also
+        /// surfaces as `UnsupportedShape`; reconciling a TOML inline array buys
+        /// nothing anyway, as it carries no per-element comments.
+        pub fn setSequence(self: *Self, path: []const AST.PathSegment, items: []const []const u8) !void {
+            if (items.len == 0) return error.UnsupportedShape;
+
+            // ---- plan against the current parse (no mutation yet) ----
+            // Current item kinds. These borrow `self.document`, so the plan must
+            // be reduced to plain indices before the first edit reparses.
+            var cur: std.ArrayList(AST.Node.Kind) = .empty;
+            defer cur.deinit(self.allocator);
+            {
+                const parsed = try self.getParsed();
+                const node = try parsed.ast.getValByPath(path);
+                if (node.kind != .sequence) return error.NotASequence;
+                var maybe = try parsed.ast.child(&node);
+                while (maybe) |item| {
+                    if (!isScalarKind(item.kind)) return error.UnsupportedShape;
+                    try cur.append(self.allocator, item.kind);
+                    maybe = parsed.ast.next(&item);
+                }
+            }
+            if (cur.items.len == 0) return error.UnsupportedShape;
+
+            // Target item kinds: parse each serialized value back to a scalar so
+            // matching is by abstract value, not formatting (`1` != `'1'`). A
+            // format whose scalar can't stand alone as a document (TOML) fails
+            // the parse and is declined here.
+            var tdocs: std.ArrayList(Document) = .empty;
+            defer {
+                for (tdocs.items) |d| d.deinit(self.allocator);
+                tdocs.deinit(self.allocator);
+            }
+            var tgt: std.ArrayList(AST.Node.Kind) = .empty;
+            defer tgt.deinit(self.allocator);
+            for (items) |text| {
+                var parser: Language.Parser = .{ .allocator = self.allocator };
+                const d = Language.parse(&parser, text, self.format) catch return error.UnsupportedShape;
+                const k = d.ast.nodes[d.ast.root].kind;
+                if (!isScalarKind(k)) {
+                    d.deinit(self.allocator);
+                    return error.UnsupportedShape;
+                }
+                try tdocs.append(self.allocator, d);
+                try tgt.append(self.allocator, k);
+            }
+
+            const m = cur.items.len;
+            const t = tgt.items.len;
+
+            // Occurrence index of element `i` = how many earlier elements share
+            // its value. (kind, occ) is the per-item identity used for matching,
+            // so duplicate values are paired up by their order of appearance.
+            const occ = struct {
+                fn at(kinds: []const AST.Node.Kind, i: usize) usize {
+                    var c: usize = 0;
+                    for (kinds[0..i]) |k| {
+                        if (k.eql(kinds[i])) c += 1;
+                    }
+                    return c;
+                }
+            }.at;
+
+            // A current item survives iff some target item shares its identity.
+            const removed = try self.allocator.alloc(bool, m);
+            defer self.allocator.free(removed);
+            var removed_count: usize = 0;
+            for (0..m) |i| {
+                removed[i] = true;
+                for (0..t) |j| {
+                    if (cur.items[i].eql(tgt.items[j]) and occ(cur.items, i) == occ(tgt.items, j)) {
+                        removed[i] = false;
+                        break;
+                    }
+                }
+                if (removed[i]) removed_count += 1;
+            }
+
+            // A target item is an addition iff no current item shares its identity.
+            var additions: std.ArrayList(usize) = .empty;
+            defer additions.deinit(self.allocator);
+            for (0..t) |j| {
+                var present = false;
+                for (0..m) |i| {
+                    if (cur.items[i].eql(tgt.items[j]) and occ(cur.items, i) == occ(tgt.items, j)) {
+                        present = true;
+                        break;
+                    }
+                }
+                if (!present) try additions.append(self.allocator, j);
+            }
+
+            // The physical order after append+remove is survivors (old order)
+            // then additions (target order). `slots[s]` says what sits at index
+            // `s`: a kept current item or an appended target item.
+            const Slot = union(enum) { keep: usize, add: usize };
+            var slots: std.ArrayList(Slot) = .empty;
+            defer slots.deinit(self.allocator);
+            for (0..m) |i| {
+                if (!removed[i]) try slots.append(self.allocator, .{ .keep = i });
+            }
+            for (additions.items) |j| try slots.append(self.allocator, .{ .add = j });
+
+            // `order[k]` = the slot holding target item `k`, so a reorder by
+            // `order` (a full permutation) lands the sequence in target order.
+            const order = try self.allocator.alloc(usize, t);
+            defer self.allocator.free(order);
+            const used = try self.allocator.alloc(bool, slots.items.len);
+            defer self.allocator.free(used);
+            @memset(used, false);
+            for (0..t) |k| {
+                var found: ?usize = null;
+                for (slots.items, 0..) |slot, s| {
+                    if (used[s]) continue;
+                    const hit = switch (slot) {
+                        .keep => |i| cur.items[i].eql(tgt.items[k]) and occ(cur.items, i) == occ(tgt.items, k),
+                        .add => |j| j == k,
+                    };
+                    if (hit) {
+                        found = s;
+                        break;
+                    }
+                }
+                const s = found orelse return error.UnsupportedShape; // unreachable by construction
+                order[k] = s;
+                used[s] = true;
+            }
+
+            // No-op: same items, same order — leave the bytes untouched so a
+            // redundant set never churns formatting.
+            var needs_reorder = false;
+            for (order, 0..) |o, k| {
+                if (o != k) {
+                    needs_reorder = true;
+                    break;
+                }
+            }
+            if (removed_count == 0 and additions.items.len == 0 and !needs_reorder) return;
+
+            // ---- apply: append, remove, reorder — atomic across all steps ----
+            const backup = try self.allocator.dupe(u8, self.source.items);
+            defer self.allocator.free(backup);
+            errdefer {
+                // Capacity only grew during the edits, so the refill cannot fail;
+                // `backup` parsed before, so the reparse cannot fail either.
+                self.source.clearRetainingCapacity();
+                self.source.appendSliceAssumeCapacity(backup);
+                self.reparse() catch {};
+            }
+
+            // Append first so a full replacement never empties the block mid-edit
+            // (an empty block sequence has no valid syntax). Appends land at the
+            // tail, leaving the original items' indices valid for removal.
+            for (additions.items) |j| try self.appendToSeq(path, items[j]);
+
+            // Remove dropped originals high-index-first so lower indices stay put.
+            var di: usize = m;
+            while (di > 0) {
+                di -= 1;
+                if (removed[di]) try self.removeSeqItem(path, di);
+            }
+
+            if (needs_reorder) try self.reorderItems(path, order);
+        }
+
         // ============
         // MOVE / REORDER
         // ============
@@ -1066,6 +1254,14 @@ fn fullOrder(allocator: std.mem.Allocator, order: []const usize, n: usize) ![]us
         }
     }
     return result;
+}
+
+/// Whether a node is a leaf scalar — the kinds `setSequence` can match by value.
+fn isScalarKind(kind: AST.Node.Kind) bool {
+    return switch (kind) {
+        .null_, .boolean, .string, .number, .extended => true,
+        .sequence, .mapping, .keyvalue, .alias => false,
+    };
 }
 
 /// Count the children of a container node.

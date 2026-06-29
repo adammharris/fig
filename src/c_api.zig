@@ -713,6 +713,9 @@ fn editStatus(err: anyerror) FigStatus {
         error.OutOfMemory => .out_of_memory,
         error.NotFound => .not_found,
         error.NotAMapping, error.NotASequence, error.NotAContainer, error.InvalidDocument => .invalid_argument,
+        // `setSequence` declines a shape it can't safely diff (empty target,
+        // empty/non-scalar list, a format whose scalars can't stand alone).
+        error.UnsupportedShape => .invalid_argument,
         // TOML structural edits reject a request that doesn't match the document
         // shape (e.g. appending to a non-array-of-tables, deleting a table by the
         // scalar ops, inserting a key/table that already exists). These are caller
@@ -1153,6 +1156,23 @@ pub export fn fig_editor_reorder_items(
     const indices = decodeIndices(indices_ptr, indices_len) orelse return .invalid_argument;
     return switch (handle.inner) {
         inline else => |*e| if (e.reorderItems(path, indices)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_editor_set_sequence(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    items_ptr: ?[*]const FigStr,
+    items_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var path_buf: [max_path_len]AST.PathSegment = undefined;
+    var items_buf: [max_keys_len][]const u8 = undefined;
+    const path = decodePath(path_ptr, path_len, &path_buf) orelse return .invalid_argument;
+    const items = decodeKeys(items_ptr, items_len, &items_buf) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.setSequence(path, items)) .ok else |err| editStatus(err),
     };
 }
 
@@ -1626,6 +1646,23 @@ pub export fn fig_embed_reorder_items(
     const indices = decodeIndices(indices_ptr, indices_len) orelse return .invalid_argument;
     return switch (handle.editor) {
         inline else => |*e| if (e.reorderItems(path, indices)) .ok else |err| editStatus(err),
+    };
+}
+
+pub export fn fig_embed_set_sequence(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    items_ptr: ?[*]const FigStr,
+    items_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var path_buf: [max_path_len]AST.PathSegment = undefined;
+    var items_buf: [max_keys_len][]const u8 = undefined;
+    const path = decodePath(path_ptr, path_len, &path_buf) orelse return .invalid_argument;
+    const items = decodeKeys(items_ptr, items_len, &items_buf) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.setSequence(path, items)) .ok else |err| editStatus(err),
     };
 }
 
@@ -3208,6 +3245,33 @@ test "fig_editor comment ops add, set, and delete through the C ABI" {
     try std.testing.expectEqual(FigStatus.ok, fig_editor_delete_leading_comments(ed, &path, 1));
     try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
     try std.testing.expectEqualStrings("a: 1\nb: 2\n", ptr[0..len]);
+}
+
+test "fig_editor_set_sequence reconciles a list, preserving survivors' comments" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const src = "tags:\n- a # first\n- b # second\n- c # third\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.yaml), &ed));
+    defer fig_editor_destroy(ed);
+
+    var key = [_]u8{ 't', 'a', 'g', 's' };
+    const path = [_]FigPathSegment{.{ .kind = 0, .key_ptr = &key, .key_len = key.len, .index = 0 }};
+
+    // -> [c, a, d]: drop b, add d, reorder. a and c keep their comments.
+    const items = [_]FigStr{
+        .{ .ptr = "c", .len = 1 },
+        .{ .ptr = "a", .len = 1 },
+        .{ .ptr = "d", .len = 1 },
+    };
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_set_sequence(ed, &path, path.len, &items, items.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("tags:\n- c # third\n- a # first\n- d\n", ptr[0..len]);
+
+    // An empty target is declined with invalid_argument (caller falls back).
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_editor_set_sequence(ed, &path, path.len, &items, 0));
 }
 
 test "fig_editor comment ops reject strict JSON with unsupported_format" {

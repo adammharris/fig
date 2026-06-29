@@ -513,6 +513,13 @@ unsafe extern "C" {
         indices: *const usize,
         indices_len: usize,
     ) -> FigStatus;
+    pub fn fig_editor_set_sequence(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        items: *const FigStr,
+        items_len: usize,
+    ) -> FigStatus;
     pub fn fig_editor_source(
         editor: *const FigEditor,
         out_ptr: *mut *const u8,
@@ -648,6 +655,13 @@ unsafe extern "C" {
         path_len: usize,
         indices: *const usize,
         indices_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_set_sequence(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        items: *const FigStr,
+        items_len: usize,
     ) -> FigStatus;
     pub fn fig_embed_render(
         fm: *mut FigEmbed,

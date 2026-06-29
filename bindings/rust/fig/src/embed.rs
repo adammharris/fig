@@ -329,6 +329,24 @@ impl Embed {
         Error::from_status(status)
     }
 
+    /// Reconcile the sequence at `path` so its items are exactly `items`, while
+    /// preserving the comments on items that survive the change (see
+    /// [`Editor::set_sequence`](crate::Editor::set_sequence) for the full
+    /// semantics). Declines with [`Error::InvalidArgument`] when the shape can't
+    /// be safely diffed.
+    pub fn set_sequence(&mut self, path: &[Segment], items: &[Value]) -> Result<(), Error> {
+        let texts: Vec<String> = items
+            .iter()
+            .map(|v| value_text(v, self.inner))
+            .collect::<Result<_, _>>()?;
+        let strs = to_ffi_keys(&texts);
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_embed_set_sequence(self.ptr(), p.as_ptr(), p.len(), strs.as_ptr(), strs.len())
+        };
+        Error::from_status(status)
+    }
+
     /// Render the full host file with the edited embed spliced back between the
     /// (untouched) fences. Borrows handle memory; invalidated by the next call
     /// or edit. Takes `&mut self` because the render buffer is rebuilt in place.

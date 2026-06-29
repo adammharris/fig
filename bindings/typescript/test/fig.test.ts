@@ -153,6 +153,16 @@ test("Editor preserves comments on reorder", () => {
   assert.equal(ed.source(), "author: me\ntitle: Hi\n# keep\ntags:\n- x\n");
 });
 
+test("Editor.setSequence reconciles a list, preserving survivors' comments", () => {
+  using ed = Editor.open("tags:\n- a # first\n- b # second\n- c # third\n", Format.Yaml);
+  // -> [c, a, d]: drop b, add d, reorder. a and c keep their comments.
+  ed.setSequence(["tags"], ["c", "a", "d"]);
+  assert.equal(ed.source(), "tags:\n- c # third\n- a # first\n- d\n");
+  // An empty target is declined; the document is left untouched.
+  assert.throws(() => ed.setSequence(["tags"], []));
+  assert.equal(ed.source(), "tags:\n- c # third\n- a # first\n- d\n");
+});
+
 test("Editor edits an empty document", () => {
   using ed = Editor.open("", Format.Yaml);
   ed.insertValue([], "k", "v");

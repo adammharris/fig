@@ -73,6 +73,7 @@ interface Exports {
   fig_editor_reorder_keys(ed: number, path: number, path_len: number, keys: number, keys_len: number): number;
   fig_editor_move_item(ed: number, path: number, path_len: number, from: number, to: number): number;
   fig_editor_reorder_items(ed: number, path: number, path_len: number, indices: number, indices_len: number): number;
+  fig_editor_set_sequence(ed: number, path: number, path_len: number, items: number, items_len: number): number;
   fig_editor_source(ed: number, out_ptr: number, out_len: number): number;
 
   fig_embed_extract(input: number, input_len: number, embed_type: number, out_region: number): number;
@@ -95,6 +96,7 @@ interface Exports {
   fig_embed_reorder_keys(em: number, path: number, path_len: number, keys: number, keys_len: number): number;
   fig_embed_move_item(em: number, path: number, path_len: number, from: number, to: number): number;
   fig_embed_reorder_items(em: number, path: number, path_len: number, indices: number, indices_len: number): number;
+  fig_embed_set_sequence(em: number, path: number, path_len: number, items: number, items_len: number): number;
   fig_embed_render(em: number, out_ptr: number, out_len: number): number;
 
   fig_value_create(out: number): number;

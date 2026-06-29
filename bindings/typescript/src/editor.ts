@@ -27,6 +27,7 @@ const EDITOR_FNS: EditFns = {
   reorderKeys: fig.fig_editor_reorder_keys,
   moveItem: fig.fig_editor_move_item,
   reorderItems: fig.fig_editor_reorder_items,
+  setSequence: fig.fig_editor_set_sequence,
   addLeadingComment: fig.fig_editor_add_leading_comment,
   setTrailingComment: fig.fig_editor_set_trailing_comment,
   deleteLeadingComments: fig.fig_editor_delete_leading_comments,
