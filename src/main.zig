@@ -7,6 +7,11 @@ const fig = @import("fig");
 const build_options = @import("build_options");
 const Io = std.Io;
 
+// gron is a CLI-only format: it lives here in the binary, never in the `fig`
+// library, the C ABI, or `Language.detect`. It rides the `get` pipeline by
+// deriving straight from the public AST (see `cli/gron.zig`).
+const gron = @import("cli/gron.zig");
+
 const title_string = "\n=========\n   FIG\n=========\n\n";
 // The version of the linked fig core, so the CLI never drifts from the library
 // it ships. Sourced from `build.zig` (the same numbers `fig_version` exposes).
@@ -18,7 +23,9 @@ const version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
 
 /// Currently, `fig` CLI only supports up to 10MB files.
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
-const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, native };
+// `gron` is a CLI-only output/echo format with no `AST.SerializeFormat`
+// counterpart; the `get` handler intercepts it before the serializer dispatch.
+const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, native, gron };
 
 const CliAction = enum {
     help,
@@ -115,6 +122,9 @@ const CliActionOptions = union(CliAction) {
         /// Treat any lossy conversion as an error: print the warnings, then exit
         /// non-zero without writing output.
         strict: bool = false,
+        /// Syntax knobs for `-o gron` (root name, key/value separator, terminator).
+        /// Defaults reproduce gron exactly; ignored unless the output is gron.
+        gron_projection: gron.Projection = .gron,
     },
     comment: struct {
         file: []const u8,
@@ -281,12 +291,21 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|json5|yaml|toml|zon|native] [--output json|json5|yaml|toml|zon|native] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon|native|gron] [--output json|json5|yaml|toml|zon|native|gron] <file> [path]
             \\  -i, --input: input format of file (defaults to the file extension,
             \\    then to sniffing the file's contents if the extension is unknown)
             \\  -o, --output:   output format (defaults to the input format)
             \\  native ("fig"): the AST's 1:1 canonical text encoding (.fig files);
             \\    usable as input or output, e.g. to inspect how any document parses.
+            \\  gron: a line-oriented `path = value;` projection (greppable, and
+            \\    reversible with `-i gron`); must be selected explicitly, never
+            \\    sniffed. Fidelity matches JSON (drops comments/anchors).
+            \\  --gron-root NAME: root identifier for `-o gron` (default "json").
+            \\  --gron-sep STR: key/value separator for `-o gron` (default " = ").
+            \\    Print-only: ungron always splits on " = ", so a custom separator
+            \\    is one-way unless it matches the default.
+            \\  --gron-term STR: per-line terminator for `-o gron` (default ";");
+            \\    pass "" to drop it. ungron strips an optional ";" regardless.
             \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
             \\  --pretty: multi-line, indented output (the default).
             \\  --indent N: spaces per indent level for pretty JSON, and for TOML's
@@ -442,6 +461,8 @@ pub fn main(init: std.process.Init) !void {
                 // The native format is a parse/print pair with no span-splicing
                 // editor; convert via `get` instead of editing in place.
                 .native => return error.UnsupportedNativeEdit,
+                // gron is a CLI-only get/echo format with no in-place editor.
+                .gron => return error.UnsupportedGronEdit,
             }
         },
         .insert => {
@@ -571,7 +592,10 @@ pub fn main(init: std.process.Init) !void {
                     // JSON5 reuses the JSON envelope target. It could hold
                     // Infinity/NaN natively, so this is conservative (those ride
                     // in a `$fig` envelope) but still fully lossless.
-                    .json, .jsonc, .json5 => .json,
+                    // gron's value layer is JSON, so it shares the JSON envelope
+                    // target: an unrepresentable value (a TOML datetime, etc.)
+                    // rides in a `$fig` envelope that prints as a JSON object.
+                    .json, .jsonc, .json5, .gron => .json,
                     .yaml, .yml => .yaml,
                     .toml => .toml,
                     .zon => .zon,
@@ -590,6 +614,18 @@ pub fn main(init: std.process.Init) !void {
 
             const node_id = if (opts.path) |p| (try ast.getValByPath(p)).id else ast.root;
 
+            // gron is a CLI-only projection that derives straight from the AST,
+            // so it has no `SerializeFormat`: print it here and return, bypassing
+            // the serializer dispatch, the lossy/lossless diagnostics below, and
+            // the C ABI entirely. YAML aliases are already materialized above.
+            if (to == .gron) {
+                if (comptime build_options.lang_json) {
+                    try gron.printNode(stdout_terminal.writer, ast, node_id, opts.gron_projection);
+                    try stdout_terminal.writer.flush();
+                } else return error.FormatDisabled;
+                return;
+            }
+
             const target: fig.AST.SerializeFormat = switch (to) {
                 .json => .json,
                 .jsonc => .jsonc,
@@ -599,6 +635,7 @@ pub fn main(init: std.process.Init) !void {
                 .zon => .zon,
                 .native => .native,
                 .xml => unreachable, // rejected up front (reader-only)
+                .gron => unreachable, // handled by the early return above
             };
 
             // Surface everything the conversion would silently lose (comments
@@ -692,6 +729,7 @@ pub fn main(init: std.process.Init) !void {
                         return error.FormatDisabled,
                     .xml => return error.UnsupportedXmlEdit,
                     .native => return error.UnsupportedNativeEdit,
+                    .gron => return error.UnsupportedGronEdit,
                 };
                 // Print the comment followed by a newline. An absent comment (null)
                 // and a present-but-empty one both print just the newline — the CLI
@@ -736,6 +774,7 @@ pub fn main(init: std.process.Init) !void {
                     return error.FormatDisabled,
                 .xml => return error.UnsupportedXmlEdit,
                 .native => return error.UnsupportedNativeEdit,
+                .gron => return error.UnsupportedGronEdit,
             }
         },
         .check => {
@@ -867,7 +906,7 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
             .{ .yaml = .v1_1 }
         else
             error.UnsupportedSpec,
-        .json, .jsonc, .json5, .zon, .xml, .native => error.UnsupportedSpec,
+        .json, .jsonc, .json5, .zon, .xml, .native, .gron => error.UnsupportedSpec,
     };
 }
 
@@ -887,6 +926,9 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
         .native => fig.Native.parse(allocator, content),
+        // gron ("ungron") reconstructs the AST from its `path = value` lines,
+        // reusing the JSON parser for each RHS — so it needs JSON compiled in.
+        .gron => if (comptime build_options.lang_json) gron.parseDocument(allocator, content) else error.FormatDisabled,
     };
 }
 
@@ -1149,6 +1191,7 @@ fn applyStructuralEdit(
         .xml => return error.UnsupportedXmlEdit,
         .json5 => return error.UnsupportedJson5Edit,
         .native => return error.UnsupportedNativeEdit,
+        .gron => return error.UnsupportedGronEdit,
     }
 }
 
@@ -1464,12 +1507,32 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         var quiet = false;
         var strict = false;
         var serialize: fig.AST.SerializeOptions = .{};
+        // gron projection overrides; null means "keep the gron default".
+        var gron_root: ?[]const u8 = null;
+        var gron_sep: ?[]const u8 = null;
+        var gron_term: ?[]const u8 = null;
         var positionals: std.ArrayList([]const u8) = .empty;
         defer positionals.deinit(allocator);
 
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--lax-tags")) {
                 lax_tags = true;
+            } else if (std.mem.eql(u8, arg, "--gron-root")) {
+                gron_root = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--gron-sep")) {
+                gron_sep = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--gron-term")) {
+                // Empty is allowed (drop the terminator entirely).
+                gron_term = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
             } else if (std.mem.eql(u8, arg, "--lossless")) {
                 lossless = true;
             } else if (std.mem.eql(u8, arg, "--lossy")) {
@@ -1523,6 +1586,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .xml;
                 } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
                     input_override = .native;
+                } else if (std.mem.eql(u8, fmt, "gron")) {
+                    input_override = .gron;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
@@ -1546,6 +1611,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .zon;
                 } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
                     output_override = .native;
+                } else if (std.mem.eql(u8, fmt, "gron")) {
+                    output_override = .gron;
                 } else {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
@@ -1578,6 +1645,11 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         const input_format = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
         const embed = if (detected_input) |d| d.embed else null;
 
+        var gron_projection: gron.Projection = .gron;
+        if (gron_root) |r| gron_projection.root_name = r;
+        if (gron_sep) |s| gron_projection.assign = s;
+        if (gron_term) |t| gron_projection.terminator = t;
+
         config.options = .{ .get = .{
             .file = file_path,
             .path = path,
@@ -1592,6 +1664,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .serialize = serialize,
             .quiet = quiet,
             .strict = strict,
+            .gron_projection = gron_projection,
         } };
     } else if (std.mem.eql(u8, action_str, "check") or std.mem.eql(u8, action_str, "ck")) {
         config.action = .check;
@@ -1773,4 +1846,10 @@ test "resolveSpec maps YAML version strings" {
     // Unknown YAML versions still error.
     try t.expectError(error.UnsupportedSpec, resolveSpec(.yaml, "1.3"));
     try t.expectError(error.UnsupportedSpec, resolveSpec(.yaml, "2"));
+}
+
+// Pull the CLI-only gron module's tests into the exe test binary (it is not part
+// of the `fig` library, so `root.zig`'s test graph never reaches it).
+test {
+    _ = gron;
 }
