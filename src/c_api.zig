@@ -884,6 +884,25 @@ pub export fn fig_editor_replace_key(
     };
 }
 
+/// Upsert: replace the value at `path`, or insert it when only the trailing key
+/// is absent (the `path` must end in a key). Folds replace-or-insert into one
+/// op; see `Editor.set`.
+pub export fn fig_editor_set(
+    ed: ?*FigEditor,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    val_ptr: ?[*]const u8,
+    val_len: usize,
+) FigStatus {
+    const handle = editorFrom(ed) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
+    return switch (handle.inner) {
+        inline else => |*e| if (e.set(path, val)) .ok else |err| editStatus(err),
+    };
+}
+
 // ── Comment editing ─────────────────────────────────────────────────────────
 // Splice comment trivia around the node at `path`, preserving the rest of the
 // document byte-for-byte. The marker (`#`, `//`) is added by the editor; a
@@ -1206,7 +1225,11 @@ fn sliceOf(ptr: ?[*]const u8, len: usize) ?[]const u8 {
 // ============
 
 pub const FigSpan = extern struct { start: usize, end: usize };
+/// Caller-allocated, size-versioned like `FigError`: the caller sets `size` to
+/// `@sizeOf(FigRegion)` and the library writes only the fields it covers, so
+/// trailing fields may be appended later without breaking an older layout.
 pub const FigRegion = extern struct {
+    size: u32,
     open_fence: FigSpan,
     content: FigSpan,
     close_fence: FigSpan,
@@ -1214,6 +1237,14 @@ pub const FigRegion = extern struct {
     /// endmatter) — the read-side twin of `content`.
     body: FigSpan,
 };
+
+/// Whether the caller-reported `FigRegion.size` covers `field` (same rule as
+/// `errCovers`). A field past `size` is absent in the caller's layout and must
+/// not be written.
+fn regionCovers(size: u32, comptime field: []const u8) bool {
+    const end = @offsetOf(FigRegion, field) + @sizeOf(@FieldType(FigRegion, field));
+    return size >= end;
+}
 
 /// Mirrors `Embed.Type`.
 pub const FigEmbedType = enum(c_int) {
@@ -1250,12 +1281,13 @@ pub export fn fig_embed_extract(
         error.NotFound => .not_found,
         else => .parse_error,
     };
-    out.* = .{
-        .open_fence = toFigSpan(region.open_fence),
-        .content = toFigSpan(region.content),
-        .close_fence = toFigSpan(region.close_fence),
-        .body = toFigSpan(region.body),
-    };
+    // Gate every write on the caller's declared `size`, so a smaller (older)
+    // FigRegion receives only the fields it has room for — see `regionCovers`.
+    const size = out.size;
+    if (regionCovers(size, "open_fence")) out.open_fence = toFigSpan(region.open_fence);
+    if (regionCovers(size, "content")) out.content = toFigSpan(region.content);
+    if (regionCovers(size, "close_fence")) out.close_fence = toFigSpan(region.close_fence);
+    if (regionCovers(size, "body")) out.body = toFigSpan(region.body);
     return .ok;
 }
 
@@ -1407,6 +1439,25 @@ pub export fn fig_embed_replace_key(
     const repl = sliceOf(repl_ptr, repl_len) orelse return .invalid_argument;
     return switch (handle.editor) {
         inline else => |*e| if (e.replaceKeyAtPath(path, repl)) .ok else |err| editStatus(err),
+    };
+}
+
+/// Upsert on the embedded config: replace the value at `path`, or insert it when
+/// only the trailing key is absent (the `path` must end in a key). Mirrors
+/// `fig_editor_set`.
+pub export fn fig_embed_set(
+    em: ?*FigEmbed,
+    path_ptr: ?[*]const FigPathSegment,
+    path_len: usize,
+    val_ptr: ?[*]const u8,
+    val_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    var buf: [max_path_len]AST.PathSegment = undefined;
+    const path = decodePath(path_ptr, path_len, &buf) orelse return .invalid_argument;
+    const val = sliceOf(val_ptr, val_len) orelse return .invalid_argument;
+    return switch (handle.editor) {
+        inline else => |*e| if (e.set(path, val)) .ok else |err| editStatus(err),
     };
 }
 
@@ -2891,11 +2942,29 @@ test "frontmatter c abi move item in a flow sequence value" {
 
 test "embed c abi locates region with content and body spans" {
     const md = "---\nk: v\n---\nbody\n";
-    var region: FigRegion = undefined;
+    var region: FigRegion = .{ .size = @sizeOf(FigRegion), .open_fence = undefined, .content = undefined, .close_fence = undefined, .body = undefined };
     try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &region));
     try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
     // The body is the suffix after the close fence.
     try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
+}
+
+test "embed c abi region size-gate leaves uncovered fields untouched" {
+    const md = "---\nk: v\n---\nbody\n";
+    // A caller whose `size` reaches only through `content` must not have its
+    // `close_fence`/`body` (past `size`) overwritten — they keep their sentinels.
+    const partial_size: u32 = @offsetOf(FigRegion, "content") + @sizeOf(FigSpan);
+    var region: FigRegion = .{
+        .size = partial_size,
+        .open_fence = undefined,
+        .content = undefined,
+        .close_fence = .{ .start = 111, .end = 222 },
+        .body = .{ .start = 333, .end = 444 },
+    };
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &region));
+    try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
+    try std.testing.expectEqual(@as(usize, 111), region.close_fence.start);
+    try std.testing.expectEqual(@as(usize, 333), region.body.start);
 }
 
 test "fig_embed_replace_body swaps the body, keeps fences + edited content" {

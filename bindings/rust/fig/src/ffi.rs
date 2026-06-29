@@ -376,6 +376,11 @@ pub struct FigSpan {
 #[derive(Clone, Copy, Debug, Default)]
 #[allow(dead_code)]
 pub struct FigRegion {
+    /// Size-version tag: set to `size_of::<FigRegion>()` before
+    /// `fig_embed_extract` so the library only writes the fields this layout
+    /// covers. A zero `size` (e.g. from `Default`) makes the library write
+    /// nothing — always set it explicitly.
+    pub size: u32,
     pub open_fence: FigSpan,
     pub content: FigSpan,
     pub close_fence: FigSpan,

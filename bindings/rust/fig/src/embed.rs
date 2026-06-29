@@ -138,7 +138,10 @@ impl Embed {
     /// without parsing or copying — the read-only counterpart to [`Embed::open`].
     /// [`Error::NotFound`] when no such region exists (or its fence is unterminated).
     pub fn extract(content: &str, kind: EmbedType) -> Result<Extracted<'_>, Error> {
-        let mut region = ffi::FigRegion::default();
+        let mut region = ffi::FigRegion {
+            size: core::mem::size_of::<ffi::FigRegion>() as u32,
+            ..Default::default()
+        };
         let status = unsafe {
             ffi::fig_embed_extract(content.as_ptr(), content.len(), kind.ffi() as i32, &mut region)
         };

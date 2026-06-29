@@ -16,8 +16,8 @@ extern "C" {
 // host can compare the two to detect a header/library skew. The components are
 // also exposed as a string by fig_version_string().
 // ============================================================================
-#define FIG_VERSION_MAJOR 1
-#define FIG_VERSION_MINOR 1
+#define FIG_VERSION_MAJOR 2
+#define FIG_VERSION_MINOR 0
 #define FIG_VERSION_PATCH 0
 #define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
@@ -269,7 +269,7 @@ bool fig_node_extended(const FigDocument *doc, FigNodeId node, int *out_kind,
 // ============================================================================
 
 typedef struct FigPathSegment {
-    int kind;              // 0 = mapping key, 1 = sequence index
+    int32_t kind;          // 0 = mapping key, 1 = sequence index
     const uint8_t *key_ptr; // key bytes when kind == 0
     size_t key_len;
     size_t index;          // element index when kind == 1
@@ -297,6 +297,12 @@ FigStatus fig_editor_replace_val(FigEditor *editor, const FigPathSegment *path,
                                  size_t path_len, const uint8_t *repl, size_t repl_len);
 FigStatus fig_editor_replace_key(FigEditor *editor, const FigPathSegment *path,
                                  size_t path_len, const uint8_t *repl, size_t repl_len);
+// Upsert: replace the value at `path`, or—when only the trailing key is absent—
+// insert it as a new mapping entry. `path` must end in a key (a path ending in a
+// sequence index returns FIG_STATUS_INVALID_ARGUMENT); only the final leaf is
+// created, a missing parent container returns FIG_STATUS_NOT_FOUND.
+FigStatus fig_editor_set(FigEditor *editor, const FigPathSegment *path,
+                         size_t path_len, const uint8_t *val, size_t val_len);
 // Comment editing. The marker (`#` for YAML, `//` for JSONC/JSON5) is supplied
 // by the editor; strict JSON has no comment syntax and returns
 // FIG_STATUS_UNSUPPORTED_FORMAT. `add_leading` inserts an own-line comment above
@@ -376,7 +382,13 @@ FigStatus fig_editor_source(const FigEditor *editor,
 // ============================================================================
 
 typedef struct FigSpan { size_t start; size_t end; } FigSpan;
+// `size` is the version tag, exactly like FigError/FigSerializeOptions: set it to
+// sizeof(FigRegion) before calling fig_embed_extract and the library writes only
+// the fields `size` covers, so the struct can gain trailing fields in later
+// releases without disturbing an older caller's layout. A field past `size` is
+// left untouched.
 typedef struct FigRegion {
+    uint32_t size;          // caller sets sizeof(FigRegion); see note above
     FigSpan open_fence;
     FigSpan content;
     FigSpan close_fence;
@@ -393,9 +405,10 @@ typedef enum FigEmbedType {
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in
-// host-file coordinates) without parsing the content. FIG_STATUS_NOT_FOUND when
-// no region of that type exists; a region whose open fence has no matching close
-// is FIG_STATUS_PARSE_ERROR.
+// host-file coordinates) without parsing the content. The caller must set
+// `out_region->size = sizeof(FigRegion)` first (see FigRegion). FIG_STATUS_NOT_FOUND
+// when no region of that type exists; a region whose open fence has no matching
+// close is FIG_STATUS_PARSE_ERROR.
 FigStatus fig_embed_extract(const uint8_t *input, size_t input_len,
                             int embed_type, FigRegion *out_region);
 
@@ -415,6 +428,11 @@ FigStatus fig_embed_replace_val(FigEmbed *embed, const FigPathSegment *path,
                                 size_t path_len, const uint8_t *repl, size_t repl_len);
 FigStatus fig_embed_replace_key(FigEmbed *embed, const FigPathSegment *path,
                                 size_t path_len, const uint8_t *repl, size_t repl_len);
+// Upsert on the embedded config (mirrors fig_editor_set): replace the value at
+// `path`, or insert it when only the trailing key is absent. `path` must end in
+// a key.
+FigStatus fig_embed_set(FigEmbed *embed, const FigPathSegment *path,
+                        size_t path_len, const uint8_t *val, size_t val_len);
 // Comment editing on the embedded config (mirrors fig_editor_*; YAML frontmatter
 // uses `#`, JSON frontmatter is strict JSON and rejects comments).
 FigStatus fig_embed_add_leading_comment(FigEmbed *embed, const FigPathSegment *path,

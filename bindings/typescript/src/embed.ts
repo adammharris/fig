@@ -7,7 +7,7 @@
 // methods are inherited from `Editable`. `extract` is a parse-free locator that
 // just reports the fence/content byte spans. Release with `dispose`.
 import { check, EmbedType, FigError, Format, Status } from "./types.ts";
-import { fig, Frame, readOutSlice, readU32 } from "./ffi.ts";
+import { fig, Frame, readOutSlice, readU32, writeU32 } from "./ffi.ts";
 import { Editable, type EditFns } from "./edit-ops.ts";
 
 const encoder = new TextEncoder();
@@ -88,10 +88,16 @@ export class Embed extends Editable {
     const frame = new Frame();
     try {
       const ptr = frame.bytes(bytes);
-      const region = frame.alloc(32); // FigRegion: 4 × FigSpan(start,end)
+      // FigRegion (wasm32): u32 size + 4 × FigSpan(u32 start, u32 end) = 36 bytes.
+      // The caller must set `size` before the call so the size-gated library
+      // fills the fields this layout declares.
+      const REGION_SIZE = 36;
+      const region = frame.alloc(REGION_SIZE);
+      writeU32(region, REGION_SIZE);
       check(fig.fig_embed_extract(ptr, bytes.length, kind, region), "fig_embed_extract");
+      // Spans start after the 4-byte `size` field: offsets 4, 12, 20, 28.
       const span = (off: number): Span => ({ start: readU32(region + off), end: readU32(region + off + 4) });
-      return { openFence: span(0), content: span(8), closeFence: span(16), body: span(24) };
+      return { openFence: span(4), content: span(12), closeFence: span(20), body: span(28) };
     } finally {
       frame.dispose();
     }

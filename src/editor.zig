@@ -105,6 +105,40 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(span, replacement);
         }
 
+        /// Upsert a mapping value: replace the value at `path`, or — when only
+        /// the trailing key is absent — insert it as a fresh `key: value` entry
+        /// in the parent mapping. This is the "set this key, creating it if
+        /// missing" primitive every config editor reaches for; it folds the
+        /// usual `replaceValAtPath` → (on `NotFound`) `insertKey` two-step into
+        /// one op.
+        ///
+        /// The path's last segment MUST name a key — `set` only ever *creates* a
+        /// mapping entry, never a sequence item, so a path ending in an index is
+        /// rejected with `NotAMapping`. Only the trailing leaf is conjured: a
+        /// missing *intermediate* container (the parent mapping itself doesn't
+        /// exist) is not vivified, surfacing as `NotFound` from the insert just
+        /// as a bare `insertKey` would.
+        ///
+        /// Delegates to `replaceValAtPath`, so the replace case inherits that
+        /// op's YAML value reframing (inline↔block) and merge-key COW.
+        ///
+        /// Key duality, when the insert branch fires: the replace branch matches
+        /// the trailing segment *logically* (against decoded key names), but the
+        /// insert splices it *verbatim* as the new key's bytes — exactly
+        /// `insertKey`'s literal-key contract. For YAML/TOML/ZON a simple key's
+        /// logical name and its written form coincide, so this is seamless; for
+        /// strict JSON (which quotes keys) the two differ, so creating a
+        /// not-yet-present key via `set` is not supported there. The replace case
+        /// works for every format.
+        pub fn set(self: *Self, path: []const AST.PathSegment, value_text: []const u8) !void {
+            if (path.len == 0 or std.meta.activeTag(path[path.len - 1]) != .key)
+                return error.NotAMapping;
+            self.replaceValAtPath(path, value_text) catch |err| {
+                if (err != error.NotFound) return err;
+                try self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, value_text);
+            };
+        }
+
         /// Like `replaceValAtPath`, but follow into the reference layer: when the
         /// target value is an alias, edit the *anchored node* (the shared source),
         /// so every alias to that anchor reflects the change. The `&name` (and any
@@ -1534,4 +1568,75 @@ test "get comment ops are rejected for strict JSON" {
     defer ed.deinit();
     try testing.expectError(error.CommentsUnsupported, ed.getLeadingComment(&.{.{ .key = "a" }}));
     try testing.expectError(error.CommentsUnsupported, ed.getTrailingComment(&.{.{ .key = "a" }}));
+}
+
+// ── set (upsert) tests ──────────────────────────────────────────────────────
+
+fn expectSet(
+    comptime Lang: type,
+    format: Lang.Type,
+    input: []const u8,
+    path: []const AST.PathSegment,
+    value: []const u8,
+    expected: []const u8,
+) !void {
+    var ed: Editor(Lang) = .{ .allocator = testing.allocator, .format = format };
+    try ed.init(input);
+    defer ed.deinit();
+    try ed.set(path, value);
+    try testing.expectEqualStrings(expected, ed.source.items);
+}
+
+test "set replaces an existing YAML value" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectSet(Yaml, .v1_2_2, "a: 1\nb: 2\n", &.{.{ .key = "a" }}, "9", "a: 9\nb: 2\n");
+}
+
+test "set inserts a missing top-level YAML key" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectSet(Yaml, .v1_2_2, "a: 1\n", &.{.{ .key = "b" }}, "2", "a: 1\nb: 2\n");
+}
+
+test "set inserts a missing nested key under an existing mapping" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    try expectSet(
+        Yaml,
+        .v1_2_2,
+        "outer:\n  inner: 1\n",
+        &.{ .{ .key = "outer" }, .{ .key = "added" } },
+        "2",
+        "outer:\n  inner: 1\n  added: 2\n",
+    );
+}
+
+test "set reframes a YAML value inline->block on replace" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    // Inherits replaceValAtPath's reframing: a scalar becomes a block list
+    // (fig writes indentless block sequences under a key).
+    try expectSet(Yaml, .v1_2_2, "a: 1\n", &.{.{ .key = "a" }}, "- x\n- y", "a:\n- x\n- y\n");
+}
+
+test "set replaces an existing JSON value (replace branch is format-agnostic)" {
+    // The replace branch matches keys logically, so it works for strict JSON.
+    // (Creating a *new* JSON key via set is not supported — see the doc comment.)
+    try expectSet(json.Language, .JSON, "{\"a\": 1}", &.{.{ .key = "a" }}, "\"x\"", "{\"a\": \"x\"}");
+}
+
+test "set rejects a path that does not end in a key" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    var ed: Editor(Yaml) = .{ .allocator = testing.allocator, .format = .v1_2_2 };
+    try ed.init("a:\n  - 1\n");
+    defer ed.deinit();
+    try testing.expectError(error.NotAMapping, ed.set(&.{ .{ .key = "a" }, .{ .index = 0 } }, "9"));
+    try testing.expectError(error.NotAMapping, ed.set(&.{}, "9"));
+}
+
+test "set does not vivify a missing intermediate container" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    var ed: Editor(Yaml) = .{ .allocator = testing.allocator, .format = .v1_2_2 };
+    try ed.init("a: 1\n");
+    defer ed.deinit();
+    // Parent `missing` does not exist: the insert surfaces NotFound, not a new
+    // nested table.
+    try testing.expectError(error.NotFound, ed.set(&.{ .{ .key = "missing" }, .{ .key = "leaf" } }, "2"));
 }

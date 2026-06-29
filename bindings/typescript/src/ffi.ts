@@ -261,6 +261,11 @@ export function readU32(ptr: number): number {
   return dv().getUint32(ptr, true);
 }
 
+/** Write a little-endian u32 into linear memory (e.g. a size-version tag). */
+export function writeU32(ptr: number, value: number): void {
+  dv().setUint32(ptr, value, true);
+}
+
 /** Read a NUL-terminated C string from linear memory (e.g. fig_version_string). */
 export function readCString(ptr: number): string {
   if (ptr === 0) return "";
