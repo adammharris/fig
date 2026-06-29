@@ -190,7 +190,20 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
         switch (self.peek().kind) {
             .indent => {
                 if (self.container_stack.items.len > 0 and self.currentContainer().continues_sequence_item) {
-                    self.currentContainer().continues_sequence_item = false;
+                    // A compact item container (`- key:` / `- -`) shares its
+                    // sequence's dash level and opened no indent of its own. An
+                    // indent landing AT the item's own column is its content — a
+                    // sibling key (`- a: 1\n  b: 2`): absorb it by clearing the
+                    // flag. One landing DEEPER is the pending key's block value
+                    // (`- key:\n    nested: v`): open a fresh container for it,
+                    // keeping the flag so the next sibling dash (or EOF) still
+                    // closes the item — otherwise the value's children flatten
+                    // into the item mapping (`{key: null, nested: v}`).
+                    if (self.columnOf(self.peek().span.end) > self.currentContainerIndent()) {
+                        self.force_new_container = true;
+                    } else {
+                        self.currentContainer().continues_sequence_item = false;
+                    }
                 } else {
                     self.force_new_container = true;
                 }
@@ -1510,6 +1523,14 @@ fn closePendingEmptyValue(self: *Parser) ParserError!void {
 }
 
 fn closeSequenceItemContinuation(self: *Parser) ParserError!void {
+    // While descending into a freshly-opened deeper container (an indent just set
+    // `force_new_container` for a compact item's block value, e.g. `- k:\n    a:
+    // 1`), the open item continuation is an ANCESTOR being extended, not a sibling
+    // to close. Closing it here would attach the deeper content one level too
+    // shallow (`{k: null, a: 1}` instead of `{k: {a: 1}}`). For every pre-existing
+    // case `force_new_container` is false when this runs (the old indent handler
+    // cleared the flag before any indent could coexist), so this is a no-op there.
+    if (self.force_new_container) return;
     // Close every stacked same-line continuation container, not just one:
     // compact nested sequences (`- - - x`) leave several sequences open with no
     // dedent between them, and a shallower sibling on the next line must close
@@ -3375,6 +3396,23 @@ test "yaml key after a nested block sequence is a sibling, not absorbed" {
     try expectShape("a:\n  items:\n  - 1\n  - 2\nb: 2\n", "{ S { S [ S S ] } S S }");
     // Top-level indentless sequence of mappings, then a sibling key.
     try expectShape("aud:\n- name: x\n  pub: true\nm: true\n", "{ S [ { S S S S } ] S S }");
+}
+
+test "yaml block value on a compact sequence-item key nests under that key" {
+    // `- key:\n    nested: v` — the item mapping opens compactly on the dash line
+    // (sharing the dash's tokenizer indent), so the deeper indent that follows is
+    // the KEY's block value, not a sibling key. It must open a fresh container
+    // nested under the key rather than flatten into the item (`{key: null, nested}`).
+    try expectShape("- outer:\n    inner: 1\n", "[ { S { S S } } ]");
+    // A nested block sequence value behaves the same way.
+    try expectShape("- k:\n    - x\n    - y\n", "[ { S [ S S ] } ]");
+    // A following dash at the outer column is a sibling item, and the deep value
+    // closes correctly first.
+    try expectShape("- outer:\n    inner: 1\n- second: 2\n", "[ { S { S S } } { S S } ]");
+    // A sibling key at the item's own column is still absorbed (not nested), and
+    // a later key may still deepen into its own block value.
+    try expectShape("- a: 1\n  b: 2\n", "[ { S S S S } ]");
+    try expectShape("- a: 1\n  b:\n    c: 2\n", "[ { S S S { S S } } ]");
 }
 
 test "yaml complex explicit keys take collections as the key" {
