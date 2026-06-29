@@ -89,7 +89,14 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
     // structure: the node it decorates sits on a following line, possibly at a
     // different column. Such an indent level is marked `prop_only` so a dedent
     // into it lets the node take that shallower column instead of erroring.
-    const Level = struct { indent: usize, prop_only: bool };
+    // `seq_content` is the column where a block-sequence entry's content begins
+    // on this level (the column just past the entry's `- `). A `-` establishes an
+    // indent context for its entry's mapping that it never pushes (the dash line's
+    // own indent is the dash column), so a later line returning to that column —
+    // a sibling key after the first key's block value (`- k:\n    v: 1\n  s: 2`)
+    // — would otherwise look like an unmatched dedent. Recording it lets the
+    // dedent handler admit that column.
+    const Level = struct { indent: usize, prop_only: bool, seq_content: ?usize = null };
     var current_indent: usize = 0;
     var indent_stack: std.ArrayList(Level) = .empty;
     defer indent_stack.deinit(self.allocator);
@@ -168,7 +175,32 @@ pub fn tokenize(self: *Tokenizer) ![]const Token {
                 }
                 try self.addToken(.fixed(.dedent, line.content_start));
             }
+            // The dedent may land between two levels at a block-sequence entry's
+            // content column — a sibling key returning to the item mapping's own
+            // column after the first key's deeper block value (`- k:\n    v: 1\n
+            // sib: 2`). The `-` established that column but never pushed it; admit
+            // it as a fresh level. The parser reopens the item mapping there.
+            if (indent != current_indent and indent > current_indent and
+                indent_stack.getLast().seq_content == indent)
+            {
+                try indent_stack.append(self.allocator, .{ .indent = indent, .prop_only = prop_only });
+                current_indent = indent;
+            }
             if (indent != current_indent) return TokenizeError.InvalidIndent;
+        }
+
+        // Record the content column of a block-sequence entry on its level, so a
+        // later dedent can return to a sibling key inside the entry's mapping (see
+        // the dedent handler). Only the first `- ` matters: that is the entry
+        // mapping's key column. A nested `- -` keeps the outer entry's column,
+        // which is the one a shallower sibling returns to.
+        if (self.source[line.content_start] == '-' and
+            followedByBlank(self.source, line.content_start, line.end))
+        {
+            var c = line.content_start + 1;
+            while (c < line.end and self.source[c] == ' ') c += 1;
+            if (c < line.end)
+                indent_stack.items[indent_stack.items.len - 1].seq_content = c - line.start;
         }
 
         // Document markers (`---`, `...`) are only recognized at column 0.

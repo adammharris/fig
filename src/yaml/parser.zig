@@ -258,6 +258,20 @@ pub fn parseOnce(self: *Parser, input: []const u8, format: Type) !Document {
                         if (!close_parent_too) break;
                         try self.closePendingEmptyValue();
                     }
+                    // A dedent landing exactly at an open compact item mapping's
+                    // own column returns to a SIBLING key within that item (`- k:\n
+                    // v: 1\n  sib: 2`): the first key's block value just closed, and
+                    // the next key belongs to the same item mapping. Clear the
+                    // continuation flag so it is treated as a sibling rather than
+                    // closing the item. (The tokenizer admits this column via a
+                    // sequence-entry content level; a dedent BELOW the item column
+                    // leaves the flag set, so the item still closes there.)
+                    if (self.container_stack.items.len > 0) {
+                        const c = self.currentContainer();
+                        if (c.continues_sequence_item and c.kind == .mapping and
+                            self.columnOf(self.node_spans.items[c.id].start) == dedent_col)
+                            c.continues_sequence_item = false;
+                    }
                 }
             },
             .newline => {
@@ -3413,6 +3427,20 @@ test "yaml block value on a compact sequence-item key nests under that key" {
     // a later key may still deepen into its own block value.
     try expectShape("- a: 1\n  b: 2\n", "[ { S S S S } ]");
     try expectShape("- a: 1\n  b:\n    c: 2\n", "[ { S S S { S S } } ]");
+}
+
+test "yaml sibling key after a first key's block value returns to the item column" {
+    // The first key's block value out-indents the item, and a following key at
+    // the item's own column is its sibling — not a child of the value, and not a
+    // new sequence entry. The `-` established that column without pushing it, so
+    // the tokenizer admits the return via a sequence-entry content level.
+    try expectShape("- outer:\n    inner: 1\n  sib: 2\n", "[ { S { S S } S S } ]");
+    // The item then closes for a following sequence entry.
+    try expectShape("- outer:\n    inner: 1\n  sib: 2\n- second: 3\n", "[ { S { S S } S S } { S S } ]");
+    // The returned-to sibling may itself take a block value, then another sibling.
+    try expectShape("- outer:\n    inner: 1\n  sib:\n    deep: 2\n  third: 3\n", "[ { S { S S } S { S S } S S } ]");
+    // A return to a column that is NOT the item's (mis-indented) is still rejected.
+    try testParserError("- outer:\n    inner: 1\n   sib: 2\n", error.InvalidIndent);
 }
 
 test "yaml complex explicit keys take collections as the key" {
