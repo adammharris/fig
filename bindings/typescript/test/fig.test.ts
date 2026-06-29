@@ -21,7 +21,7 @@ import {
   fromJS,
   parse,
   serialize,
-  splitFrontmatter,
+  split,
   toJS,
 } from "../src/index.ts";
 
@@ -218,7 +218,7 @@ test("Editor rejects JSON5-only syntax under strict Json", () => {
 });
 
 test("Embed edits YAML frontmatter, fences and body intact", () => {
-  using fm = Embed.frontmatter("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n");
+  using fm = Embed.open("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n", EmbedType.FrontmatterYaml);
   fm.insertValue([], "author", "me");
   fm.appendValue(["tags"], "y");
   assert.equal(
@@ -241,16 +241,16 @@ test("Embed.extract locates the region, with a body span", () => {
   assert.equal(region.body.start, region.closeFence.end);
 });
 
-test("splitFrontmatter returns [frontmatter, body], or null when absent", () => {
-  assert.deepEqual(splitFrontmatter("---\nk: v\n---\nbody\n"), ["k: v\n", "body\n"]);
+test("split returns [content, body], or null when absent", () => {
+  assert.deepEqual(split("---\nk: v\n---\nbody\n", EmbedType.FrontmatterYaml), ["k: v\n", "body\n"]);
   // CRLF fences handled.
-  assert.deepEqual(splitFrontmatter("---\r\nk: v\r\n---\r\nx\r\n"), ["k: v\r\n", "x\r\n"]);
-  assert.equal(splitFrontmatter("# just markdown\n"), null);
-  assert.equal(splitFrontmatter("---\nk: v\nno close\n"), null);
+  assert.deepEqual(split("---\r\nk: v\r\n---\r\nx\r\n", EmbedType.FrontmatterYaml), ["k: v\r\n", "x\r\n"]);
+  assert.equal(split("# just markdown\n", EmbedType.FrontmatterYaml), null);
+  assert.equal(split("---\nk: v\nno close\n", EmbedType.FrontmatterYaml), null);
 });
 
 test("Embed.replaceBody swaps the body, composing with edits", () => {
-  using fm = Embed.frontmatter("---\ntitle: Hi\n---\nold body\n");
+  using fm = Embed.open("---\ntitle: Hi\n---\nold body\n", EmbedType.FrontmatterYaml);
   fm.replaceValue(["title"], "Hello");
   fm.replaceBody("new body\n");
   assert.equal(fm.render(), "---\ntitle: Hello\n---\nnew body\n");
@@ -293,7 +293,7 @@ test("editor reads a trailing comment riding a block-collection key", () => {
 });
 
 test("embed reads a frontmatter comment", () => {
-  using fm = Embed.frontmatter("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n");
+  using fm = Embed.open("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n", EmbedType.FrontmatterYaml);
   assert.equal(fm.getLeadingComment(["tags"]), "keep");
   assert.equal(fm.getLeadingComment(["title"]), null);
 });

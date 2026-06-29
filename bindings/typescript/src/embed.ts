@@ -77,11 +77,6 @@ export class Embed extends Editable {
     }
   }
 
-  /** Open the markdown YAML frontmatter of `markdown` — the common case. */
-  static frontmatter(markdown: string | Uint8Array): Embed {
-    return Embed.open(markdown, EmbedType.FrontmatterYaml);
-  }
-
   /** Locate an embedded region and report its fence/content spans without
    *  parsing the content. Throws {@link FigError} `NotFound` if absent. */
   static extract(input: string | Uint8Array, kind: EmbedType): Region {
@@ -142,21 +137,21 @@ export class Embed extends Editable {
 
 const decoder = new TextDecoder();
 
-/** Split markdown YAML frontmatter from its body without parsing — the read-only
- *  `[frontmatter, body]` twin of opening an {@link Embed}. Returns `null` when
- *  `content` has no `---` frontmatter (or its opening fence has no close). The
- *  frontmatter is the text between the fences (no fences); the body is everything
- *  after the close fence. Slicing is done on UTF-8 bytes, so multi-byte content
- *  is handled correctly. */
-export function splitFrontmatter(content: string): [string, string] | null {
+/** Split an embedded region of `kind` from its host body without parsing — the
+ *  read-only `[content, body]` twin of opening an {@link Embed}. Returns `null`
+ *  when `content` has no such region (or its opening fence has no close). The
+ *  first item is the text between the fences (no fences); the second is the host
+ *  prose outside them. Slicing is done on UTF-8 bytes, so multi-byte content is
+ *  handled correctly. */
+export function split(content: string, kind: EmbedType): [string, string] | null {
   const bytes = encoder.encode(content);
   let region: Region;
   try {
-    region = Embed.extract(bytes, EmbedType.FrontmatterYaml);
+    region = Embed.extract(bytes, kind);
   } catch {
     return null; // NotFound / unterminated fence
   }
-  const fm = decoder.decode(bytes.subarray(region.content.start, region.content.end));
+  const inner = decoder.decode(bytes.subarray(region.content.start, region.content.end));
   const body = decoder.decode(bytes.subarray(region.body.start, region.body.end));
-  return [fm, body];
+  return [inner, body];
 }

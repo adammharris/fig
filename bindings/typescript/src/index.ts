@@ -18,7 +18,7 @@ export {
 } from "./types.ts";
 export { Document } from "./document.ts";
 export { Editor } from "./editor.ts";
-export { Embed, splitFrontmatter, type Region, type Span } from "./embed.ts";
+export { Embed, split, type Region, type Span } from "./embed.ts";
 export { type Segment } from "./edit-ops.ts";
 export { V, fromJS, toJS, serialize, valueText, diagnose, type Value, type JsValue } from "./value.ts";
 export { version, versionString, capabilities, type Version, type Capabilities } from "./meta.ts";

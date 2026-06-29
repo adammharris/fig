@@ -2,7 +2,7 @@
 //! node's bytes and leave comments, key order, fences, and the markdown body
 //! intact.
 
-use fig::{Editor, Embed, Format, Segment};
+use fig::{Editor, Embed, EmbedType, Format, Segment};
 
 #[test]
 fn editor_insert_appends_after_last_entry() {
@@ -24,7 +24,7 @@ fn editor_set_replaces_or_inserts() {
 #[test]
 fn frontmatter_set_upserts_preserving_comments_and_body() {
     const NOTE: &str = "---\ntitle: Hi # greeting\ntags:\n- x\n---\nbody\n";
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     // Replace an existing scalar (comment on the line survives) and insert a new key.
     fm.set(&[Segment::Key("title")], "Yo").unwrap();
     fm.set(&[Segment::Key("author")], "me").unwrap();
@@ -133,7 +133,7 @@ tags:
 
 prose goes here
 ";
-    let mut fm = Embed::frontmatter(DOC.as_bytes()).unwrap();
+    let mut fm = Embed::open(DOC.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     let target = [
         Value::Str("c".into()),
         Value::Str("a".into()),
@@ -170,7 +170,7 @@ prose goes here
 
 #[test]
 fn frontmatter_preserves_comments_fences_and_body() {
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     fm.replace(&[Segment::Key("title")], &"Hi there").unwrap();
     fm.append(&[Segment::Key("tags")], &"c").unwrap();
     fm.insert(&[], "author", &"me").unwrap();
@@ -194,7 +194,7 @@ prose goes here
 
 #[test]
 fn frontmatter_edit_touches_only_target_bytes() {
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     fm.replace(&[Segment::Key("title")], &"Hello world")
         .unwrap();
     let rendered = fm.render().unwrap();
@@ -204,26 +204,25 @@ fn frontmatter_edit_touches_only_target_bytes() {
 }
 
 #[test]
-fn split_frontmatter_borrows_frontmatter_and_body() {
-    let (fm, body) = fig::split_frontmatter(NOTE).unwrap();
+fn split_borrows_content_and_body() {
+    let (fm, body) = fig::split(NOTE, EmbedType::FrontmatterYaml).unwrap();
     assert_eq!(fm, "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");
     assert_eq!(body, "# Body\n\nprose goes here\n");
     // CRLF fences are handled (Diaryx's hand-rolled split special-cased these).
     let crlf = "---\r\nk: v\r\n---\r\nbody\r\n";
-    let (fm, body) = fig::split_frontmatter(crlf).unwrap();
+    let (fm, body) = fig::split(crlf, EmbedType::FrontmatterYaml).unwrap();
     assert_eq!(fm, "k: v\r\n");
     assert_eq!(body, "body\r\n");
     // No frontmatter -> None.
-    assert_eq!(fig::split_frontmatter("# just markdown\n"), None);
+    assert_eq!(fig::split("# just markdown\n", EmbedType::FrontmatterYaml), None);
     // Unterminated fence -> None (not a panic / partial split).
-    assert_eq!(fig::split_frontmatter("---\nk: v\nno close\n"), None);
+    assert_eq!(fig::split("---\nk: v\nno close\n", EmbedType::FrontmatterYaml), None);
 }
 
 #[test]
 fn extract_exposes_region_spans_and_slices() {
-    use fig::EmbedType;
     let e = fig::Embed::extract(NOTE, EmbedType::FrontmatterYaml).unwrap();
-    assert_eq!(e.frontmatter(), "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");
+    assert_eq!(e.content(), "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");
     assert_eq!(e.body(), "# Body\n\nprose goes here\n");
     let r = e.region();
     // The body span starts at the close fence's end.
@@ -232,23 +231,23 @@ fn extract_exposes_region_spans_and_slices() {
 
 #[test]
 fn frontmatter_replace_body_keeps_frontmatter_byte_identical() {
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     fm.replace_body("# New Body\n").unwrap();
     let rendered = fm.render().unwrap();
     // Frontmatter block (fences + content + comments) is verbatim; only body swapped.
-    let (orig_fm, _) = fig::split_frontmatter(NOTE).unwrap();
-    let (new_fm, new_body) = fig::split_frontmatter(rendered).unwrap();
+    let (orig_fm, _) = fig::split(NOTE, EmbedType::FrontmatterYaml).unwrap();
+    let (new_fm, new_body) = fig::split(rendered, EmbedType::FrontmatterYaml).unwrap();
     assert_eq!(new_fm, orig_fm);
     assert_eq!(new_body, "# New Body\n");
 }
 
 #[test]
 fn frontmatter_replace_body_composes_with_edits() {
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     fm.replace(&[Segment::Key("title")], &"Hi there").unwrap();
     fm.replace_body("# New Body\n").unwrap();
     let rendered = fm.render().unwrap();
-    let (new_fm, new_body) = fig::split_frontmatter(rendered).unwrap();
+    let (new_fm, new_body) = fig::split(rendered, EmbedType::FrontmatterYaml).unwrap();
     assert!(new_fm.starts_with("title: Hi there\n"));
     assert!(new_fm.contains("# keep this comment")); // comment preserved
     assert_eq!(new_body, "# New Body\n");
@@ -256,13 +255,13 @@ fn frontmatter_replace_body_composes_with_edits() {
 
 #[test]
 fn frontmatter_open_without_frontmatter_is_not_found() {
-    let err = Embed::frontmatter(b"# just markdown\n").unwrap_err();
+    let err = Embed::open(b"# just markdown\n", EmbedType::FrontmatterYaml).unwrap_err();
     assert!(matches!(err, fig::Error::NotFound));
 }
 
 #[test]
 fn frontmatter_delete_then_read_back() {
-    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     fm.delete(&[Segment::Key("title")]).unwrap();
     let rendered = fm.render().unwrap().to_string();
     assert!(!rendered.contains("title:"));
@@ -272,7 +271,7 @@ fn frontmatter_delete_then_read_back() {
 
 #[test]
 fn frontmatter_reads_a_leading_comment() {
-    let fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    let fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
     // `# keep this comment` sits above `tags` in the frontmatter.
     assert_eq!(
         fm.leading_comment(&[Segment::Key("tags")]).unwrap().as_deref(),

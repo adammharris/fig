@@ -21,7 +21,7 @@ use std::ptr::NonNull;
 
 pub use diagnostics::{Warning, WarningCause, WarningCode};
 pub use editor::{Editor, Segment};
-pub use embed::{Embed, EmbedType, Extracted, Region, Span, split_frontmatter};
+pub use embed::{Embed, EmbedType, Extracted, Region, Span, split};
 pub use error::{Error, ParseError};
 pub use value::{ExtKind, Value};
 
@@ -481,7 +481,7 @@ fn normalize(id: FigNodeId) -> Option<FigNodeId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, Embed, Error, Format, Segment};
+    use super::{Document, Embed, EmbedType, Error, Format, Segment};
 
     #[test]
     fn parses_json_document() {
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn frontmatter_reorder_keys_preserves_comments_and_body() {
         let md = "---\ntitle: Hi\n# a comment\ntags:\n- x\nauthor: me\n---\n# Body\n";
-        let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();
+        let mut fm = Embed::open(md.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
         // String keys (the diaryx call site passes `Vec<String>`).
         let order = vec![String::from("author"), String::from("title")];
         fm.reorder_keys(&[], &order).unwrap();
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn frontmatter_move_key_preserves_comments_and_body() {
         let md = "---\na: 1\n# note for c\nc: 3\nb: 2\n---\nbody\n";
-        let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();
+        let mut fm = Embed::open(md.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
         fm.move_key(&[Segment::Key("c")], &[Segment::Key("a")])
             .unwrap();
         assert_eq!(
@@ -597,7 +597,7 @@ mod tests {
     #[test]
     fn frontmatter_reorder_items_in_block_sequence() {
         let md = "---\ntags:\n- x\n- y\n- z\n---\nbody\n";
-        let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();
+        let mut fm = Embed::open(md.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
         fm.reorder_items(&[Segment::Key("tags")], &[2, 0]).unwrap();
         assert_eq!(
             fm.render().unwrap(),
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn frontmatter_move_item_in_flow_sequence_keeps_separators() {
         let md = "---\ntags: [x, y, z]\n---\nbody\n";
-        let mut fm = Embed::frontmatter(md.as_bytes()).unwrap();
+        let mut fm = Embed::open(md.as_bytes(), EmbedType::FrontmatterYaml).unwrap();
         fm.move_item(&[Segment::Key("tags")], 2, 0).unwrap();
         assert_eq!(fm.render().unwrap(), "---\ntags: [z, x, y]\n---\nbody\n");
     }

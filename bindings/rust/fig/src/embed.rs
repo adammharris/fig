@@ -72,8 +72,8 @@ pub struct Region {
 }
 
 /// The result of [`Embed::extract`]: a located [`Region`] plus the borrowed host
-/// text, with helpers to slice out the frontmatter and body without parsing or
-/// copying.
+/// text, with helpers to slice out the embedded content and body without parsing
+/// or copying.
 #[derive(Clone, Copy, Debug)]
 pub struct Extracted<'a> {
     source: &'a str,
@@ -86,8 +86,8 @@ impl<'a> Extracted<'a> {
         self.region
     }
 
-    /// The raw config text between the fences (e.g. the YAML frontmatter); not parsed.
-    pub fn frontmatter(&self) -> &'a str {
+    /// The raw config text between the fences (the embedded YAML/JSON); not parsed.
+    pub fn content(&self) -> &'a str {
         &self.source[self.region.content.start..self.region.content.end]
     }
 
@@ -97,14 +97,14 @@ impl<'a> Extracted<'a> {
     }
 }
 
-/// Split markdown YAML frontmatter from its body without parsing or copying — the
-/// read-only `(frontmatter, body)` twin of opening an [`Embed`]. `None` when
-/// `content` has no `---` frontmatter (or its opening fence has no close). Both
-/// slices borrow `content`: the frontmatter is the text between the fences (no
-/// fences), the body is everything after the close fence.
-pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
-    let e = Embed::extract(content, EmbedType::FrontmatterYaml).ok()?;
-    Some((e.frontmatter(), e.body()))
+/// Split an embedded region of `kind` from its host body without parsing or
+/// copying — the read-only `(content, body)` twin of opening an [`Embed`].
+/// `None` when `content` has no such region (or its opening fence has no close).
+/// Both slices borrow `content`: the first is the text between the fences (no
+/// fences), the second is the host prose outside them.
+pub fn split(content: &str, kind: EmbedType) -> Option<(&str, &str)> {
+    let e = Embed::extract(content, kind).ok()?;
+    Some((e.content(), e.body()))
 }
 
 /// An editor over an embedded config region of a host file.
@@ -129,12 +129,7 @@ impl Embed {
         })
     }
 
-    /// Open the markdown YAML frontmatter of `markdown` — the common case.
-    pub fn frontmatter(markdown: &[u8]) -> Result<Self, Error> {
-        Self::open(markdown, EmbedType::FrontmatterYaml)
-    }
-
-    /// Locate `kind`'s region in `content` and borrow its frontmatter/body slices
+    /// Locate `kind`'s region in `content` and borrow its content/body slices
     /// without parsing or copying — the read-only counterpart to [`Embed::open`].
     /// [`Error::NotFound`] when no such region exists (or its fence is unterminated).
     pub fn extract(content: &str, kind: EmbedType) -> Result<Extracted<'_>, Error> {
