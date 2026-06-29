@@ -148,6 +148,13 @@ test("Editor inserts while preserving the rest", () => {
   assert.equal(ed.source(), "a: 1\nb: 2\nc: 3\n");
 });
 
+test("Editor.set replaces an existing key or inserts a missing one", () => {
+  using ed = Editor.open("a: 1\nb: 2\n", Format.Yaml);
+  ed.set(["a"], 9); // existing → replace
+  ed.set(["c"], 3); // absent → insert
+  assert.equal(ed.source(), "a: 9\nb: 2\nc: 3\n");
+});
+
 test("Editor preserves comments on reorder", () => {
   using ed = Editor.open("title: Hi\n# keep\ntags:\n- x\nauthor: me\n", Format.Yaml);
   ed.reorderKeys([], ["author", "title"]);

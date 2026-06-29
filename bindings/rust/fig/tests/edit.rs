@@ -12,6 +12,29 @@ fn editor_insert_appends_after_last_entry() {
 }
 
 #[test]
+fn editor_set_replaces_or_inserts() {
+    let mut ed = Editor::open(b"a: 1\nb: 2\n", Format::Yaml).unwrap();
+    // Existing key → replace in place.
+    ed.set(&[Segment::Key("a")], &9).unwrap();
+    // Absent key → insert at the end.
+    ed.set(&[Segment::Key("c")], &3).unwrap();
+    assert_eq!(ed.source().unwrap(), "a: 9\nb: 2\nc: 3\n");
+}
+
+#[test]
+fn frontmatter_set_upserts_preserving_comments_and_body() {
+    const NOTE: &str = "---\ntitle: Hi # greeting\ntags:\n- x\n---\nbody\n";
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    // Replace an existing scalar (comment on the line survives) and insert a new key.
+    fm.set(&[Segment::Key("title")], "Yo").unwrap();
+    fm.set(&[Segment::Key("author")], "me").unwrap();
+    assert_eq!(
+        fm.render().unwrap(),
+        "---\ntitle: Yo # greeting\ntags:\n- x\nauthor: me\n---\nbody\n",
+    );
+}
+
+#[test]
 fn editor_replace_quotes_when_needed() {
     let mut ed = Editor::open(b"title: Hello\n", Format::Yaml).unwrap();
     ed.replace(&[Segment::Key("title")], &"has: colon").unwrap();

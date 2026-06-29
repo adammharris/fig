@@ -16,6 +16,7 @@ import { V, valueText, type JsValue, type Value } from "./value.ts";
 export interface EditFns {
   replaceVal(h: number, path: number, pathLen: number, repl: number, replLen: number): number;
   replaceKey(h: number, path: number, pathLen: number, repl: number, replLen: number): number;
+  set(h: number, path: number, pathLen: number, val: number, valLen: number): number;
   insertKey(h: number, path: number, pathLen: number, key: number, keyLen: number, val: number, valLen: number): number;
   deleteKey(h: number, path: number, pathLen: number): number;
   appendSeq(h: number, path: number, pathLen: number, val: number, valLen: number): number;
@@ -69,6 +70,14 @@ export abstract class Editable {
     this.insertValueRaw(path, key, valueText(value, this.textFormat));
   }
 
+  /** Upsert a mapping value: replace the value at `path`, or insert it when only
+   *  the trailing key is absent. Folds the `replaceValue` → (on `NotFound`)
+   *  `insertValue` two-step into one call. `path` must end in a key; a missing
+   *  intermediate container throws `NotFound`. */
+  set(path: readonly Segment[], value: Value | JsValue): void {
+    this.setRaw(path, valueText(value, this.textFormat));
+  }
+
   /** Append `value` to the sequence at `path`. */
   appendValue(path: readonly Segment[], value: Value | JsValue): void {
     this.appendValueRaw(path, valueText(value, this.textFormat));
@@ -88,6 +97,19 @@ export abstract class Editable {
       const p = encodePath(frame, path);
       const t = frame.str(text);
       check(this.fns.replaceVal(this.live(), p.ptr, p.len, t.ptr, t.len), "replaceValue");
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  /** Upsert `path` to already-serialized `text` (replace, else insert the
+   *  trailing key). See `set`. */
+  setRaw(path: readonly Segment[], text: string): void {
+    const frame = new Frame();
+    try {
+      const p = encodePath(frame, path);
+      const t = frame.str(text);
+      check(this.fns.set(this.live(), p.ptr, p.len, t.ptr, t.len), "set");
     } finally {
       frame.dispose();
     }

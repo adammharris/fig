@@ -15,6 +15,7 @@ const encoder = new TextEncoder();
 const EMBED_FNS: EditFns = {
   replaceVal: fig.fig_embed_replace_val,
   replaceKey: fig.fig_embed_replace_key,
+  set: fig.fig_embed_set,
   insertKey: fig.fig_embed_insert_key,
   deleteKey: fig.fig_embed_delete_key,
   appendSeq: fig.fig_embed_append_seq,

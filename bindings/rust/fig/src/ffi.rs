@@ -419,6 +419,13 @@ unsafe extern "C" {
         repl: *const u8,
         repl_len: usize,
     ) -> FigStatus;
+    pub fn fig_editor_set(
+        editor: *mut FigEditor,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
+    ) -> FigStatus;
     pub fn fig_editor_add_leading_comment(
         editor: *mut FigEditor,
         path: *const FigPathSegment,
@@ -560,6 +567,13 @@ unsafe extern "C" {
         path_len: usize,
         repl: *const u8,
         repl_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_set(
+        fm: *mut FigEmbed,
+        path: *const FigPathSegment,
+        path_len: usize,
+        val: *const u8,
+        val_len: usize,
     ) -> FigStatus;
     pub fn fig_embed_add_leading_comment(
         fm: *mut FigEmbed,

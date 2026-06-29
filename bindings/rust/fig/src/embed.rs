@@ -207,6 +207,19 @@ impl Embed {
         Error::from_status(status)
     }
 
+    /// Upsert a mapping value: replace the value at `path`, or insert it when
+    /// only the trailing key is absent. Folds the common
+    /// `replace_value` → (on [`Error::NotFound`]) `insert_value` two-step into a
+    /// single call. `path` must end in a key (it only ever creates a mapping
+    /// entry); a missing intermediate container surfaces as [`Error::NotFound`].
+    pub fn set_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
+        let val = value_text(value, self.inner)?;
+        let p = to_ffi_path(path);
+        let status =
+            unsafe { ffi::fig_embed_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        Error::from_status(status)
+    }
+
     /// Append `value` to the sequence at `path`.
     pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
         let val = value_text(value, self.inner)?;
@@ -248,6 +261,17 @@ impl Embed {
         value: &T,
     ) -> Result<(), Error> {
         self.insert_value(path, key, &crate::ser::to_value(value)?)
+    }
+
+    /// Upsert: replace the value at `path`, or insert it when only the trailing
+    /// key is absent (see [`set_value`](Self::set_value)).
+    #[cfg(feature = "serde")]
+    pub fn set<T: serde::Serialize + ?Sized>(
+        &mut self,
+        path: &[Segment],
+        value: &T,
+    ) -> Result<(), Error> {
+        self.set_value(path, &crate::ser::to_value(value)?)
     }
 
     /// Append the serialized form of `value` to the sequence at `path`.

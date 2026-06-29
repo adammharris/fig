@@ -18,6 +18,7 @@ const encoder = new TextEncoder();
 const EDITOR_FNS: EditFns = {
   replaceVal: fig.fig_editor_replace_val,
   replaceKey: fig.fig_editor_replace_key,
+  set: fig.fig_editor_set,
   insertKey: fig.fig_editor_insert_key,
   deleteKey: fig.fig_editor_delete_key,
   appendSeq: fig.fig_editor_append_seq,
