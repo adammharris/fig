@@ -379,6 +379,7 @@ pub struct FigRegion {
     pub open_fence: FigSpan,
     pub content: FigSpan,
     pub close_fence: FigSpan,
+    pub body: FigSpan,
 }
 
 #[repr(C)]
@@ -526,7 +527,6 @@ unsafe extern "C" {
         out_len: *mut usize,
     ) -> FigStatus;
 
-    #[allow(dead_code)]
     pub fn fig_embed_extract(
         input: *const u8,
         input_len: usize,
@@ -662,6 +662,11 @@ unsafe extern "C" {
         path_len: usize,
         items: *const FigStr,
         items_len: usize,
+    ) -> FigStatus;
+    pub fn fig_embed_replace_body(
+        fm: *mut FigEmbed,
+        body: *const u8,
+        body_len: usize,
     ) -> FigStatus;
     pub fn fig_embed_render(
         fm: *mut FigEmbed,

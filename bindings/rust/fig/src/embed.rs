@@ -47,6 +47,66 @@ impl EmbedType {
     }
 }
 
+/// A half-open `[start, end)` byte range within the host file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl From<ffi::FigSpan> for Span {
+    fn from(s: ffi::FigSpan) -> Self {
+        Span { start: s.start, end: s.end }
+    }
+}
+
+/// A located embed region in host-file byte coordinates (the content is not
+/// parsed). `body` is the host prose outside the fences — the suffix after the
+/// close fence for frontmatter, the prefix before the open fence for endmatter.
+#[derive(Clone, Copy, Debug)]
+pub struct Region {
+    pub open_fence: Span,
+    pub content: Span,
+    pub close_fence: Span,
+    pub body: Span,
+}
+
+/// The result of [`Embed::extract`]: a located [`Region`] plus the borrowed host
+/// text, with helpers to slice out the frontmatter and body without parsing or
+/// copying.
+#[derive(Clone, Copy, Debug)]
+pub struct Extracted<'a> {
+    source: &'a str,
+    region: Region,
+}
+
+impl<'a> Extracted<'a> {
+    /// The located region's byte spans.
+    pub fn region(&self) -> Region {
+        self.region
+    }
+
+    /// The raw config text between the fences (e.g. the YAML frontmatter); not parsed.
+    pub fn frontmatter(&self) -> &'a str {
+        &self.source[self.region.content.start..self.region.content.end]
+    }
+
+    /// The host body outside the fences (the markdown prose).
+    pub fn body(&self) -> &'a str {
+        &self.source[self.region.body.start..self.region.body.end]
+    }
+}
+
+/// Split markdown YAML frontmatter from its body without parsing or copying — the
+/// read-only `(frontmatter, body)` twin of opening an [`Embed`]. `None` when
+/// `content` has no `---` frontmatter (or its opening fence has no close). Both
+/// slices borrow `content`: the frontmatter is the text between the fences (no
+/// fences), the body is everything after the close fence.
+pub fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
+    let e = Embed::extract(content, EmbedType::FrontmatterYaml).ok()?;
+    Some((e.frontmatter(), e.body()))
+}
+
 /// An editor over an embedded config region of a host file.
 #[derive(Debug)]
 pub struct Embed {
@@ -72,6 +132,26 @@ impl Embed {
     /// Open the markdown YAML frontmatter of `markdown` — the common case.
     pub fn frontmatter(markdown: &[u8]) -> Result<Self, Error> {
         Self::open(markdown, EmbedType::FrontmatterYaml)
+    }
+
+    /// Locate `kind`'s region in `content` and borrow its frontmatter/body slices
+    /// without parsing or copying — the read-only counterpart to [`Embed::open`].
+    /// [`Error::NotFound`] when no such region exists (or its fence is unterminated).
+    pub fn extract(content: &str, kind: EmbedType) -> Result<Extracted<'_>, Error> {
+        let mut region = ffi::FigRegion::default();
+        let status = unsafe {
+            ffi::fig_embed_extract(content.as_ptr(), content.len(), kind.ffi() as i32, &mut region)
+        };
+        Error::from_status(status)?;
+        Ok(Extracted {
+            source: content,
+            region: Region {
+                open_fence: region.open_fence.into(),
+                content: region.content.into(),
+                close_fence: region.close_fence.into(),
+                body: region.body.into(),
+            },
+        })
     }
 
     fn ptr(&self) -> *mut ffi::FigEmbed {
@@ -344,6 +424,19 @@ impl Embed {
         let status = unsafe {
             ffi::fig_embed_set_sequence(self.ptr(), p.as_ptr(), p.len(), strs.as_ptr(), strs.len())
         };
+        Error::from_status(status)
+    }
+
+    /// Replace the host body — the prose the config is embedded in — with `body`,
+    /// keeping the fences and the current (possibly edited) content byte-identical.
+    /// The body is the suffix after the close fence (frontmatter) or the prefix
+    /// before the open fence (endmatter); only that side is swapped. `body` is
+    /// taken verbatim (not parsed); an empty `body` clears it. Composes with the
+    /// value edits — change keys, replace the body, then [`render`](Self::render)
+    /// once. Takes effect at the next render.
+    pub fn replace_body(&mut self, body: &str) -> Result<(), Error> {
+        let status =
+            unsafe { ffi::fig_embed_replace_body(self.ptr(), body.as_ptr(), body.len()) };
         Error::from_status(status)
     }
 

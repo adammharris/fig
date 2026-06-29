@@ -181,6 +181,57 @@ fn frontmatter_edit_touches_only_target_bytes() {
 }
 
 #[test]
+fn split_frontmatter_borrows_frontmatter_and_body() {
+    let (fm, body) = fig::split_frontmatter(NOTE).unwrap();
+    assert_eq!(fm, "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");
+    assert_eq!(body, "# Body\n\nprose goes here\n");
+    // CRLF fences are handled (Diaryx's hand-rolled split special-cased these).
+    let crlf = "---\r\nk: v\r\n---\r\nbody\r\n";
+    let (fm, body) = fig::split_frontmatter(crlf).unwrap();
+    assert_eq!(fm, "k: v\r\n");
+    assert_eq!(body, "body\r\n");
+    // No frontmatter -> None.
+    assert_eq!(fig::split_frontmatter("# just markdown\n"), None);
+    // Unterminated fence -> None (not a panic / partial split).
+    assert_eq!(fig::split_frontmatter("---\nk: v\nno close\n"), None);
+}
+
+#[test]
+fn extract_exposes_region_spans_and_slices() {
+    use fig::EmbedType;
+    let e = fig::Embed::extract(NOTE, EmbedType::FrontmatterYaml).unwrap();
+    assert_eq!(e.frontmatter(), "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");
+    assert_eq!(e.body(), "# Body\n\nprose goes here\n");
+    let r = e.region();
+    // The body span starts at the close fence's end.
+    assert_eq!(r.body.start, r.close_fence.end);
+}
+
+#[test]
+fn frontmatter_replace_body_keeps_frontmatter_byte_identical() {
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    fm.replace_body("# New Body\n").unwrap();
+    let rendered = fm.render().unwrap();
+    // Frontmatter block (fences + content + comments) is verbatim; only body swapped.
+    let (orig_fm, _) = fig::split_frontmatter(NOTE).unwrap();
+    let (new_fm, new_body) = fig::split_frontmatter(rendered).unwrap();
+    assert_eq!(new_fm, orig_fm);
+    assert_eq!(new_body, "# New Body\n");
+}
+
+#[test]
+fn frontmatter_replace_body_composes_with_edits() {
+    let mut fm = Embed::frontmatter(NOTE.as_bytes()).unwrap();
+    fm.replace(&[Segment::Key("title")], &"Hi there").unwrap();
+    fm.replace_body("# New Body\n").unwrap();
+    let rendered = fm.render().unwrap();
+    let (new_fm, new_body) = fig::split_frontmatter(rendered).unwrap();
+    assert!(new_fm.starts_with("title: Hi there\n"));
+    assert!(new_fm.contains("# keep this comment")); // comment preserved
+    assert_eq!(new_body, "# New Body\n");
+}
+
+#[test]
 fn frontmatter_open_without_frontmatter_is_not_found() {
     let err = Embed::frontmatter(b"# just markdown\n").unwrap_err();
     assert!(matches!(err, fig::Error::NotFound));

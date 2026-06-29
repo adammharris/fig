@@ -39,11 +39,13 @@ export interface Span {
   end: number;
 }
 
-/** The fence/content byte spans of a located embedded region. */
+/** The fence/content/body byte spans of a located embedded region. `body` is the
+ *  host prose outside the fences (suffix for frontmatter, prefix for endmatter). */
 export interface Region {
   openFence: Span;
   content: Span;
   closeFence: Span;
+  body: Span;
 }
 
 /** The inner editing format an embed archetype carries (`---`/endmatter ⇒ YAML,
@@ -86,10 +88,26 @@ export class Embed extends Editable {
     const frame = new Frame();
     try {
       const ptr = frame.bytes(bytes);
-      const region = frame.alloc(24); // FigRegion: 3 × FigSpan(start,end)
+      const region = frame.alloc(32); // FigRegion: 4 × FigSpan(start,end)
       check(fig.fig_embed_extract(ptr, bytes.length, kind, region), "fig_embed_extract");
       const span = (off: number): Span => ({ start: readU32(region + off), end: readU32(region + off + 4) });
-      return { openFence: span(0), content: span(8), closeFence: span(16) };
+      return { openFence: span(0), content: span(8), closeFence: span(16), body: span(24) };
+    } finally {
+      frame.dispose();
+    }
+  }
+
+  /** Replace the host body — the prose the config is embedded in — with `body`,
+   *  keeping the fences and the current (possibly edited) content byte-identical.
+   *  The body is the suffix after the close fence (frontmatter) or the prefix
+   *  before the open fence (endmatter); only that side is swapped. `body` is
+   *  taken verbatim (not parsed); an empty string clears it. Composes with the
+   *  value edits — change keys, replace the body, then `render` once. */
+  replaceBody(body: string): void {
+    const frame = new Frame();
+    try {
+      const b = frame.str(body);
+      check(fig.fig_embed_replace_body(this.live(), b.ptr, b.len), "replaceBody");
     } finally {
       frame.dispose();
     }
@@ -113,4 +131,25 @@ export class Embed extends Editable {
     this.disposed = true;
     fig.fig_embed_destroy(this.handle);
   }
+}
+
+const decoder = new TextDecoder();
+
+/** Split markdown YAML frontmatter from its body without parsing — the read-only
+ *  `[frontmatter, body]` twin of opening an {@link Embed}. Returns `null` when
+ *  `content` has no `---` frontmatter (or its opening fence has no close). The
+ *  frontmatter is the text between the fences (no fences); the body is everything
+ *  after the close fence. Slicing is done on UTF-8 bytes, so multi-byte content
+ *  is handled correctly. */
+export function splitFrontmatter(content: string): [string, string] | null {
+  const bytes = encoder.encode(content);
+  let region: Region;
+  try {
+    region = Embed.extract(bytes, EmbedType.FrontmatterYaml);
+  } catch {
+    return null; // NotFound / unterminated fence
+  }
+  const fm = decoder.decode(bytes.subarray(region.content.start, region.content.end));
+  const body = decoder.decode(bytes.subarray(region.body.start, region.body.end));
+  return [fm, body];
 }

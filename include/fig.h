@@ -380,6 +380,10 @@ typedef struct FigRegion {
     FigSpan open_fence;
     FigSpan content;
     FigSpan close_fence;
+    // The host body outside the fences (in host-file coordinates): the suffix
+    // after the close fence for frontmatter, the prefix before the open fence
+    // for endmatter. The read-side twin of `content` (frontmatter vs. body).
+    FigSpan body;
 } FigRegion;
 
 typedef enum FigEmbedType {
@@ -388,8 +392,10 @@ typedef enum FigEmbedType {
     FIG_EMBED_ENDMATTER_YAML   = 2,
 } FigEmbedType;
 
-// Locate an embedded region and report its fence/content spans (in host-file
-// coordinates) without parsing the content.
+// Locate an embedded region and report its fence/content/body spans (in
+// host-file coordinates) without parsing the content. FIG_STATUS_NOT_FOUND when
+// no region of that type exists; a region whose open fence has no matching close
+// is FIG_STATUS_PARSE_ERROR.
 FigStatus fig_embed_extract(const uint8_t *input, size_t input_len,
                             int embed_type, FigRegion *out_region);
 
@@ -449,6 +455,15 @@ FigStatus fig_embed_reorder_items(FigEmbed *embed, const FigPathSegment *path, s
 // Comment-preserving sequence reconcile (see fig_editor_set_sequence).
 FigStatus fig_embed_set_sequence(FigEmbed *embed, const FigPathSegment *path, size_t path_len,
                                  const FigStr *items, size_t items_len);
+
+// Replace the host BODY (the prose the config is embedded in) with `body`,
+// keeping the fences and the current (possibly edited) content byte-identical.
+// The body is the suffix after the close fence (frontmatter) or the prefix
+// before the open fence (endmatter); only that side is swapped. `body` is taken
+// verbatim (not parsed) and copied; an empty `body` clears it. Composes with the
+// value edits — edit keys, replace the body, then render once. Takes effect at
+// the next fig_embed_render.
+FigStatus fig_embed_replace_body(FigEmbed *embed, const uint8_t *body, size_t body_len);
 
 // Render the full host file with the edited embed. Borrowed bytes, valid
 // until the next call or fig_embed_destroy.

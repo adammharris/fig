@@ -21,7 +21,7 @@ use std::ptr::NonNull;
 
 pub use diagnostics::{Warning, WarningCause, WarningCode};
 pub use editor::{Editor, Segment};
-pub use embed::{Embed, EmbedType};
+pub use embed::{Embed, EmbedType, Extracted, Region, Span, split_frontmatter};
 pub use error::{Error, ParseError};
 pub use value::{ExtKind, Value};
 

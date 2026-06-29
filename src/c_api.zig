@@ -1210,6 +1210,9 @@ pub const FigRegion = extern struct {
     open_fence: FigSpan,
     content: FigSpan,
     close_fence: FigSpan,
+    /// The host body outside the fences (suffix for frontmatter, prefix for
+    /// endmatter) — the read-side twin of `content`.
+    body: FigSpan,
 };
 
 /// Mirrors `Embed.Type`.
@@ -1251,6 +1254,7 @@ pub export fn fig_embed_extract(
         .open_fence = toFigSpan(region.open_fence),
         .content = toFigSpan(region.content),
         .close_fence = toFigSpan(region.close_fence),
+        .body = toFigSpan(region.body),
     };
     return .ok;
 }
@@ -1271,7 +1275,17 @@ pub const FigEmbed = opaque {};
 const EmbedHandle = struct {
     allocator: std.mem.Allocator,
     host: []u8,
-    content: Span,
+    /// The located region in host coordinates. The full region (not just
+    /// `content`) is kept so `replace_body` knows the fence boundaries and which
+    /// side of the fences the body sits on.
+    region: Embed.Region,
+    /// True when the body is the PREFIX before the open fence (endmatter); false
+    /// when it is the suffix after the close fence (frontmatter).
+    body_before: bool,
+    /// A replacement body installed by `fig_embed_replace_body`, owned. When set,
+    /// `render` emits it in place of the original host body slice; the fences and
+    /// (edited) content are untouched. Null means "keep the original body".
+    body_override: ?[]u8 = null,
     editor: EditorUnion,
     rendered: std.ArrayList(u8) = .empty,
     /// Reused buffer backing the borrowed bytes returned by the comment-read
@@ -1282,6 +1296,7 @@ const EmbedHandle = struct {
         switch (self.editor) {
             inline else => |*e| e.deinit(),
         }
+        if (self.body_override) |b| self.allocator.free(b);
         self.rendered.deinit(self.allocator);
         self.scratch.deinit(self.allocator);
         self.allocator.free(self.host);
@@ -1335,7 +1350,8 @@ pub export fn fig_embed_open(
     handle.* = .{
         .allocator = allocator,
         .host = host,
-        .content = region.content,
+        .region = region,
+        .body_before = Embed.bodyIsBefore(t),
         .editor = switch (embedInner(t)) {
             .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
             .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
@@ -1682,12 +1698,63 @@ pub export fn fig_embed_render(
     };
     handle.rendered.clearRetainingCapacity();
     const host = handle.host;
-    handle.rendered.appendSlice(handle.allocator, host[0..handle.content.start]) catch return .out_of_memory;
-    handle.rendered.appendSlice(handle.allocator, src) catch return .out_of_memory;
-    handle.rendered.appendSlice(handle.allocator, host[handle.content.end..]) catch return .out_of_memory;
+    const region = handle.region;
+    const append = struct {
+        fn f(h: *EmbedHandle, bytes: []const u8) FigStatus {
+            h.rendered.appendSlice(h.allocator, bytes) catch return .out_of_memory;
+            return .ok;
+        }
+    }.f;
+    // Reassemble the host file with the edited content (and, if installed, the
+    // replacement body) spliced into the located region; the fences and the
+    // untouched side stay byte-identical. The body sits before the open fence
+    // (endmatter) or after the close fence (frontmatter); `body_override` swaps
+    // just that side, leaving everything between the fences in place. With no
+    // override the two fence-side slices rejoin into the original host text.
+    if (handle.body_before) {
+        // [ body ][ open_fence … content … close_fence ][ tail ]
+        if (handle.body_override) |b| {
+            if (append(handle, b) != .ok) return .out_of_memory;
+            if (append(handle, host[region.open_fence.start..region.content.start]) != .ok) return .out_of_memory;
+        } else {
+            if (append(handle, host[0..region.content.start]) != .ok) return .out_of_memory;
+        }
+        if (append(handle, src) != .ok) return .out_of_memory;
+        if (append(handle, host[region.content.end..]) != .ok) return .out_of_memory;
+    } else {
+        // [ head ][ open_fence … content … close_fence ][ body ]
+        if (append(handle, host[0..region.content.start]) != .ok) return .out_of_memory;
+        if (append(handle, src) != .ok) return .out_of_memory;
+        if (handle.body_override) |b| {
+            if (append(handle, host[region.content.end..region.close_fence.end]) != .ok) return .out_of_memory;
+            if (append(handle, b) != .ok) return .out_of_memory;
+        } else {
+            if (append(handle, host[region.content.end..]) != .ok) return .out_of_memory;
+        }
+    }
 
     p.* = handle.rendered.items.ptr;
     l.* = handle.rendered.items.len;
+    return .ok;
+}
+
+/// Replace the host BODY (the prose the config is embedded in) with `body`,
+/// keeping the fences and the current (possibly edited) content byte-identical.
+/// The body is the suffix after the close fence (frontmatter) or the prefix
+/// before the open fence (endmatter); `replace_body` swaps only that side. The
+/// new body is taken verbatim — fig does not parse it. Composes with the value
+/// edits: edit keys, replace the body, then `render` once. An empty `body`
+/// clears it. Takes effect at the next `render`.
+pub export fn fig_embed_replace_body(
+    em: ?*FigEmbed,
+    body_ptr: ?[*]const u8,
+    body_len: usize,
+) FigStatus {
+    const handle = embedFrom(em) orelse return .invalid_argument;
+    const body = if (body_len == 0) "" else (body_ptr orelse return .invalid_argument)[0..body_len];
+    const owned = handle.allocator.dupe(u8, body) catch return .out_of_memory;
+    if (handle.body_override) |old| handle.allocator.free(old);
+    handle.body_override = owned;
     return .ok;
 }
 
@@ -2822,11 +2889,37 @@ test "frontmatter c abi move item in a flow sequence value" {
     try std.testing.expectEqualStrings("---\ntags: [z, x, y]\n---\nbody\n", ptr[0..len]);
 }
 
-test "embed c abi locates region" {
+test "embed c abi locates region with content and body spans" {
     const md = "---\nk: v\n---\nbody\n";
     var region: FigRegion = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &region));
     try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
+    // The body is the suffix after the close fence.
+    try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
+}
+
+test "fig_embed_replace_body swaps the body, keeps fences + edited content" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const md = "---\ntitle: Hi\n---\nold body\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+
+    // Body-only swap leaves the frontmatter byte-identical.
+    const body = "new body\n";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_body(out_fm, body.ptr, body.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntitle: Hi\n---\nnew body\n", ptr[0..len]);
+
+    // Composes with a frontmatter edit, in one render.
+    const title = [_]FigPathSegment{keySeg("title")};
+    const hello = "Hello";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_val(out_fm, &title, 1, hello.ptr, hello.len));
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntitle: Hello\n---\nnew body\n", ptr[0..len]);
 }
 
 test "embed c abi edits json frontmatter (`;;;` fences, JSON inner editor)" {

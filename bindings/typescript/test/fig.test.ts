@@ -21,6 +21,7 @@ import {
   fromJS,
   parse,
   serialize,
+  splitFrontmatter,
   toJS,
 } from "../src/index.ts";
 
@@ -225,10 +226,27 @@ test("Embed edits JSON frontmatter via raw text", () => {
   assert.equal(fm.render(), ';;;\n{"title": "Hello", "draft": true}\n;;;\n# Body\n');
 });
 
-test("Embed.extract locates the region", () => {
+test("Embed.extract locates the region, with a body span", () => {
   const md = "---\nk: v\n---\nbody\n";
   const region = Embed.extract(md, EmbedType.FrontmatterYaml);
   assert.equal(md.slice(region.content.start, region.content.end), "k: v\n");
+  assert.equal(md.slice(region.body.start, region.body.end), "body\n");
+  assert.equal(region.body.start, region.closeFence.end);
+});
+
+test("splitFrontmatter returns [frontmatter, body], or null when absent", () => {
+  assert.deepEqual(splitFrontmatter("---\nk: v\n---\nbody\n"), ["k: v\n", "body\n"]);
+  // CRLF fences handled.
+  assert.deepEqual(splitFrontmatter("---\r\nk: v\r\n---\r\nx\r\n"), ["k: v\r\n", "x\r\n"]);
+  assert.equal(splitFrontmatter("# just markdown\n"), null);
+  assert.equal(splitFrontmatter("---\nk: v\nno close\n"), null);
+});
+
+test("Embed.replaceBody swaps the body, composing with edits", () => {
+  using fm = Embed.frontmatter("---\ntitle: Hi\n---\nold body\n");
+  fm.replaceValue(["title"], "Hello");
+  fm.replaceBody("new body\n");
+  assert.equal(fm.render(), "---\ntitle: Hello\n---\nnew body\n");
 });
 
 test("editor comment ops add, set, and delete", () => {

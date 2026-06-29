@@ -60,11 +60,16 @@ pub const Type = enum {
 
 /// A located region, in *outer-source* byte coordinates. The fence spans are
 /// retained so an editor can splice a replacement into `content` while leaving
-/// everything else byte-identical.
+/// everything else byte-identical. `body` is the host text OUTSIDE the region —
+/// the markdown the config is embedded in — computed archetype-aware: the suffix
+/// after the close fence for a `.start` (frontmatter) region, the prefix before
+/// the open fence for an `.end` (endmatter) region. It is the read-side twin of
+/// the `content` slice (frontmatter vs. body) and the target of `replace_body`.
 pub const Region = struct {
     open_fence: Span,
     content: Span,
     close_fence: Span,
+    body: Span,
 };
 
 /// Extraction result. `source` is the borrowed *outer* file; `region` indexes
@@ -137,6 +142,13 @@ pub fn extract(allocator: Allocator, source: []const u8, t: Type) !Embedded {
 /// Useful when a caller only needs the fence/content spans (e.g. to splice).
 pub fn locateRegion(source: []const u8, t: Type) Error!Region {
     return locate(source, archetypeOf(t));
+}
+
+/// Whether `t`'s body (the host prose) sits BEFORE the open fence (endmatter)
+/// rather than after the close fence (frontmatter). Lets a host-coordinate
+/// editor pick the side to splice when replacing the body.
+pub fn bodyIsBefore(t: Type) bool {
+    return archetypeOf(t).location == .end;
 }
 
 /// Parse an explicit content span as `t`'s inner format, no host scanning.
@@ -316,8 +328,16 @@ fn locate(source: []const u8, a: Archetype) Error!Region {
 
     var line = open.end;
     while (line < source.len) {
-        if (matchDelim(source, line, a.close)) |close|
-            return .{ .open_fence = open, .content = Span.init(open.end, close.start), .close_fence = close };
+        if (matchDelim(source, line, a.close)) |close| {
+            // The body is the host text outside the fences: the suffix after the
+            // close fence for frontmatter, the prefix before the open fence for
+            // endmatter (where the config trails the prose).
+            const body = if (a.location == .end)
+                Span.init(0, open.start)
+            else
+                Span.init(close.end, source.len);
+            return .{ .open_fence = open, .content = Span.init(open.end, close.start), .close_fence = close, .body = body };
+        }
         line = lineEnd(source, line);
     }
     return Error.Unterminated;
