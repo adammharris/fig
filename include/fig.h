@@ -422,6 +422,12 @@ FigStatus fig_embed_extract(const uint8_t *input, size_t input_len,
 typedef struct FigEmbed FigEmbed;
 
 FigStatus fig_embed_open(const uint8_t *input, size_t input_len, int embed_type, FigEmbed **out_embed);
+// Like fig_embed_open, but when no region of `embed_type` exists, create an empty
+// one (frontmatter at the top, endmatter at the bottom) instead of returning
+// FIG_STATUS_NOT_FOUND — so a subsequent fig_embed_set / fig_embed_insert_key
+// lands the first entry. An existing region is opened unchanged; a malformed one
+// (open fence with no close) still fails.
+FigStatus fig_embed_open_or_init(const uint8_t *input, size_t input_len, int embed_type, FigEmbed **out_embed);
 void fig_embed_destroy(FigEmbed *embed);
 
 FigStatus fig_embed_replace_val(FigEmbed *embed, const FigPathSegment *path,

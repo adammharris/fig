@@ -1349,32 +1349,26 @@ fn embedInner(t: Embed.Type) enum { yaml, json } {
     };
 }
 
-pub export fn fig_embed_open(
-    input_ptr: ?[*]const u8,
-    input_len: usize,
-    embed_type: c_int,
-    out_embed: ?*?*FigEmbed,
-) FigStatus {
-    const out = out_embed orelse return .invalid_argument;
-    out.* = null;
-    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
-    const t = embedTypeOf(embed_type) orelse return .invalid_argument;
-    // An embed needs its inner-format editor; reject it when that format is gated
-    // out (YAML frontmatter without YAML, JSON frontmatter without JSON).
-    if (comptime !build_options.lang_yaml) {
-        if (embedInner(t) == .yaml) return .unsupported_format;
-    }
-    if (comptime !build_options.lang_json) {
-        if (embedInner(t) == .json) return .unsupported_format;
-    }
-
-    const region = Embed.locateRegion(input, t) catch |err| return switch (err) {
-        error.NotFound => .not_found,
-        else => .parse_error,
+/// Whether this build can edit `t`'s inner format (YAML frontmatter needs YAML,
+/// JSON frontmatter needs JSON). Gated formats are compiled out.
+fn embedInnerSupported(t: Embed.Type) bool {
+    return switch (embedInner(t)) {
+        .yaml => build_options.lang_yaml,
+        .json => build_options.lang_json,
     };
+}
 
-    const allocator = activeAllocator();
-    const host = allocator.dupe(u8, input) catch return .out_of_memory;
+/// Build an `EmbedHandle` over an already-owned `host` with a known `region`,
+/// initializing the inner editor over the region's content. Takes ownership of
+/// `host` (frees it on any failure). Shared by `fig_embed_open` and
+/// `fig_embed_open_or_init`; the caller has already validated the format.
+fn embedHandleFromHost(
+    allocator: std.mem.Allocator,
+    host: []u8,
+    region: Embed.Region,
+    t: Embed.Type,
+    out: *?*FigEmbed,
+) FigStatus {
     const handle = allocator.create(EmbedHandle) catch {
         allocator.free(host);
         return .out_of_memory;
@@ -1398,9 +1392,60 @@ pub export fn fig_embed_open(
             return editStatus(err);
         },
     }
-
     out.* = @ptrCast(handle);
     return .ok;
+}
+
+pub export fn fig_embed_open(
+    input_ptr: ?[*]const u8,
+    input_len: usize,
+    embed_type: c_int,
+    out_embed: ?*?*FigEmbed,
+) FigStatus {
+    const out = out_embed orelse return .invalid_argument;
+    out.* = null;
+    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
+    const t = embedTypeOf(embed_type) orelse return .invalid_argument;
+    if (!embedInnerSupported(t)) return .unsupported_format;
+
+    const region = Embed.locateRegion(input, t) catch |err| return switch (err) {
+        error.NotFound => .not_found,
+        else => .parse_error,
+    };
+
+    const allocator = activeAllocator();
+    const host = allocator.dupe(u8, input) catch return .out_of_memory;
+    return embedHandleFromHost(allocator, host, region, t, out);
+}
+
+/// Like `fig_embed_open`, but when no region of `embed_type` exists, create an
+/// empty one (placed per the archetype: frontmatter at the top, endmatter at the
+/// bottom) instead of returning `not_found` — so a subsequent `fig_embed_set` /
+/// `fig_embed_insert_key` lands the first entry. An existing region is opened
+/// unchanged. A malformed region (open fence with no close) still fails.
+pub export fn fig_embed_open_or_init(
+    input_ptr: ?[*]const u8,
+    input_len: usize,
+    embed_type: c_int,
+    out_embed: ?*?*FigEmbed,
+) FigStatus {
+    const out = out_embed orelse return .invalid_argument;
+    out.* = null;
+    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
+    const t = embedTypeOf(embed_type) orelse return .invalid_argument;
+    if (!embedInnerSupported(t)) return .unsupported_format;
+
+    const allocator = activeAllocator();
+    if (Embed.locateRegion(input, t)) |region| {
+        const host = allocator.dupe(u8, input) catch return .out_of_memory;
+        return embedHandleFromHost(allocator, host, region, t, out);
+    } else |err| switch (err) {
+        error.NotFound => {
+            const created = Embed.initRegion(allocator, input, t) catch return .out_of_memory;
+            return embedHandleFromHost(allocator, created.host, created.region, t, out);
+        },
+        else => return .parse_error,
+    }
 }
 
 pub export fn fig_embed_destroy(em: ?*FigEmbed) void {
@@ -2989,6 +3034,53 @@ test "fig_embed_replace_body swaps the body, keeps fences + edited content" {
     try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_val(out_fm, &title, 1, hello.ptr, hello.len));
     try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings("---\ntitle: Hello\n---\nnew body\n", ptr[0..len]);
+}
+
+test "fig_embed_open_or_init creates a frontmatter block where none exists" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const md = "# Just a body\n\nprose\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open_or_init(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
+    // The synthesized block is empty; the first set lands the opening key.
+    const title = [_]FigPathSegment{keySeg("title")};
+    const hi = "Hi";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_set(out_fm, &title, 1, hi.ptr, hi.len));
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntitle: Hi\n---\n# Just a body\n\nprose\n", ptr[0..len]);
+}
+
+test "fig_embed_open_or_init opens an existing region unchanged" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const md = "---\ntitle: Old # c\n---\nbody\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open_or_init(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
+    // Behaves like open: edits the existing region, comment + body preserved.
+    const title = [_]FigPathSegment{keySeg("title")};
+    const new = "New";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_set(out_fm, &title, 1, new.ptr, new.len));
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("---\ntitle: New # c\n---\nbody\n", ptr[0..len]);
+}
+
+test "fig_embed_open_or_init appends an endmatter block at the bottom" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const md = "# Title\n\nbody text\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open_or_init(md.ptr, md.len, @intFromEnum(FigEmbedType.endmatter_yaml), &out_fm));
+    defer fig_embed_destroy(out_fm);
+    const k = [_]FigPathSegment{keySeg("k")};
+    const v = "v";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_set(out_fm, &k, 1, v.ptr, v.len));
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("# Title\n\nbody text\n```endmatter\nk: v\n```\n", ptr[0..len]);
 }
 
 test "embed c abi edits json frontmatter (`;;;` fences, JSON inner editor)" {

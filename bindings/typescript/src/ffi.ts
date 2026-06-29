@@ -79,6 +79,7 @@ interface Exports {
 
   fig_embed_extract(input: number, input_len: number, embed_type: number, out_region: number): number;
   fig_embed_open(input: number, input_len: number, embed_type: number, out: number): number;
+  fig_embed_open_or_init(input: number, input_len: number, embed_type: number, out: number): number;
   fig_embed_destroy(em: number): void;
   fig_embed_replace_val(em: number, path: number, path_len: number, repl: number, repl_len: number): number;
   fig_embed_replace_key(em: number, path: number, path_len: number, repl: number, repl_len: number): number;

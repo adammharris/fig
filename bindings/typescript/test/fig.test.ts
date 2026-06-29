@@ -227,6 +227,21 @@ test("Embed edits YAML frontmatter, fences and body intact", () => {
   );
 });
 
+test("Embed.openOrInit creates a block when none exists, else opens it", () => {
+  // No frontmatter: a block is synthesized and the first set lands the key.
+  {
+    using fm = Embed.openOrInit("# Just a body\n\nprose\n", EmbedType.FrontmatterYaml);
+    fm.set(["title"], "Hi");
+    assert.equal(fm.render(), "---\ntitle: Hi\n---\n# Just a body\n\nprose\n");
+  }
+  // Existing frontmatter: behaves like open, comment + body preserved.
+  {
+    using fm = Embed.openOrInit("---\ntitle: Old # c\n---\nbody\n", EmbedType.FrontmatterYaml);
+    fm.set(["title"], "New");
+    assert.equal(fm.render(), "---\ntitle: New # c\n---\nbody\n");
+  }
+});
+
 test("Embed edits JSON frontmatter via raw text", () => {
   using fm = Embed.open(';;;\n{"title": "Hi", "draft": true}\n;;;\n# Body\n', EmbedType.FrontmatterJson);
   fm.replaceValueRaw(["title"], '"Hello"');

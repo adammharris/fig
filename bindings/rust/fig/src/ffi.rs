@@ -552,6 +552,12 @@ unsafe extern "C" {
         embed_type: c_int,
         out_embed: *mut *mut FigEmbed,
     ) -> FigStatus;
+    pub fn fig_embed_open_or_init(
+        input: *const u8,
+        input_len: usize,
+        embed_type: c_int,
+        out_embed: *mut *mut FigEmbed,
+    ) -> FigStatus;
     pub fn fig_embed_destroy(fm: *mut FigEmbed);
 
     pub fn fig_embed_replace_val(

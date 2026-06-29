@@ -129,6 +129,24 @@ impl Embed {
         })
     }
 
+    /// Open the embed of `kind` in `host`, creating an empty region when none
+    /// exists (placed per the archetype — frontmatter at the top, endmatter at
+    /// the bottom) instead of failing with [`Error::NotFound`]. A subsequent
+    /// [`set`](Self::set)/[`insert`](Self::insert) lands the first entry. An
+    /// existing region is opened unchanged; a malformed one still errors.
+    pub fn open_or_init(host: &[u8], kind: EmbedType) -> Result<Self, Error> {
+        let mut raw = std::ptr::null_mut();
+        let status = unsafe {
+            ffi::fig_embed_open_or_init(host.as_ptr(), host.len(), kind.ffi() as i32, &mut raw)
+        };
+        Error::from_status(status)?;
+        let raw = NonNull::new(raw).ok_or(Error::Internal)?;
+        Ok(Self {
+            raw,
+            inner: kind.inner_format(),
+        })
+    }
+
     /// Locate `kind`'s region in `content` and borrow its content/body slices
     /// without parsing or copying — the read-only counterpart to [`Embed::open`].
     /// [`Error::NotFound`] when no such region exists (or its fence is unterminated).

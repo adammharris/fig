@@ -34,6 +34,11 @@ New:
 - `fig_editor_set` / `fig_embed_set` (and `Editor.set` / `Embed.set` in the
   bindings): upsert a mapping value — replace at the path, or insert the trailing
   key when only it is absent.
+- `fig_embed_open_or_init` (and `Embed::open_or_init` / `Embed.openOrInit`):
+  open an embedded region, or create an empty one — placed per the archetype
+  (frontmatter at the top, endmatter at the bottom) — when the host has none, so
+  the first `set`/`insert` lands the opening entry without a separate
+  reserialize. Generic over `EmbedType`.
 - Support for YAML 1.1
 - `fig check` command for validating config files
 - Versioning policy with `zig build check`

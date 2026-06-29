@@ -22,6 +22,23 @@ fn editor_set_replaces_or_inserts() {
 }
 
 #[test]
+fn embed_open_or_init_creates_block_then_sets_first_key() {
+    // No frontmatter: open_or_init synthesizes an empty block; set lands the key.
+    let mut fm = Embed::open_or_init(b"# Just a body\n\nprose\n", EmbedType::FrontmatterYaml).unwrap();
+    fm.set(&[Segment::Key("title")], "Hi").unwrap();
+    assert_eq!(fm.render().unwrap(), "---\ntitle: Hi\n---\n# Just a body\n\nprose\n");
+}
+
+#[test]
+fn embed_open_or_init_opens_existing_region_unchanged() {
+    // Existing frontmatter: behaves like open, preserving the comment + body.
+    let mut fm =
+        Embed::open_or_init(b"---\ntitle: Old # c\n---\nbody\n", EmbedType::FrontmatterYaml).unwrap();
+    fm.set(&[Segment::Key("title")], "New").unwrap();
+    assert_eq!(fm.render().unwrap(), "---\ntitle: New # c\n---\nbody\n");
+}
+
+#[test]
 fn frontmatter_set_upserts_preserving_comments_and_body() {
     const NOTE: &str = "---\ntitle: Hi # greeting\ntags:\n- x\n---\nbody\n";
     let mut fm = Embed::open(NOTE.as_bytes(), EmbedType::FrontmatterYaml).unwrap();

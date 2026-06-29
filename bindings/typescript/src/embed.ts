@@ -60,21 +60,38 @@ export class Embed extends Editable {
     super(handle, EMBED_FNS, innerFormat(kind));
   }
 
-  /** Open the embed of `kind` in `host`. Throws {@link FigError} `NotFound` if
-   *  no such region exists. */
-  static open(host: string | Uint8Array, kind: EmbedType): Embed {
+  private static openWith(
+    host: string | Uint8Array,
+    kind: EmbedType,
+    fn: (input: number, inputLen: number, embedType: number, out: number) => number,
+    name: string,
+  ): Embed {
     const bytes = typeof host === "string" ? encoder.encode(host) : host;
     const frame = new Frame();
     const out = frame.alloc(4);
     try {
       const ptr = frame.bytes(bytes);
-      check(fig.fig_embed_open(ptr, bytes.length, kind, out), "fig_embed_open");
+      check(fn(ptr, bytes.length, kind, out), name);
       const handle = new DataView(fig.memory.buffer).getUint32(out, true);
-      if (handle === 0) throw new FigError(Status.InternalError, "fig_embed_open");
+      if (handle === 0) throw new FigError(Status.InternalError, name);
       return new Embed(handle, kind);
     } finally {
       frame.dispose();
     }
+  }
+
+  /** Open the embed of `kind` in `host`. Throws {@link FigError} `NotFound` if
+   *  no such region exists. */
+  static open(host: string | Uint8Array, kind: EmbedType): Embed {
+    return Embed.openWith(host, kind, fig.fig_embed_open, "fig_embed_open");
+  }
+
+  /** Open the embed of `kind` in `host`, creating an empty region when none
+   *  exists (frontmatter at the top, endmatter at the bottom) instead of throwing
+   *  `NotFound` — so a subsequent {@link set}/{@link insertValue} lands the first
+   *  entry. An existing region is opened unchanged; a malformed one still throws. */
+  static openOrInit(host: string | Uint8Array, kind: EmbedType): Embed {
+    return Embed.openWith(host, kind, fig.fig_embed_open_or_init, "fig_embed_open_or_init");
   }
 
   /** Locate an embedded region and report its fence/content spans without

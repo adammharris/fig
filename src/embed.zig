@@ -151,6 +151,71 @@ pub fn bodyIsBefore(t: Type) bool {
     return archetypeOf(t).location == .end;
 }
 
+/// Built host for a source that has no region of type `t` — the create half of
+/// "open or create".
+pub const Initialized = struct { host: []u8, region: Region };
+
+/// Synthesize a host containing an EMPTY region of type `t` around `source`,
+/// which is assumed to have none. The fresh block is placed where the archetype
+/// dictates — prepended for a `.start` (frontmatter) region, appended for an
+/// `.end` (endmatter) region — with the original `source` becoming the region's
+/// body. Its content is seeded with an empty inner document (nothing for YAML, an
+/// empty object for JSON) so a subsequent insert/set lands the first key. No
+/// blank line is inserted between fence and body, so the output matches the
+/// hand-rolled `---\n…\n---\n{body}` shape. The returned `host` is caller-owned.
+pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialized {
+    const a = archetypeOf(t);
+    const open_tok = a.open.tokens[0];
+    const close_tok = a.close.tokens[0];
+    const seed: []const u8 = switch (a.inner) {
+        .yaml => "",
+        .json => "{}",
+    };
+
+    var host: std.ArrayList(u8) = .empty;
+    errdefer host.deinit(allocator);
+
+    if (a.location == .end) {
+        // [ body ][ \n? ][ open\n ][ seed ][ close\n ]
+        try host.appendSlice(allocator, source);
+        // The open fence must start its own line; add a separating newline when
+        // the body doesn't already end in one.
+        if (source.len > 0 and source[source.len - 1] != '\n') try host.append(allocator, '\n');
+        const open_start = host.items.len;
+        try host.appendSlice(allocator, open_tok);
+        try host.append(allocator, '\n');
+        const content_start = host.items.len;
+        try host.appendSlice(allocator, seed);
+        const content_end = host.items.len;
+        try host.appendSlice(allocator, close_tok);
+        try host.append(allocator, '\n');
+        const close_end = host.items.len;
+        return .{ .host = try host.toOwnedSlice(allocator), .region = .{
+            .open_fence = Span.init(open_start, content_start),
+            .content = Span.init(content_start, content_end),
+            .close_fence = Span.init(content_end, close_end),
+            .body = Span.init(0, source.len),
+        } };
+    }
+    // .start: [ open\n ][ seed ][ close\n ][ body ]
+    try host.appendSlice(allocator, open_tok);
+    try host.append(allocator, '\n');
+    const content_start = host.items.len;
+    try host.appendSlice(allocator, seed);
+    const content_end = host.items.len;
+    try host.appendSlice(allocator, close_tok);
+    try host.append(allocator, '\n');
+    const close_end = host.items.len;
+    const body_start = host.items.len;
+    try host.appendSlice(allocator, source);
+    return .{ .host = try host.toOwnedSlice(allocator), .region = .{
+        .open_fence = Span.init(0, content_start),
+        .content = Span.init(content_start, content_end),
+        .close_fence = Span.init(content_end, close_end),
+        .body = Span.init(body_start, body_start + source.len),
+    } };
+}
+
 /// Parse an explicit content span as `t`'s inner format, no host scanning.
 pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Type) !Document {
     const slice = Span.of(u8, content, source);

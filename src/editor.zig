@@ -133,9 +133,17 @@ pub fn Editor(comptime Language: type) type {
         pub fn set(self: *Self, path: []const AST.PathSegment, value_text: []const u8) !void {
             if (path.len == 0 or std.meta.activeTag(path[path.len - 1]) != .key)
                 return error.NotAMapping;
-            self.replaceValAtPath(path, value_text) catch |err| {
-                if (err != error.NotFound) return err;
-                try self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, value_text);
+            self.replaceValAtPath(path, value_text) catch |replace_err| {
+                // The value isn't there to replace — create it. `insertKey`
+                // re-validates the parent (it must be a mapping, or an empty/null
+                // root it promotes to one), so a genuinely non-mapping parent or a
+                // missing intermediate container still errors; surface the original
+                // replace error when the insert can't proceed either. Falling back
+                // on any replace error (not just `NotFound`) is what lets `set`
+                // seed a freshly-created, still-empty document — where navigating
+                // to the key fails with `NotAMapping`, not `NotFound`.
+                self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, value_text) catch
+                    return replace_err;
             };
         }
 
