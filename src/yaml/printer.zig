@@ -42,7 +42,7 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
         },
         .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
         .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
-        .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth),
+        .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth, false),
         .alias => |name| {
             try writer.writeByte('*');
             try writer.writeAll(name);
@@ -115,25 +115,31 @@ fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id
     var current_id = first_child;
     while (current_id) |id| {
         try leadingComments(writer, document, document.leadingCommentAnchor(id), depth);
-        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth);
+        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth, false);
         current_id = document.nodes[id].next_sibling;
     }
 }
 
 fn printSequenceMapping(writer: *Writer, document: *const AST, first_pair: AST.Node.Id, depth: usize) Writer.Error!void {
-    try printKeyValue(writer, document, document.nodes[first_pair].kind.keyvalue, 0);
+    // Every pair sits one level deeper than the sequence: the `- ` prefix already
+    // occupies that level's two columns. The first pair is written right after the
+    // `- `, so its own leading indent is suppressed (`skip_indent`) — but its base
+    // depth is still `depth + 1`, so a nested block value (mapping/sequence) indents
+    // relative to the key's real column, not the sequence's. Passing `0` here would
+    // emit nested children a level too shallow, turning them into siblings.
+    try printKeyValue(writer, document, document.nodes[first_pair].kind.keyvalue, depth + 1, true);
 
     var current_id = document.nodes[first_pair].next_sibling;
     while (current_id) |id| {
         try leadingComments(writer, document, document.leadingCommentAnchor(id), depth + 1);
-        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth + 1);
+        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth + 1, false);
         current_id = document.nodes[id].next_sibling;
     }
 }
 
-fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usize) Writer.Error!void {
+fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usize, skip_indent: bool) Writer.Error!void {
     const value = document.nodes[kv.value];
-    try writeIndent(writer, depth);
+    if (!skip_indent) try writeIndent(writer, depth);
     try writeProps(writer, document, kv.key); // `&k key:` / `!!str key:`
     try printScalar(writer, document.nodes[kv.key].kind.string);
     switch (value.kind) {
@@ -525,6 +531,63 @@ test "prints YAML document" {
         \\- null
         \\
     , output.written());
+}
+
+test "yaml printer: nested block value on a sequence item's first pair indents under the key" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    // { audience: [ { outer: { inner: 1 } }, { last: 3 } ] }
+    // The nested mapping AND a nested sequence both hang off the FIRST pair of a
+    // sequence-item mapping — the case that previously emitted children a level too
+    // shallow, collapsing them into siblings (`outer: null` + `inner: 1`).
+    const inner = try b.addMapping(&.{.{ .key = try b.addString("inner"), .value = try b.addInt(1) }});
+    const item0 = try b.addMapping(&.{.{ .key = try b.addString("outer"), .value = inner }});
+    const item1 = try b.addMapping(&.{.{ .key = try b.addString("last"), .value = try b.addInt(3) }});
+    const seq = try b.addSequence(&.{ item0, item1 });
+    const root = try b.addMapping(&.{.{ .key = try b.addString("audience"), .value = seq }});
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try print(&out.writer, &ast);
+    try std.testing.expectEqualStrings(
+        \\audience:
+        \\- outer:
+        \\    inner: 1
+        \\- last: 3
+        \\
+    , out.written());
+}
+
+test "yaml printer: nested sequence on a sequence item's first pair indents under the key" {
+    const a = std.testing.allocator;
+    var b = AST.Builder.init(a);
+    defer b.deinit();
+
+    // { audience: [ { outer: [1, 2] } ] } — a nested indentless sequence whose
+    // dashes must sit at the key's column, not escape to the parent sequence's.
+    const nums = try b.addSequence(&.{ try b.addInt(1), try b.addInt(2) });
+    const item0 = try b.addMapping(&.{.{ .key = try b.addString("outer"), .value = nums }});
+    const seq = try b.addSequence(&.{item0});
+    const root = try b.addMapping(&.{.{ .key = try b.addString("audience"), .value = seq }});
+
+    var ast = try b.finish(root);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(a);
+    defer out.deinit();
+    try print(&out.writer, &ast);
+    try std.testing.expectEqualStrings(
+        \\audience:
+        \\- outer:
+        \\  - 1
+        \\  - 2
+        \\
+    , out.written());
 }
 
 /// Build `{ s: value }`, serialize it, and return the owned YAML (caller frees).
