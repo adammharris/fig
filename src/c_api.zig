@@ -3068,6 +3068,22 @@ test "fig_embed_open_or_init opens an existing region unchanged" {
     try std.testing.expectEqualStrings("---\ntitle: New # c\n---\nbody\n", ptr[0..len]);
 }
 
+test "fig_embed_open_or_init creates a JSON (;;;) frontmatter block" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
+    const md = "# Doc\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open_or_init(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_json), &out_fm));
+    defer fig_embed_destroy(out_fm);
+    const title = [_]FigPathSegment{keySeg("title")};
+    const hi = "\"Hi\""; // strict JSON value: a quoted string
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_set(out_fm, &title, 1, hi.ptr, hi.len));
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    // The key is quoted for JSON, and the close fence stays on its own line.
+    try std.testing.expectEqualStrings(";;;\n{\"title\": \"Hi\"}\n;;;\n# Doc\n", ptr[0..len]);
+}
+
 test "fig_embed_open_or_init appends an endmatter block at the bottom" {
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     const md = "# Title\n\nbody text\n";

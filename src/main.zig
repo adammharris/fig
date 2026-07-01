@@ -31,6 +31,7 @@ const CliAction = enum {
     help,
     version,
     edit,
+    set,
     insert,
     delete,
     get,
@@ -55,6 +56,26 @@ const CliActionOptions = union(CliAction) {
         detect: bool = false,
         /// When set, `file` is a host document (e.g. markdown) and edits apply
         /// to the embedded config of this archetype, spliced back in place.
+        embed: ?fig.Embed.Type = null,
+    },
+    set: struct {
+        file: []const u8,
+        /// The target. For a scalar upsert the last segment is the key to
+        /// replace-or-create; for `--seq` it names the sequence to reconcile.
+        path: []fig.AST.PathSegment,
+        /// The value to upsert (unused when `seq` is set).
+        value: []const u8,
+        /// When set, reconcile the sequence at `path` to exactly `values`,
+        /// preserving comments on survivors (the `set_sequence` primitive),
+        /// instead of upserting a single scalar.
+        seq: bool = false,
+        values: []const []const u8 = &.{},
+        requested_help: bool = false,
+        format: Format,
+        detect: bool = false,
+        /// When set, `file` is a host document and the upsert targets the
+        /// embedded config of this archetype — creating the block (open-or-init)
+        /// when the host has none.
         embed: ?fig.Embed.Type = null,
     },
     insert: struct {
@@ -111,6 +132,10 @@ const CliActionOptions = union(CliAction) {
         /// When set, the input is extracted from a host document of this
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
+        /// When set, print the host *body* (the prose outside the fences) of the
+        /// embed archetype instead of converting its content. Demonstrates the
+        /// region's `body` span; ignored when there is no embed.
+        body: bool = false,
         /// Output style. `--compact` clears `pretty` for a single-line render;
         /// `--indent N` sets the indent width; `--width N` sets TOML's inline-vs-
         /// expanded column budget. Honored by JSON (pretty + indent), ZON (pretty),
@@ -177,6 +202,12 @@ const EditOp = union(enum) {
     /// Insert `key: text` into the mapping at `path`. The payload is the new
     /// key's text; the value rides in `applyEdit`'s `text` argument.
     insert_key: []const u8,
+    /// Upsert the value at `path`: replace it, or insert the trailing key when
+    /// only it is absent. `text` is the value; `path` ends in the key.
+    set,
+    /// Reconcile the sequence at `path` to exactly `items`, preserving the
+    /// comments on items that survive (`text` unused).
+    set_sequence: []const []const u8,
     /// Append `text` as a new last item to the sequence at `path`.
     append_seq,
     /// Insert `text` as the new first item of the sequence at `path`.
@@ -209,6 +240,7 @@ const Help = struct {
             \\  help: prints this text (default action)
             \\  version: prints version number
             \\  edit: edits part of file
+            \\  set: upsert a value (create the key, or the embed block, if absent)
             \\  insert: add a new key or list item to a file
             \\  delete: remove a key or list item from a file
             \\  get: print a file or a specific part of a file to stdout
@@ -231,6 +263,31 @@ const Help = struct {
             \\  .md/.markdown files: edits the YAML frontmatter in place
             \\
         , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn set(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} set [--embed <archetype>] <file> <path> <value>
+            \\       {s} set [--embed <archetype>] --seq <file> <path> <item>...
+            \\  Upsert: replace the value at <path>, or create it when only the
+            \\    trailing key is absent — one verb for `edit`+`insert`.
+            \\  --seq: reconcile the sequence at <path> to exactly <item>..., keeping
+            \\    the comments on items that survive (only new items are inserted,
+            \\    only dropped ones removed; result order matches the arguments).
+            \\  --embed <archetype>: target an embedded region of a host file —
+            \\    `frontmatter` (---/YAML, the .md default), `frontmatter-json`
+            \\    (;;;/JSON), or `endmatter` (trailing ```endmatter block). When the
+            \\    host has no such block, it is CREATED (frontmatter at the top,
+            \\    endmatter at the bottom) and seeded with <path>: <value>.
+            \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON
+            \\    is quoted as a string, as with `edit`). A created key is rendered
+            \\    in the target syntax too, so new keys work for strict JSON.
+            \\  path format: dot syntax for keys, bracket syntax for indices
+            \\    example: school.class[0].student[3]
+            \\  .md/.markdown files: upserts the YAML frontmatter, creating it if absent.
+            \\
+        , .{ binary_name, binary_name });
         try term.writer.flush();
     }
 
@@ -319,6 +376,10 @@ const Help = struct {
             \\    --lossy (the default) emits clean, idiomatic output instead.
             \\  -q, --quiet: suppress the lossy-conversion warnings on stderr.
             \\  --strict: treat any lossy conversion as an error (exit non-zero).
+            \\  --embed <archetype>: read an embedded region of a host file —
+            \\    `frontmatter` (the .md default), `frontmatter-json`, or `endmatter`.
+            \\  --body: print the host prose OUTSIDE the fences (the body span) instead
+            \\    of the embed content; the whole file when there is no such region.
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: reads the YAML frontmatter
@@ -381,6 +442,10 @@ pub fn main(init: std.process.Init) !void {
         },
         ArgError.MissingEditArgument => {
             try Help.edit(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingSetArgument => {
+            try Help.set(&stderr_terminal, "fig");
             std.process.exit(2);
         },
         ArgError.MissingInsertArgument => {
@@ -465,6 +530,29 @@ pub fn main(init: std.process.Init) !void {
                 .gron => return error.UnsupportedGronEdit,
             }
         },
+        .set => {
+            const opts = config.options.set;
+            if (opts.requested_help) {
+                try Help.set(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const a = init.arena.allocator();
+            const input = try getInput(io, opts.file, .read_write);
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            if (opts.path.len == 0) {
+                try stderr_terminal.writer.print("error: set needs a path to the key (or, with --seq, the sequence) to upsert.\n", .{});
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+            const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+            // `--seq` reconciles the sequence at `path`; otherwise upsert a scalar.
+            // Both flow through the shared structural-edit router, so the embed
+            // path (which open-or-inits a missing block) is reused for free.
+            const op: EditOp = if (opts.seq) .{ .set_sequence = opts.values } else .set;
+            const text: []const u8 = if (opts.seq) "" else opts.value;
+            try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, text, op);
+        },
         .insert => {
             const opts = config.options.insert;
             if (opts.requested_help) {
@@ -534,6 +622,22 @@ pub fn main(init: std.process.Init) !void {
             }
             const input = try getInput(io, opts.file, .read_only);
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
+            // `--body`: print the host prose OUTSIDE the fences (the region's
+            // `body` span) — the complement of extracting the embed content. With
+            // no such region the whole file is the body.
+            if (opts.body) {
+                const embed_type = opts.embed orelse fig.Embed.Type.FrontmatterYaml;
+                const content = try readAll(init.arena.allocator(), io, input);
+                if (fig.Embed.locateRegion(content, embed_type)) |region| {
+                    try stdout_terminal.writer.writeAll(content[region.body.start..region.body.end]);
+                } else |err| switch (err) {
+                    error.NotFound => try stdout_terminal.writer.writeAll(content),
+                    else => return err,
+                }
+                try stdout_terminal.writer.flush();
+                return;
+            }
 
             // Resolved input/output formats. They equal the parsed options unless
             // the input format has to be sniffed from the file's contents (no
@@ -999,6 +1103,8 @@ fn applyEdit(
         .delete_leading_comments => try editor.deleteLeadingComments(path),
         .delete_trailing_comment => try editor.deleteTrailingComment(path),
         .insert_key => |key| try editor.insertKey(path, key, text),
+        .set => try editor.set(path, text),
+        .set_sequence => |items| try editor.setSequence(path, items),
         .append_seq => try editor.appendToSeq(path, text),
         .prepend_seq => try editor.prependToSeq(path, text),
         .delete_key => try editor.deleteKey(path),
@@ -1108,10 +1214,28 @@ fn applyToEmbed(
     const content = try readAll(allocator, io, file);
     defer allocator.free(content);
 
-    const embedded = try fig.Embed.extract(allocator, content, embed_type);
-    defer embedded.deinit(allocator);
-    const region = embedded.region;
-    const inner = content[region.content.start..region.content.end];
+    // Locate the region; when it's absent and the op can seed a fresh block
+    // (`set` / insert-a-key), synthesize an empty one — the CLI's open-or-init.
+    // `base` is the document the edited content splices back into: the original
+    // file, or the synthesized host carrying the new empty block.
+    var base: []const u8 = content;
+    var created_host: ?[]u8 = null;
+    defer if (created_host) |h| allocator.free(h);
+    const region = reg: {
+        if (fig.Embed.locateRegion(content, embed_type)) |r| {
+            break :reg r;
+        } else |err| switch (err) {
+            error.NotFound => {
+                if (!opSeedsEmptyRegion(op)) return err;
+                const created = try fig.Embed.initRegion(allocator, content, embed_type);
+                created_host = created.host;
+                base = created.host;
+                break :reg created.region;
+            },
+            else => return err,
+        }
+    };
+    const inner = base[region.content.start..region.content.end];
 
     const edited_inner = switch (embed_type) {
         .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
@@ -1129,12 +1253,22 @@ fn applyToEmbed(
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
-    try out.appendSlice(allocator, content[0..region.content.start]);
+    try out.appendSlice(allocator, base[0..region.content.start]);
     try out.appendSlice(allocator, edited_inner);
-    try out.appendSlice(allocator, content[region.content.end..]);
+    try out.appendSlice(allocator, base[region.content.end..]);
 
     try file.writePositionalAll(io, out.items, 0);
     try file.setLength(io, out.items.len);
+}
+
+/// Whether `op` can seed a freshly-created empty embed region — only the ops
+/// that establish a first entry (`set` upserts it; `insert_key` adds it). Other
+/// ops (replace/delete/comment/sequence) require an already-present region.
+fn opSeedsEmptyRegion(op: EditOp) bool {
+    return switch (op) {
+        .set, .insert_key => true,
+        else => false,
+    };
 }
 
 /// Recast an edit for a JSON-family target: strict JSON has no bare literals,
@@ -1143,12 +1277,18 @@ fn applyToEmbed(
 /// pass through untouched. Returns the (possibly requoted) text and op.
 fn jsonifyEdit(allocator: std.mem.Allocator, op: EditOp, text: []const u8) !struct { text: []const u8, op: EditOp } {
     const text_out = switch (op) {
-        .replace_value, .replace_key, .insert_key, .append_seq, .prepend_seq => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
-        // Comment ops and structural deletes carry no value text.
-        .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment, .delete_key, .remove_seq_item => text,
+        .replace_value, .replace_key, .insert_key, .set, .append_seq, .prepend_seq => try std.fmt.allocPrint(allocator, "\"{s}\"", .{text}),
+        // `set_sequence` carries its items in the op payload (requoted below);
+        // comment ops and structural deletes carry no value text.
+        .set_sequence, .add_leading_comment, .set_trailing_comment, .delete_leading_comments, .delete_trailing_comment, .delete_key, .remove_seq_item => text,
     };
     const op_out: EditOp = switch (op) {
         .insert_key => |key| .{ .insert_key = try std.fmt.allocPrint(allocator, "\"{s}\"", .{key}) },
+        .set_sequence => |items| blk: {
+            const quoted = try allocator.alloc([]const u8, items.len);
+            for (items, 0..) |it, i| quoted[i] = try std.fmt.allocPrint(allocator, "\"{s}\"", .{it});
+            break :blk .{ .set_sequence = quoted };
+        },
         else => op,
     };
     return .{ .text = text_out, .op = op_out };
@@ -1304,7 +1444,20 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     return .{ .format = format, .embed = null };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+/// Map a `--embed <archetype>` flag value to its `Embed.Type`. Lets any
+/// embed-capable action target a region explicitly — not just the markdown-
+/// extension default of YAML frontmatter — so endmatter and JSON frontmatter are
+/// reachable. Returns null for an unknown name.
+fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
+    if (std.mem.eql(u8, name, "frontmatter") or std.mem.eql(u8, name, "frontmatter-yaml"))
+        return .FrontmatterYaml;
+    if (std.mem.eql(u8, name, "frontmatter-json")) return .FrontmatterJson;
+    if (std.mem.eql(u8, name, "endmatter") or std.mem.eql(u8, name, "endmatter-yaml"))
+        return .EndmatterYaml;
+    return null;
+}
+
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 /// Map a `--input`/`-i` format name to a `Format`. Accepts every CLI format
 /// plus the `fig` alias for the native grammar. Returns null for an unknown
@@ -1379,6 +1532,64 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .detect = !requested_help and ext == null,
             .embed = if (ext) |d| d.embed else null,
         } };
+    } else if (std.mem.eql(u8, action_str, "set") or std.mem.eql(u8, action_str, "s")) {
+        config.action = .set;
+
+        // Leading flags in any order: `--seq`, `--embed <archetype>`, `--help`.
+        // Positionals follow: file, path, then the value (or, with `--seq`, the
+        // sequence items).
+        var seq = false;
+        var embed_override: ?fig.Embed.Type = null;
+        var requested_help = false;
+        var positionals: std.ArrayList([]const u8) = .empty;
+        defer positionals.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                requested_help = true;
+            } else if (std.mem.eql(u8, arg, "--seq")) {
+                seq = true;
+            } else if (std.mem.eql(u8, arg, "--embed")) {
+                const name = args.next() orelse {
+                    log.err("Missing archetype after {s}\n", .{arg});
+                    return ArgError.MissingSetArgument;
+                };
+                embed_override = embedTypeFromName(name) orelse {
+                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, endmatter)\n", .{name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else {
+                try positionals.append(allocator, arg);
+            }
+        }
+
+        if (requested_help) {
+            config.options = .{ .set = .{ .file = "", .path = &.{}, .value = "", .requested_help = true, .format = .json } };
+        } else {
+            // Need file, path, and at least one value (a scalar, or one or more
+            // sequence items with `--seq`).
+            if (positionals.items.len < 3) {
+                log.err("set needs a file, a path, and a value (e.g. `fig set f.yaml a.b 1`).\n", .{});
+                return ArgError.MissingSetArgument;
+            }
+            const file_path = positionals.items[0];
+            const path = try parsePath(allocator, positionals.items[1]);
+            const ext = detectLanguageFromFileEnding(file_path);
+            const embed = embed_override orelse (if (ext) |d| d.embed else null);
+            config.options = .{ .set = .{
+                .file = file_path,
+                .path = path,
+                .value = if (seq) "" else positionals.items[2],
+                .seq = seq,
+                .values = if (seq) try allocator.dupe([]const u8, positionals.items[2..]) else &.{},
+                .requested_help = false,
+                .format = if (ext) |d| d.format else .json,
+                // Skip content sniffing when targeting an embed (the inner format
+                // is fixed by the archetype) or when the extension resolved it.
+                .detect = ext == null and embed == null,
+                .embed = embed,
+            } };
+        }
     } else if (std.mem.eql(u8, action_str, "insert") or std.mem.eql(u8, action_str, "i")) {
         config.action = .insert;
 
@@ -1506,6 +1717,9 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         var lossless = false;
         var quiet = false;
         var strict = false;
+        // Explicit `--embed <archetype>` override and `--body` projection.
+        var embed_override: ?fig.Embed.Type = null;
+        var body = false;
         var serialize: fig.AST.SerializeOptions = .{};
         // gron projection overrides; null means "keep the gron default".
         var gron_root: ?[]const u8 = null;
@@ -1547,6 +1761,17 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 quiet = true;
             } else if (std.mem.eql(u8, arg, "--strict")) {
                 strict = true;
+            } else if (std.mem.eql(u8, arg, "--embed")) {
+                const name = args.next() orelse {
+                    log.err("Missing archetype after {s}\n", .{arg});
+                    return ArgError.MissingGetArgument;
+                };
+                embed_override = embedTypeFromName(name) orelse {
+                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, endmatter)\n", .{name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--body")) {
+                body = true;
             } else if (std.mem.eql(u8, arg, "--indent")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});
@@ -1643,7 +1868,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
         // real format is known.
         const needs_detect = !requested_help and input_override == null and detected_input == null;
         const input_format = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
-        const embed = if (detected_input) |d| d.embed else null;
+        // An explicit `--embed` archetype wins over the extension-inferred one.
+        const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
 
         var gron_projection: gron.Projection = .gron;
         if (gron_root) |r| gron_projection.root_name = r;
@@ -1661,6 +1887,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .lax_tags = lax_tags,
             .lossless = lossless,
             .embed = embed,
+            .body = body,
             .serialize = serialize,
             .quiet = quiet,
             .strict = strict,
@@ -1815,6 +2042,43 @@ test "applyEdit performs the structural ops on YAML" {
     }
 }
 
+test "applyEdit set upserts a scalar and reconciles a sequence on YAML" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const t = std.testing;
+    const Y = fig.Language.YAML;
+    const dia = Y.default_type;
+
+    // set replaces an existing key …
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "a" }};
+        const out = try applyEdit(Y, t.allocator, "a: 1\nb: 2\n", &p, "9", .set, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("a: 9\nb: 2\n", out);
+    }
+    // … and creates an absent one.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "c" }};
+        const out = try applyEdit(Y, t.allocator, "a: 1\n", &p, "3", .set, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("a: 1\nc: 3\n", out);
+    }
+    // set on an empty document seeds the first key — the open-or-init seed case.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "k" }};
+        const out = try applyEdit(Y, t.allocator, "", &p, "v", .set, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("k: v\n", out);
+    }
+    // set_sequence reconciles to the target list, keeping survivors' comments.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "tags" }};
+        const items = [_][]const u8{ "c", "a", "d" };
+        const out = try applyEdit(Y, t.allocator, "tags:\n- a # first\n- b # second\n- c # third\n", &p, "", .{ .set_sequence = &items }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("tags:\n- c # third\n- a # first\n- d\n", out);
+    }
+}
+
 test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -1831,6 +2095,53 @@ test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
     const del = try jsonifyEdit(a, .delete_key, "");
     try t.expectEqualStrings("", del.text);
     try t.expectEqual(EditOp.delete_key, del.op);
+
+    // set quotes its value; set_sequence requotes each item.
+    const s = try jsonifyEdit(a, .set, "v");
+    try t.expectEqualStrings("\"v\"", s.text);
+    try t.expectEqual(EditOp.set, s.op);
+
+    const items = [_][]const u8{ "x", "y" };
+    const sq = try jsonifyEdit(a, .{ .set_sequence = &items }, "");
+    try t.expectEqualStrings("\"x\"", sq.op.set_sequence[0]);
+    try t.expectEqualStrings("\"y\"", sq.op.set_sequence[1]);
+}
+
+test "embedTypeFromName maps archetype names" {
+    const t = std.testing;
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter"));
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter-yaml"));
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterJson), embedTypeFromName("frontmatter-json"));
+    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), embedTypeFromName("endmatter"));
+    try t.expectEqual(@as(?fig.Embed.Type, null), embedTypeFromName("bogus"));
+}
+
+test "parseConfig routes set, --seq, and --embed" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Scalar upsert: path + value captured, format from extension.
+    var s = TestArgs{ .items = &.{ "fig", "set", "f.yaml", "a.b", "1" } };
+    const sc = try parseConfig(a, &s);
+    try t.expectEqual(CliAction.set, sc.action);
+    try t.expectEqualStrings("b", sc.options.set.path[1].key);
+    try t.expectEqualStrings("1", sc.options.set.value);
+    try t.expect(!sc.options.set.seq);
+    try t.expectEqual(Format.yaml, sc.options.set.format);
+
+    // --seq collects the trailing items into `values`.
+    var sq = TestArgs{ .items = &.{ "fig", "set", "--seq", "f.yaml", "tags", "x", "y", "z" } };
+    const sqc = try parseConfig(a, &sq);
+    try t.expect(sqc.options.set.seq);
+    try t.expectEqual(@as(usize, 3), sqc.options.set.values.len);
+    try t.expectEqualStrings("z", sqc.options.set.values[2]);
+
+    // --embed selects the archetype explicitly (endmatter here).
+    var em = TestArgs{ .items = &.{ "fig", "set", "--embed", "endmatter", "post.md", "k", "v" } };
+    const emc = try parseConfig(a, &em);
+    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), emc.options.set.embed);
 }
 
 test "resolveSpec maps YAML version strings" {

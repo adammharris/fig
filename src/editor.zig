@@ -7,6 +7,7 @@ const AST = @import("ast/ast.zig");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
 const json = @import("json/json.zig");
+const json_string = @import("util/json_string.zig");
 const log = std.log.scoped(.editor);
 
 // Format-specific editing logic the generic engine delegates to from its
@@ -122,29 +123,45 @@ pub fn Editor(comptime Language: type) type {
         /// Delegates to `replaceValAtPath`, so the replace case inherits that
         /// op's YAML value reframing (inline↔block) and merge-key COW.
         ///
-        /// Key duality, when the insert branch fires: the replace branch matches
-        /// the trailing segment *logically* (against decoded key names), but the
-        /// insert splices it *verbatim* as the new key's bytes — exactly
-        /// `insertKey`'s literal-key contract. For YAML/TOML/ZON a simple key's
-        /// logical name and its written form coincide, so this is seamless; for
-        /// strict JSON (which quotes keys) the two differ, so creating a
-        /// not-yet-present key via `set` is not supported there. The replace case
-        /// works for every format.
+        /// Key duality: the replace branch matches the trailing segment
+        /// *logically* (against decoded key names), but the insert branch needs
+        /// the key as *syntax*. `set` bridges the two — when it inserts, it
+        /// renders the logical key into the format's key syntax (quoting/escaping
+        /// it for strict JSON, verbatim for YAML/TOML where a simple key already
+        /// is its own syntax) — so creating a not-yet-present key works for every
+        /// editable format, JSON included.
         pub fn set(self: *Self, path: []const AST.PathSegment, value_text: []const u8) !void {
             if (path.len == 0 or std.meta.activeTag(path[path.len - 1]) != .key)
                 return error.NotAMapping;
             self.replaceValAtPath(path, value_text) catch |replace_err| {
-                // The value isn't there to replace — create it. `insertKey`
-                // re-validates the parent (it must be a mapping, or an empty/null
-                // root it promotes to one), so a genuinely non-mapping parent or a
-                // missing intermediate container still errors; surface the original
-                // replace error when the insert can't proceed either. Falling back
-                // on any replace error (not just `NotFound`) is what lets `set`
-                // seed a freshly-created, still-empty document — where navigating
-                // to the key fails with `NotAMapping`, not `NotFound`.
-                self.insertKey(path[0 .. path.len - 1], path[path.len - 1].key, value_text) catch
+                // The value isn't there to replace — create it. The trailing key
+                // is logical (it just matched against decoded names), so render it
+                // into the format's key syntax before splicing. `insertKey`
+                // re-validates the parent (a mapping, or an empty/null root it
+                // promotes), so a non-mapping parent or missing intermediate still
+                // errors; surface the original replace error when the insert can't
+                // proceed. Falling back on any replace error (not just `NotFound`)
+                // is what lets `set` seed a freshly-created, still-empty document —
+                // where navigating to the key fails with `NotAMapping`.
+                const key_text = try self.formatInsertKey(path[path.len - 1].key);
+                defer self.allocator.free(key_text);
+                self.insertKey(path[0 .. path.len - 1], key_text, value_text) catch
                     return replace_err;
             };
+        }
+
+        /// Render a logical mapping key into this format's key syntax for the
+        /// `set` insert branch. Strict-JSON-family keys must be quoted and escaped
+        /// (`b` → `"b"`); YAML/TOML/ZON splice the key verbatim, as `insertKey`'s
+        /// other callers do. Always returns an owned slice (the caller frees it).
+        fn formatInsertKey(self: *Self, key: []const u8) ![]u8 {
+            if (comptime Language == json.Language) {
+                var w = std.Io.Writer.Allocating.init(self.allocator);
+                defer w.deinit();
+                try json_string.writeQuoted(&w.writer, key);
+                return self.allocator.dupe(u8, w.written());
+            }
+            return self.allocator.dupe(u8, key);
         }
 
         /// Like `replaceValAtPath`, but follow into the reference layer: when the
@@ -379,7 +396,7 @@ pub fn Editor(comptime Language: type) type {
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
-                        try self.insertFlowEntry(span, first != null, key_text, value_text);
+                        try self.insertFlowMapEntry(parsed, node, span, first != null, key_text, value_text);
                     } else {
                         try self.insertBlockKey(parsed, node, key_text, value_text);
                     }
@@ -1011,6 +1028,38 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(null_span, out.items);
         }
 
+        /// Insert a `key: value` entry into a brace-delimited (flow) mapping,
+        /// matching its layout. A pretty-printed mapping — one whose closing `}`
+        /// sits on its own line below the members — gets the new entry on its own
+        /// line, indented to match the existing members (a trailing comma after
+        /// the last member's value, newline, member indent, `key: value`). A
+        /// compact single-line mapping keeps the inline `", key: value"` style.
+        fn insertFlowMapEntry(self: *Self, parsed: Document, node: AST.Node, span: Span, non_empty: bool, key_text: []const u8, value_text: []const u8) !void {
+            const source = self.source.items;
+            if (non_empty) {
+                const last = (try parsed.ast.lastChild(&node)).?;
+                const last_end = parsed.span(last).end;
+                const close = span.end - 1; // the '}'
+                // Multi-line layout: the closing brace is separated from the last
+                // member by a newline. Splice after the last member's value so the
+                // new entry lands on its own line, not jammed before the brace.
+                if (std.mem.indexOfScalar(u8, source[last_end..close], '\n') != null) {
+                    const key_node = (try parsed.ast.firstChildKey(&node)).?;
+                    const col = columnOf(source, parsed.span(key_node).start);
+                    var out: std.ArrayList(u8) = .empty;
+                    defer out.deinit(self.allocator);
+                    try out.appendSlice(self.allocator, ",\n");
+                    try out.appendNTimes(self.allocator, ' ', col);
+                    try out.appendSlice(self.allocator, key_text);
+                    try out.appendSlice(self.allocator, ": ");
+                    try out.appendSlice(self.allocator, value_text);
+                    try self.replaceAtSpan(Span.init(last_end, last_end), out.items);
+                    return;
+                }
+            }
+            return self.insertFlowEntry(span, non_empty, key_text, value_text);
+        }
+
         fn insertFlowEntry(self: *Self, span: Span, non_empty: bool, key_text: []const u8, value_text: []const u8) !void {
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
@@ -1407,6 +1456,22 @@ test "comment ops on JSONC use // and respect indentation" {
     );
 }
 
+test "set inserts into a pretty-printed JSON object on its own line, indented" {
+    var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
+    try ed.init("{\n  \"a\": 1,\n  \"b\": 2\n}");
+    defer ed.deinit();
+    try ed.set(&.{.{ .key = "c" }}, "3");
+    try testing.expectEqualStrings("{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}", ed.source.items);
+}
+
+test "set keeps compact single-line JSON objects inline" {
+    var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
+    try ed.init("{\"a\": 1, \"b\": 2}");
+    defer ed.deinit();
+    try ed.set(&.{.{ .key = "c" }}, "3");
+    try testing.expectEqualStrings("{\"a\": 1, \"b\": 2, \"c\": 3}", ed.source.items);
+}
+
 test "comment ops are rejected for strict JSON" {
     var ed: Editor(json.Language) = .{ .allocator = testing.allocator, .format = .JSON };
     try ed.init("{\"a\":1}");
@@ -1626,8 +1691,15 @@ test "set reframes a YAML value inline->block on replace" {
 
 test "set replaces an existing JSON value (replace branch is format-agnostic)" {
     // The replace branch matches keys logically, so it works for strict JSON.
-    // (Creating a *new* JSON key via set is not supported — see the doc comment.)
     try expectSet(json.Language, .JSON, "{\"a\": 1}", &.{.{ .key = "a" }}, "\"x\"", "{\"a\": \"x\"}");
+}
+
+test "set creates a new JSON key, quoting it for the format" {
+    // The insert branch renders the logical key into JSON syntax (`b` -> `"b"`),
+    // so creating a not-yet-present key produces valid JSON.
+    try expectSet(json.Language, .JSON, "{\"a\": 1}", &.{.{ .key = "b" }}, "2", "{\"a\": 1, \"b\": 2}");
+    // A key needing escaping is escaped, not spliced raw.
+    try expectSet(json.Language, .JSON, "{}", &.{.{ .key = "a\"b" }}, "1", "{\"a\\\"b\": 1}");
 }
 
 test "set rejects a path that does not end in a key" {

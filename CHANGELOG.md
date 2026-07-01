@@ -39,6 +39,12 @@ New:
   (frontmatter at the top, endmatter at the bottom) — when the host has none, so
   the first `set`/`insert` lands the opening entry without a separate
   reserialize. Generic over `EmbedType`.
+- CLI: `fig set <file> <path> <value>` — upsert (replace, or create the key when
+  absent); on a host document with `--embed`, it creates the block too
+  (open-or-init). `--seq <item>...` reconciles a sequence in place, preserving
+  comments on survivors. `--embed <frontmatter|frontmatter-json|endmatter>` makes
+  the embed archetype explicit (not just the `.md` frontmatter default) for both
+  `set` and `get`. `fig get --body` prints the host prose outside the fences.
 - Support for YAML 1.1
 - `fig check` command for validating config files
 - Versioning policy with `zig build check`

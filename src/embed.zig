@@ -167,9 +167,13 @@ pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialize
     const a = archetypeOf(t);
     const open_tok = a.open.tokens[0];
     const close_tok = a.close.tokens[0];
+    // The empty inner document seeded between the fences. JSON gets a trailing
+    // newline so the close fence stays on its own line after the flow-mapping
+    // insert (which preserves it); YAML's block insert emits its own newline, so
+    // its empty content needs none.
     const seed: []const u8 = switch (a.inner) {
         .yaml => "",
-        .json => "{}",
+        .json => "{}\n",
     };
 
     var host: std.ArrayList(u8) = .empty;
