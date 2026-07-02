@@ -10,8 +10,14 @@ pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
 /// Serialization diagnostics: report what a cross-format conversion would lose.
 pub const Diagnostics = @import("diagnostics.zig");
-/// The native "fig" format: the AST's own 1:1 canonical text encoding.
-pub const Native = @import("native/native.zig");
+/// The canonical form: the AST's own 1:1, total, bijective text encoding — the
+/// comparison oracle and lossless serialization. (Formerly "native".) The
+/// human-facing `fig` authoring dialect is a separate surface over the same AST;
+/// see DESIGN.md.
+pub const Canonical = @import("canonical/canonical.zig");
+/// Deprecated alias for `Canonical`; kept so existing Zig consumers (the Diaryx
+/// git dep) keep building. Prefer `Canonical`.
+pub const Native = Canonical;
 
 /// Reflection-based deserialization into native Zig types (à la `std.json`).
 pub const deserialize = @import("deserialize.zig");
@@ -29,7 +35,7 @@ test {
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
     _ = @import("diagnostics.zig");
-    _ = @import("native/native.zig");
+    _ = @import("canonical/canonical.zig");
     _ = @import("deserialize.zig");
     _ = @import("c_api.zig");
     _ = @import("util/util.zig");

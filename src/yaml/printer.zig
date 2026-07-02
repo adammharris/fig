@@ -514,7 +514,7 @@ test "a comment on a key: line with a block value rides the key line" {
 test "prints YAML document" {
     // Native is the AST-literal syntax here — this test's subject is YAML
     // printing, not JSON reading.
-    const Parser = @import("../native/parser.zig");
+    const Parser = @import("../canonical/parser.zig");
     const input = "{\"name\":\"Ada\",\"tags\":[\"zig\",true,null]}";
     var doc = try Parser.parseAbstract(std.testing.allocator, input);
     defer doc.deinit();

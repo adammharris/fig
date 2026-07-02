@@ -16,12 +16,14 @@ const JsonPrinter = if (build_options.lang_json) @import("../json/printer.zig") 
 const YamlPrinter = if (build_options.lang_yaml) @import("../yaml/printer.zig") else void;
 const TomlPrinter = if (build_options.lang_toml) @import("../toml/printer.zig") else void;
 const ZonPrinter = if (build_options.lang_zon) @import("../zon/printer.zig") else void;
-// The native format is the AST's own 1:1 encoding — always compiled in (no
+// The canonical form is the AST's own 1:1 encoding — always compiled in (no
 // language gate), so it needs no `void` fallback or comptime guard below.
-const NativePrinter = @import("../native/printer.zig");
+const CanonicalPrinter = @import("../canonical/printer.zig");
 
-/// The canonical output format families.
-pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, native };
+/// The canonical output format families. `canonical` (formerly `native`) is the
+/// AST's own 1:1 oracle encoding; the human-facing `fig` authoring dialect is a
+/// separate surface not yet wired here (see DESIGN.md).
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, canonical };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -76,7 +78,7 @@ pub const SerializeError = Writer.Error || error{
     NullUnsupported, // a `null` reached a format with no null type (TOML)
     NonStringKey, // a mapping key was not a string (TOML, ZON)
     FormatDisabled, // the target format was compiled out of this build
-    NestingTooDeep, // container nesting exceeded the native printer's depth guard
+    NestingTooDeep, // container nesting exceeded the canonical printer's depth guard
 };
 
 /// Render the whole AST to `writer` in the given format, using default options.
@@ -96,7 +98,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.print(writer, ast) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
-        .native => NativePrinter.print(writer, ast),
+        .canonical => CanonicalPrinter.print(writer, ast),
     };
 }
 
@@ -116,6 +118,6 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
-        .native => NativePrinter.printNode(writer, ast, id, 0),
+        .canonical => CanonicalPrinter.printNode(writer, ast, id, 0),
     };
 }

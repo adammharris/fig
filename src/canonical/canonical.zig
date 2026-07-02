@@ -1,8 +1,11 @@
-//! The native "fig" format: a total, 1:1 text encoding of the AST.
+//! The canonical form: a total, 1:1 text encoding of the AST.
 //!
-//! It is the AST's own canonical serialization — a bijection with `ast.zig`'s
-//! `Node.Kind` plus the YAML reference layer — so any document round-trips
-//! through it unchanged. Two roles:
+//! (Formerly "native". This is the AST's own oracle serialization, NOT the
+//! human-facing `fig` authoring dialect — that is a separate, ergonomic surface
+//! over the same AST, specified in DESIGN.md and living under `src/fig_format/`.)
+//!
+//! It is a bijection with `ast.zig`'s `Node.Kind` plus the YAML reference layer,
+//! so any document round-trips through it unchanged. Two roles:
 //!   * default/debug representation (`Printer.print`), available without any
 //!     format-specific codec;
 //!   * comparison oracle: serialize two documents to native text and compare.

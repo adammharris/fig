@@ -1,4 +1,6 @@
-//! The native "fig" parser: text → AST, the exact inverse of `native/printer.zig`.
+//! The canonical-form parser: text → AST, the exact inverse of
+//! `canonical/printer.zig`. (This "canonical form" was formerly called "native";
+//! the human-facing `fig` authoring dialect is a separate surface — see DESIGN.md.)
 //!
 //! Recursive-descent over the byte stream (the grammar is small enough that the
 //! token framework the format parsers share would be overkill). It reconstructs
@@ -348,7 +350,7 @@ fn parseMapping(self: *Parser) ParserError!AST.Node.Id {
     while (true) {
         const key = try self.parseNode();
         // An entry's leading comment sits above the key; its trailing comment
-        // follows the value. This mirrors the native printer's anchors.
+        // follows the value. This mirrors the canonical printer's anchors.
         try self.claimLeading(key);
         self.skipWs();
         if (self.peek() != ':') return error.ExpectedColon;

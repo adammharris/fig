@@ -235,8 +235,8 @@ const Loss = struct { code: Warning.Code, note: []const u8 };
 /// Lossless suppression is the caller's concern (`checkValue`).
 fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
     switch (format) {
-        // Native is the lossless oracle: every kind round-trips.
-        .native => return null,
+        // Canonical is the lossless oracle: every kind round-trips.
+        .canonical => return null,
         // Plain JSON / JSONC: no datetimes, enums, chars; non-finite floats quote.
         .json, .jsonc => switch (kind) {
             .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
@@ -306,20 +306,20 @@ fn dropNote(kind: AST.Node.Kind) []const u8 {
 }
 
 /// Whether `format` emits comments at all in this mode. Plain JSON never does;
-/// JSON5/JSONC/ZON only in pretty (multi-line) output; YAML/TOML/native always.
+/// JSON5/JSONC/ZON only in pretty (multi-line) output; YAML/TOML/canonical always.
 fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
         .json => false,
         .json5, .jsonc, .zon => pretty,
-        .yaml, .toml, .native => true,
+        .yaml, .toml, .canonical => true,
     };
 }
 
 /// Whether `format` has block-comment syntax (`/* … */`). Only the JSON5 family
-/// and native do; YAML/TOML/ZON degrade a block comment to a line run.
+/// and canonical do; YAML/TOML/ZON degrade a block comment to a line run.
 fn blockComments(format: Format) bool {
     return switch (format) {
-        .json5, .jsonc, .native => true,
+        .json5, .jsonc, .canonical => true,
         .json, .yaml, .toml, .zon => false,
     };
 }
@@ -366,7 +366,7 @@ test "null dropped for TOML, not for JSON/YAML" {
     try testing.expectEqual(@as(usize, 0), json.len);
 }
 
-test "datetime degrades to JSON, native to TOML" {
+test "datetime degrades to JSON, canonical to TOML" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

@@ -1,10 +1,12 @@
-//! The native "fig" printer: a total, 1:1 text encoding of the AST.
+//! The canonical-form printer: a total, 1:1 text encoding of the AST.
+//! (Formerly "native"; the human-facing `fig` authoring dialect is separate — see
+//! DESIGN.md.)
 //!
 //! Unlike the format printers (JSON/YAML/TOML/ZON), this one is a *bijection*
 //! with the AST — every `Node.Kind` arm and the YAML reference layer (anchors,
 //! tags, aliases) has an unambiguous surface form, so any AST round-trips
 //! through it unchanged. It is the default/debug representation and the
-//! comparison oracle: canonicalize two documents to native text and `strcmp`.
+//! comparison oracle: canonicalize two documents to canonical text and `strcmp`.
 //!
 //! Grammar (informal):
 //!   node      ::= prefix* value
@@ -28,22 +30,22 @@ const AST = @import("../ast/ast.zig");
 const json_string = @import("../util/json_string.zig");
 const Writer = std.Io.Writer;
 
-/// The native encoding is total over every AST *node kind* — it rejects no
+/// The canonical encoding is total over every AST *node kind* — it rejects no
 /// variant. The only failures are the underlying writer's and `NestingTooDeep`,
 /// a recursion guard: a pathologically nested AST (e.g. a fuzzer feeding the
 /// oracle, or a hand-built `Builder` tree) would otherwise overflow the stack.
-/// `max_depth` matches the native parser's guard, so any AST the parser accepts
+/// `max_depth` matches the canonical parser's guard, so any AST the parser accepts
 /// prints without hitting it.
 pub const Error = Writer.Error || error{NestingTooDeep};
 
-/// Maximum container-nesting depth, shared with `native/parser.zig`. Bounds the
+/// Maximum container-nesting depth, shared with `canonical/parser.zig`. Bounds the
 /// recursion in both directions of the bijection.
 pub const max_depth = 512;
 
 writer: *Writer,
 ast: *const AST,
 
-/// Spaces per indentation level. The native encoding is a canonical oracle —
+/// Spaces per indentation level. The canonical encoding is an oracle —
 /// one document has exactly one spelling — so this is a fixed constant, not a
 /// knob: a configurable canonical form would defeat the comparison oracle.
 const indent_width = 2;
@@ -208,7 +210,7 @@ fn trailingComment(self: *Printer, id: AST.Node.Id) Error!void {
 }
 
 /// Render one comment in native syntax: `// text` for a line comment, `/* text
-/// */` for a block. Mirrors the marker set the native parser accepts.
+/// */` for a block. Mirrors the marker set the canonical parser accepts.
 fn writeComment(self: *Printer, c: AST.Comment) Error!void {
     switch (c.style) {
         .line => {

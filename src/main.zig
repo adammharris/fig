@@ -25,7 +25,12 @@ const version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
 const max_size = Io.Limit.limited(10 * 1024 * 1024);
 // `gron` is a CLI-only output/echo format with no `AST.SerializeFormat`
 // counterpart; the `get` handler intercepts it before the serializer dispatch.
-const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, native, gron };
+// `canonical` (formerly `native`) is the AST's 1:1 oracle encoding, selectable
+// only via `--input/--output canonical` — it owns no file extension. `fig` is
+// the human-facing authoring dialect: it owns `.fig`, but its reader/printer are
+// not built yet, so selecting it errors (see DESIGN.md). `gron` is a CLI-only
+// echo format with no `AST.SerializeFormat` counterpart.
+const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, canonical, fig, gron };
 
 const CliAction = enum {
     help,
@@ -348,12 +353,14 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|json5|yaml|toml|zon|native|gron] [--output json|json5|yaml|toml|zon|native|gron] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon|canonical|gron] [--output json|json5|yaml|toml|zon|canonical|gron] <file> [path]
             \\  -i, --input: input format of file (defaults to the file extension,
             \\    then to sniffing the file's contents if the extension is unknown)
             \\  -o, --output:   output format (defaults to the input format)
-            \\  native ("fig"): the AST's 1:1 canonical text encoding (.fig files);
-            \\    usable as input or output, e.g. to inspect how any document parses.
+            \\  canonical: the AST's 1:1 oracle text encoding; usable as input or
+            \\    output, e.g. to inspect how any document parses. (Owns no file
+            \\    extension — select it explicitly. `.fig` is the authoring dialect,
+            \\    not yet implemented.)
             \\  gron: a line-oriented `path = value;` projection (greppable, and
             \\    reversible with `-i gron`); must be selected explicitly, never
             \\    sniffed. Fidelity matches JSON (drops comments/anchors).
@@ -395,7 +402,7 @@ const Help = struct {
             \\  `ok` line per file and exits 0 when all parse; prints an error
             \\  line to stderr for each failing file and exits 1 if any fail.
             \\  -i, --input: parse every file as this format (json, jsonc, json5,
-            \\    yaml, toml, zon, xml, native/fig). Default: infer from each
+            \\    yaml, toml, zon, xml, canonical). Default: infer from each
             \\    file's extension, then by sniffing its contents.
             \\  -s, --spec: validate against a specific language version, where one
             \\    is selectable: TOML `1.0`/`1.1` (default 1.1), YAML `1.2.2`/`1.1`
@@ -523,9 +530,11 @@ pub fn main(init: std.process.Init) !void {
                 // JSON5 is read/serialize only so far; comment-preserving
                 // in-place editing of it is not wired yet.
                 .json5 => return error.UnsupportedJson5Edit,
-                // The native format is a parse/print pair with no span-splicing
+                // The canonical form is a parse/print pair with no span-splicing
                 // editor; convert via `get` instead of editing in place.
-                .native => return error.UnsupportedNativeEdit,
+                .canonical => return error.UnsupportedCanonicalEdit,
+                // The fig authoring dialect has no reader/printer yet.
+                .fig => return error.FigAuthoringNotImplemented,
                 // gron is a CLI-only get/echo format with no in-place editor.
                 .gron => return error.UnsupportedGronEdit,
             }
@@ -647,6 +656,18 @@ pub fn main(init: std.process.Init) !void {
             var from = opts.from;
             var to = opts.to;
 
+            // The fig authoring dialect has no reader or printer yet, so it is
+            // neither a valid input (`--from`/`.fig` file) nor output (`--to`).
+            // Rejected before the parse below (so a `.fig` input never reaches
+            // `parseSliceAs`) and before the serialize switches (whose `.fig` arms
+            // are `unreachable`). Detection never yields `.fig`, so `from`/`to` are
+            // final here for this purpose.
+            if (from == .fig or to == .fig) {
+                try stderr_terminal.writer.print("error: the fig authoring dialect is not yet implemented (reserved; see DESIGN.md). Use `canonical` for the AST's 1:1 encoding.\n", .{});
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+
             const doc = if (opts.embed) |embed_type|
                 try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
             else blk: {
@@ -703,10 +724,11 @@ pub fn main(init: std.process.Init) !void {
                     .yaml, .yml => .yaml,
                     .toml => .toml,
                     .zon => .zon,
-                    // Native encodes every node kind directly, so no envelope is
-                    // needed on output — only decode envelopes found in the input.
-                    .native => null,
+                    // Canonical encodes every node kind directly, so no envelope
+                    // is needed on output — only decode envelopes found in input.
+                    .canonical => null,
                     .xml => unreachable, // rejected up front (reader-only)
+                    .fig => unreachable, // rejected up front (not implemented)
                 };
                 const decoded = try init.arena.allocator().create(fig.AST);
                 decoded.* = try fig.Lossless.decode(init.arena.allocator(), base_ast);
@@ -737,8 +759,9 @@ pub fn main(init: std.process.Init) !void {
                 .yaml, .yml => .yaml,
                 .toml => .toml,
                 .zon => .zon,
-                .native => .native,
+                .canonical => .canonical,
                 .xml => unreachable, // rejected up front (reader-only)
+                .fig => unreachable, // rejected up front (not implemented)
                 .gron => unreachable, // handled by the early return above
             };
 
@@ -832,7 +855,8 @@ pub fn main(init: std.process.Init) !void {
                     else
                         return error.FormatDisabled,
                     .xml => return error.UnsupportedXmlEdit,
-                    .native => return error.UnsupportedNativeEdit,
+                    .canonical => return error.UnsupportedCanonicalEdit,
+                    .fig => return error.FigAuthoringNotImplemented,
                     .gron => return error.UnsupportedGronEdit,
                 };
                 // Print the comment followed by a newline. An absent comment (null)
@@ -877,7 +901,8 @@ pub fn main(init: std.process.Init) !void {
                 else
                     return error.FormatDisabled,
                 .xml => return error.UnsupportedXmlEdit,
-                .native => return error.UnsupportedNativeEdit,
+                .canonical => return error.UnsupportedCanonicalEdit,
+                .fig => return error.FigAuthoringNotImplemented,
                 .gron => return error.UnsupportedGronEdit,
             }
         },
@@ -1010,7 +1035,7 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
             .{ .yaml = .v1_1 }
         else
             error.UnsupportedSpec,
-        .json, .jsonc, .json5, .zon, .xml, .native, .gron => error.UnsupportedSpec,
+        .json, .jsonc, .json5, .zon, .xml, .canonical, .fig, .gron => error.UnsupportedSpec,
     };
 }
 
@@ -1018,7 +1043,7 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
 /// content-based parser the `get` and `check` actions use: reading the input
 /// once means detection and parsing share the same bytes, so a piped stdin is
 /// consumed only once. `.jsonc`/`.json5` select the JSON dialect; `.yml` aliases
-/// YAML; `.native` is the `.fig` grammar. `spec` picks the language version
+/// YAML; `.canonical` is the AST's 1:1 oracle grammar. `spec` picks the version
 /// where one is selectable (TOML 1.0 vs 1.1, YAML version).
 fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8) !fig.Document {
     return switch (format) {
@@ -1029,15 +1054,17 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         .toml => if (comptime build_options.lang_toml) fig.Language.TOML.Parser.parse(allocator, content, spec.toml) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
-        .native => fig.Native.parse(allocator, content),
+        .canonical => fig.Canonical.parse(allocator, content),
+        // The fig authoring dialect's reader is not built yet (see DESIGN.md).
+        .fig => error.FigAuthoringNotImplemented,
         // gron ("ungron") reconstructs the AST from its `path = value` lines,
         // reusing the JSON parser for each RHS — so it needs JSON compiled in.
         .gron => if (comptime build_options.lang_json) gron.parseDocument(allocator, content) else error.FormatDisabled,
     };
 }
 
-/// Map a `Language.detect` result to the CLI `Format`. `Detected` has no `jsonc`
-/// or `native` (neither is content-sniffed), so the mapping is total.
+/// Map a `Language.detect` result to the CLI `Format`. `Detected` has no `jsonc`,
+/// `canonical`, or `fig` (none is content-sniffed), so the mapping is total.
 fn mapDetected(d: fig.Language.Detected) Format {
     return switch (d) {
         .json => .json,
@@ -1330,7 +1357,8 @@ fn applyStructuralEdit(
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
         .json5 => return error.UnsupportedJson5Edit,
-        .native => return error.UnsupportedNativeEdit,
+        .canonical => return error.UnsupportedCanonicalEdit,
+        .fig => return error.FigAuthoringNotImplemented,
         .gron => return error.UnsupportedGronEdit,
     }
 }
@@ -1437,8 +1465,10 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
         return .{ .format = .yaml, .embed = .FrontmatterYaml };
     }
 
-    // `.fig` is the native format's file extension (`.native` maps via the enum).
-    if (std.mem.eql(u8, ext, "fig")) return .{ .format = .native, .embed = null };
+    // `.fig` is the authoring dialect's extension. (Its reader is not built yet,
+    // so parsing a `.fig` file errors until then — see DESIGN.md. The canonical
+    // form deliberately owns no extension; select it with `--input canonical`.)
+    if (std.mem.eql(u8, ext, "fig")) return .{ .format = .fig, .embed = null };
 
     const format = std.meta.stringToEnum(Format, ext) orelse return null;
     return .{ .format = format, .embed = null };
@@ -1459,11 +1489,10 @@ fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
 
 const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
-/// Map a `--input`/`-i` format name to a `Format`. Accepts every CLI format
-/// plus the `fig` alias for the native grammar. Returns null for an unknown
-/// name so callers can emit a tailored error.
+/// Map a `--input`/`-i` format name to a `Format`. The enum member names cover
+/// every accepted token (including `canonical` and `fig`) directly. Returns null
+/// for an unknown name so callers can emit a tailored error.
 fn parseFormatName(name: []const u8) ?Format {
-    if (std.mem.eql(u8, name, "fig")) return .native;
     return std.meta.stringToEnum(Format, name);
 }
 
@@ -1809,8 +1838,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     input_override = .zon;
                 } else if (std.mem.eql(u8, fmt, "xml")) {
                     input_override = .xml;
-                } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
-                    input_override = .native;
+                } else if (std.mem.eql(u8, fmt, "canonical")) {
+                    input_override = .canonical;
+                } else if (std.mem.eql(u8, fmt, "fig")) {
+                    input_override = .fig;
                 } else if (std.mem.eql(u8, fmt, "gron")) {
                     input_override = .gron;
                 } else {
@@ -1834,8 +1865,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .toml;
                 } else if (std.mem.eql(u8, fmt, "zon")) {
                     output_override = .zon;
-                } else if (std.mem.eql(u8, fmt, "native") or std.mem.eql(u8, fmt, "fig")) {
-                    output_override = .native;
+                } else if (std.mem.eql(u8, fmt, "canonical")) {
+                    output_override = .canonical;
+                } else if (std.mem.eql(u8, fmt, "fig")) {
+                    output_override = .fig;
                 } else if (std.mem.eql(u8, fmt, "gron")) {
                     output_override = .gron;
                 } else {

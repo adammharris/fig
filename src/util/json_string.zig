@@ -2,7 +2,7 @@
 //! JSON escape set.
 //!
 //! This is the single source of truth for the *encode* side, used by both the
-//! JSON printer and the native printer (their previous copies were byte-for-byte
+//! JSON printer and the canonical printer (their previous copies were byte-for-byte
 //! identical, so a change to one silently diverged from the other). The escape
 //! set here is the inverse of what each parser's escape *decoder* accepts —
 //! anything emitted here must decode back unchanged, so keep the two in lockstep.
