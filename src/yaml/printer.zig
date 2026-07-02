@@ -357,7 +357,9 @@ fn tryWriteBlockStringValue(writer: *Writer, ast: *const AST, id: AST.Node.Id, i
 
 /// Whether a multi-line string can be faithfully emitted as a `|` block scalar.
 /// Conservative: rejects carriage returns and other non-newline controls, lines
-/// with leading/trailing whitespace (indentation / trailing-space ambiguity),
+/// with trailing whitespace (invisible, editor-fragile), leading whitespace on
+/// the FIRST non-empty line only (it anchors YAML's indentation auto-detection;
+/// deeper-indented later lines round-trip fine — think shell-script bodies),
 /// and 2+ trailing newlines (which would need the `|+` keep indicator). Anything
 /// rejected here is double-quoted instead, which always round-trips.
 fn blockScalarOk(s: []const u8) bool {
@@ -365,11 +367,13 @@ fn blockScalarOk(s: []const u8) bool {
     if (std.mem.endsWith(u8, s, "\n\n")) return false;
     const body = if (std.mem.endsWith(u8, s, "\n")) s[0 .. s.len - 1] else s;
     var it = std.mem.splitScalar(u8, body, '\n');
+    var first_content = true;
     while (it.next()) |line| {
         if (line.len == 0) continue; // interior blank lines are fine (emitted empty)
-        if (line[0] == ' ' or line[0] == '\t') return false;
+        if (first_content and (line[0] == ' ' or line[0] == '\t')) return false;
+        first_content = false;
         if (line[line.len - 1] == ' ' or line[line.len - 1] == '\t') return false;
-        for (line) |c| if (c < 0x20 or c == 0x7f) return false;
+        for (line) |c| if (c != '\t' and (c < 0x20 or c == 0x7f)) return false;
     }
     return true;
 }
@@ -622,6 +626,12 @@ test "yaml printer: a trailing newline clips to |, two fall back to double-quote
     try std.testing.expectEqualStrings("s: \"a\\nb\\n\\n\"\n", keep);
 }
 
+test "yaml printer: indented interior lines still block-scalar (shell script shape)" {
+    const yaml = try emitStringValue(std.testing.allocator, "if x; then\n  echo hi\nfi\n");
+    defer std.testing.allocator.free(yaml);
+    try std.testing.expectEqualStrings("s: |\n  if x; then\n    echo hi\n  fi\n", yaml);
+}
+
 test "yaml printer: block scalars round-trip through the parser" {
     const Parser = @import("parser.zig");
     const cases = [_][]const u8{
@@ -630,8 +640,10 @@ test "yaml printer: block scalars round-trip through the parser" {
         "a\n\nb", // interior blank line
         "a\nb\n\n", // 2+ trailing newlines -> double-quote fallback
         "trailing \nspace", // trailing space on a line -> fallback
-        " leading\nline", // leading space on first line -> fallback
-        "tab\there\nx", // control char other than \n -> double-quote
+        " leading\nline", // leading space on FIRST line -> fallback (indent detection)
+        "if x; then\n  echo hi\nfi\n", // indented INTERIOR lines -> | is fine
+        "tab\there\nx", // interior tab is content -> | is fine
+        "\rreturn\nx", // \r control char -> double-quote
     };
     for (cases) |s| {
         const yaml = try emitStringValue(std.testing.allocator, s);

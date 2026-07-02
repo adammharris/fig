@@ -398,7 +398,9 @@ fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?us
         .null_ => return 4,
         .boolean => |b| return @as(usize, if (b) 4 else 5),
         .number => |n| return n.raw.len,
-        .string => |s| return scalarStringWidth(s, false, true),
+        // A multi-line string deserves a real `'''`/`"""` block, which only
+        // exists in block position — so it forces its container out of flow.
+        .string => |s| return if (std.mem.indexOfScalar(u8, s, '\n') != null) null else scalarStringWidth(s, false, true),
         .extended => |e| return switch (e.kind) {
             .offset_datetime, .local_datetime, .local_date, .local_time => e.text.len,
             // enum/non-finite need `: type =`; char has no flow spelling.
@@ -616,7 +618,11 @@ fn value(self: *Printer, id: AST.Node.Id, in_flow: bool) Error!void {
         .null_ => try self.writer.writeAll("null"),
         .boolean => |b| try self.writer.writeAll(if (b) "true" else "false"),
         .number => |n| try self.writer.writeAll(n.raw),
-        .string => |s| try self.writeBareOrQuoted(s, false, in_flow),
+        .string => |s| if (!in_flow and std.mem.indexOfScalar(u8, s, '\n') != null) {
+            try self.writeMultilineString(s);
+        } else {
+            try self.writeBareOrQuoted(s, false, in_flow);
+        },
         .extended => |e| try self.writeExtended(e, in_flow),
         .mapping, .sequence => try self.flowValue(id),
         .keyvalue => unreachable,
@@ -682,6 +688,33 @@ fn writeExtended(self: *Printer, e: AST.Node.Kind.Extended, in_flow: bool) Error
             try self.writeBareOrQuoted(buf[0..len], false, in_flow);
         },
     }
+}
+
+/// A string containing newlines, in block value position: `'''` raw when the
+/// content round-trips verbatim, else `"""` with `\`, `"`, and `\r` escaped
+/// (escaping every `"` also rules out an accidental `"""` terminator).
+/// Content and closer are emitted flush-left: a raw block is verbatim by
+/// definition (indent would become content), and a column-0 closer pins the
+/// escaped flavor's smart-dedent at zero so leading whitespace in the value
+/// survives. The tokenizer drops the newline before the closer's line, so a
+/// value's own trailing newline (or lack of one) round-trips exactly.
+fn writeMultilineString(self: *Printer, s: []const u8) Error!void {
+    const raw_ok = std.mem.indexOf(u8, s, "'''") == null and
+        std.mem.indexOfScalar(u8, s, '\r') == null;
+    if (raw_ok) {
+        try self.writer.writeAll("'''\n");
+        try self.writer.writeAll(s);
+        try self.writer.writeAll("\n'''");
+        return;
+    }
+    try self.writer.writeAll("\"\"\"\n");
+    for (s) |c| switch (c) {
+        '\\' => try self.writer.writeAll("\\\\"),
+        '"' => try self.writer.writeAll("\\\""),
+        '\r' => try self.writer.writeAll("\\r"),
+        else => try self.writer.writeByte(c),
+    };
+    try self.writer.writeAll("\n\"\"\"");
 }
 
 /// Bare when the literal-else-string sniff would round-trip it unchanged
@@ -1091,6 +1124,44 @@ test "a lone flat child between deep siblings stays a dotted assignment" {
         \\> chrono
         \\> > version = "0.4"
         \\> > features-list = [serde, std, clock, and, extra, padding, words, here]
+        \\
+    );
+}
+
+test "multi-line strings print as ''' raw blocks (escaped \"\"\" when needed)" {
+    // A trailing newline in the value becomes one empty line before the
+    // flush-left closer (the tokenizer drops the newline before the closer's
+    // line). Interior indentation is content and survives verbatim.
+    try expectPrint("script = \"set -e\\nif x; then\\n  echo hi\\nfi\\n\"\n",
+        \\script = '''
+        \\set -e
+        \\if x; then
+        \\  echo hi
+        \\fi
+        \\
+        \\'''
+        \\
+    );
+    // Content containing ''' cannot be raw — escaped flavor, quotes escaped.
+    try expectPrint("q = \"has '''\\nquotes\"\n",
+        \\q = """
+        \\has '''
+        \\quotes
+        \\"""
+        \\
+    );
+}
+
+test "multi-line strings round-trip (raw, escaped, trailing-newline shapes)" {
+    try expectRoundTrip("a = \"x\\ny\"\nb = \"x\\ny\\n\"\nc = \"tail '''\\nline2\"\nd = \"\\n\\nleading blanks\"\n");
+}
+
+test "a container holding a multi-line string breaks out of flow" {
+    try expectPrint("wrap\n> cmd = \"a\\nb\"\n",
+        \\wrap.cmd = '''
+        \\a
+        \\b
+        \\'''
         \\
     );
 }

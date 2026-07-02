@@ -17,6 +17,14 @@
 //! does have sub-tables/AoTs (their headers imply it); an otherwise-empty table
 //! still emits its `[header]` so its existence round-trips.
 //!
+//! **Key order is preserved.** TOML forces section headers to trail a table's
+//! `key = value` lines, so a table child that precedes later inline siblings
+//! cannot become a `[section]` without semantically reordering the map. Such
+//! mid-order children *demote* to order-preserving spellings — dotted keys for
+//! a table, an inline array for an array-of-tables — when they are
+//! comment-free; a commented one keeps the trailing-section form (comments
+//! outrank order). See `Ctx.body`.
+//!
 //! TOML has no null, so a `null` value is `error.NullUnsupported` (e.g. a JSON
 //! `null` cannot convert to TOML). `enum_literal`/`char_literal` extended scalars
 //! (only minted by ZON) degrade to a string / integer; datetimes print verbatim.
@@ -56,15 +64,44 @@ const Ctx = struct {
     opts: AST.SerializeOptions,
     wrote: bool = false,
 
-    /// Emit a table's body: first every inline entry as `key = value`, then —
-    /// after all of them, as TOML requires — each sub-table and array-of-tables
-    /// with its own header. `path` is this table's header path (null at root).
+    /// Emit a table's body: its `key = value` lines in document order, then —
+    /// as TOML requires — the trailing sub-table / array-of-tables sections.
+    /// `path` is this table's header path (null at root).
+    ///
+    /// TOML cannot re-open a table header, so section children may only TRAIL
+    /// the body lines. A table child that sits BEFORE a later inline sibling
+    /// would be silently reordered by a naive inline-then-sections split — a
+    /// semantic key-order change. Instead, such a child is **demoted** to an
+    /// order-preserving spelling: dotted keys (`fig.version = "1.0.0"`) for a
+    /// table, an inline array for an array-of-tables. Demotion requires a
+    /// comment-free entry (the demoted spellings would drop or re-anchor
+    /// comments); a commented mid-position child keeps the trailing-section
+    /// form — comments outrank order.
     fn body(ctx: *Ctx, ast: *const AST, node_id: AST.Node.Id, first_child: ?AST.Node.Id, path: ?*const Path) Error!void {
+        // The last inline-classified child bounds the demotion zone: only
+        // section/AoT children before it are out of order.
+        var last_inline: ?AST.Node.Id = null;
+        {
+            var cur = first_child;
+            while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
+                if (classify(ctx, ast, id) == .inline_) last_inline = id;
+            }
+        }
+        // Pass 1: body lines, in document order.
         var cur = first_child;
+        var in_body_zone = (last_inline != null);
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
-            if (classify(ctx, ast, id) != .inline_) continue;
+            if (!in_body_zone) break;
             const kv = ast.nodes[id].kind.keyvalue;
-            try ctx.kvLine(ast, kv.key, kv.value);
+            switch (classify(ctx, ast, id)) {
+                .inline_ => try ctx.kvLine(ast, kv.key, kv.value),
+                .section => if (demotable(ast, id)) {
+                    const seg = Path{ .key = try keyText(ast, kv.key), .parent = null };
+                    try ctx.dottedBody(ast, &seg, ast.nodes[kv.value].kind.mapping);
+                },
+                .aot => if (demotable(ast, id)) try ctx.kvLine(ast, kv.key, kv.value),
+            }
+            if (id == last_inline.?) in_body_zone = false;
         }
         // Comments dangling at the end of this table's own lines (after its
         // inline entries, before any sub-tables).
@@ -76,14 +113,46 @@ const Ctx = struct {
             }
             ctx.wrote = true;
         }
+        // Pass 2: trailing sections — children after the last inline line,
+        // plus any commented mid-position child that could not demote.
         cur = first_child;
+        var in_demote_zone = (last_inline != null);
         while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
             const kv = ast.nodes[id].kind.keyvalue;
+            const demoted = in_demote_zone and demotable(ast, id);
             switch (classify(ctx, ast, id)) {
                 .inline_ => {},
-                .section => try ctx.section(ast, kv.key, kv.value, path),
-                .aot => try ctx.aot(ast, kv.key, kv.value, path),
+                .section => if (!demoted) try ctx.section(ast, kv.key, kv.value, path),
+                .aot => if (!demoted) try ctx.aot(ast, kv.key, kv.value, path),
             }
+            if (in_demote_zone and id == last_inline.?) in_demote_zone = false;
+        }
+    }
+
+    /// Emit a demoted table as dotted-key lines (`fig.version = "1.0.0"`),
+    /// preserving document order where a `[section]` would have to move past
+    /// later inline siblings. Only reached for comment-free subtrees. A
+    /// non-empty sub-table recurses into deeper dots; everything else —
+    /// scalars, arrays (including arrays of tables, rendered inline), empty
+    /// tables — is one `prefix.key = value` line.
+    fn dottedBody(ctx: *Ctx, ast: *const AST, prefix: *const Path, first_child: ?AST.Node.Id) Error!void {
+        var cur = first_child;
+        while (cur) |id| : (cur = ast.nodes[id].next_sibling) {
+            const kv = ast.nodes[id].kind.keyvalue;
+            const seg = Path{ .key = try keyText(ast, kv.key), .parent = prefix };
+            switch (ast.nodes[kv.value].kind) {
+                .mapping => |first| if (first != null) {
+                    try ctx.dottedBody(ast, &seg, first);
+                    continue;
+                },
+                else => {},
+            }
+            try writePath(ctx.w, &seg);
+            try ctx.w.writeAll(" = ");
+            const col = (pathByteLen(&seg) orelse 0) + 3;
+            try ctx.writeValue(ast, kv.value, col);
+            try ctx.w.writeByte('\n');
+            ctx.wrote = true;
         }
     }
 
@@ -254,6 +323,27 @@ fn keyByteLen(ast: *const AST, key_id: AST.Node.Id) ?usize {
     var buf: [128]u8 = undefined;
     var disc = std.Io.Writer.Discarding.init(&buf);
     writeKey(&disc.writer, ast, key_id) catch return null;
+    return @intCast(disc.fullCount());
+}
+
+/// A mid-order table/AoT child may demote to dotted keys / an inline array
+/// only when the whole entry (kv node, key, and value subtree) is
+/// comment-free: the demoted spellings would drop interior comments or
+/// re-anchor a key's leading run. Comments outrank order, so a commented
+/// child keeps the trailing-section form instead.
+fn demotable(ast: *const AST, kv_id: AST.Node.Id) bool {
+    const kv = ast.nodes[kv_id].kind.keyvalue;
+    if (nodeHasComments(ast, kv_id)) return false;
+    if (subtreeHasComments(ast, kv.key)) return false;
+    if (subtreeHasComments(ast, kv.value)) return false;
+    return true;
+}
+
+/// Rendered byte width of a dotted path, or null for a non-string segment.
+fn pathByteLen(path: *const Path) ?usize {
+    var buf: [128]u8 = undefined;
+    var disc = std.Io.Writer.Discarding.init(&buf);
+    writePath(&disc.writer, path) catch return null;
     return @intCast(disc.fullCount());
 }
 
@@ -637,6 +727,63 @@ test "scalars precede sub-tables and blank-line separates (when expanded)" {
         \\y = 2
         \\
     , .{ .width = 8 });
+}
+
+test "a mid-order sub-table demotes to dotted keys (order preserved)" {
+    // `b` (a table) precedes the scalar `c`; a `[a.b]` section would have to
+    // move past it — a semantic key-order change — so it demotes to dotted
+    // keys in place. The output is its own fixed point.
+    try expectPrintWith(
+        \\[a]
+        \\b.x = 1
+        \\b.y = 2
+        \\c = 3
+        \\
+    ,
+        \\[a]
+        \\b.x = 1
+        \\b.y = 2
+        \\c = 3
+        \\
+    , .{ .width = 8 });
+}
+
+test "a commented mid-order sub-table keeps its section (comments outrank order)" {
+    try expectPrintWith(
+        \\[a]
+        \\b.x = 1 # note
+        \\b.y = 2
+        \\c = 3
+        \\
+    ,
+        \\[a]
+        \\c = 3
+        \\
+        \\[a.b]
+        \\x = 1 # note
+        \\y = 2
+        \\
+    , .{ .width = 8 });
+}
+
+test "a mid-order array-of-tables demotes to an inline array (order preserved)" {
+    try expectPrintWith(
+        \\[t]
+        \\a = [{ x = 1 }, { x = 2 }]
+        \\b = "a long enough string value to keep the whole table t from collapsing inline"
+        \\
+    ,
+        \\[t]
+        \\a = [{ x = 1 }, { x = 2 }]
+        \\b = "a long enough string value to keep the whole table t from collapsing inline"
+        \\
+    , .{});
+}
+
+test "order-preserving demotions round-trip" {
+    try expectRoundTrip("[a]\nb.x = 1\nb.y = 2\nc = 3\n");
+    try expectRoundTrip("[t]\na = [{ x = 1 }, { x = 2 }]\nb = 3\n");
+    try expectRoundTrip("fig.version = \"1.0.0\"\nfig.default-features = false\nserde = \"1.0\"\n");
 }
 
 test "supertable header is suppressed when it has only sub-tables" {
