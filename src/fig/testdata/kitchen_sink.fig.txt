@@ -1,0 +1,161 @@
+# ─────────────────────────────────────────────────────────────
+# fig authoring dialect — kitchen-sink example
+# Exercises every feature in DESIGN.md, in ONE valid document.
+#
+# This file is in `fig fmt` form: depth = count of leading `>`, and each line
+# also carries `2 × depth` spaces of indentation. The indent is NOT load-bearing
+# (meaning lives entirely in the `>` count) — it is the redundant second signal,
+# and `fig fmt` emits it so the linter can warn when indent and count disagree.
+# ─────────────────────────────────────────────────────────────
+
+
+# === Containers, assignments, prefix-count depth ===
+database                         # container header (bare word, no `=`)
+  > host = localhost             # database.host
+  > port = 5432                  # database.port  (bare number)
+  > pool                         # nested container header
+    >> size = 10                 # database.pool.size
+    >> timeout = 30              # database.pool.timeout
+
+
+# === Dotted-key flattener (flatten within one line) ===
+cache
+  > redis.host = 127.0.0.1       # cache.redis.host  (IP → string, 3 dots)
+  > redis.port = 6379            # cache.redis.port
+
+
+# === Root-level assignments (zero markers, zero indent) ===
+version = 2                      # a plain key in the root map
+title = My Application           # bare string, spaces and all
+
+
+# === Explicit typing:  key: type = value  (optional) ===
+server
+  > port: int = 8080            # annotated (vs inferred)
+  > name: string = My Server    # bare string with spaces
+  > mode: enum = creative       # enum atom (explicit-typing-only)
+  > debug: bool = false
+
+
+# === Values: literal-else-string ===
+values
+  > answer = 42                 # int
+  > ratio = 3.14                # float
+  > mask = 0xFF                 # hex int lexeme
+  > big = 1.5e3                 # float with exponent
+  > enabled = true              # bool (lowercase only)
+  > missing = null              # null
+  > flag = "true"               # STRING — quotes override the bool literal
+  > movie = 12 monkeys          # STRING — doesn't fully parse as a number
+  > norway = Yes                # STRING — "Yes"/"on"/"TRUE" are never bools
+  > zip = 007                   # STRING — leading zero != number; padding kept
+  > team = "99"                 # STRING — quote to override the int literal
+  > class: enum = minecraft     # enum atom (explicit-typing-only)
+  > when = 2026-07-01T12:00:00Z # datetime (RFC-3339, self-identifying)
+  > day = 2026-07-01            # date (RFC-3339 full-date)
+  > huge: float = inf           # non-finite: explicit-typing-only
+  > nope: float = nan           # bare inf/nan would be plain strings
+
+
+# === Quotes:  '' raw/literal   ""  escaped ===
+strings
+  > raw = 'C:\Users\me\no-escapes'   # single quotes: backslashes stay literal
+  > esc = "line1\nline2\ttabbed"     # double quotes: \n \t \uXXXX honored
+  > snowman = "frozen ☃"
+  > "my.key" = present               # key with a literal dot MUST be quoted
+
+
+# === Comment marker (#) only after whitespace — URLs survive ===
+links
+  > home = https://example.com           # the // in the URL stays in the value
+  > docs = https://example.com/docs      # comment starts here; value ends before it
+  > api = https://example.com/v1#stable  # #stable has no leading space -> kept
+
+
+# === Sequences — form A2 (`-` is an anonymous positional key) ===
+# The element `-` glues to the marker run: `>-` (normalized). The spaced `> -`
+# form still parses — both appear below on purpose.
+servers
+  >-                            # first element (a map): fields one level deeper
+    >> host = a.com
+    >> port = 25565
+    >> backends                 # nested list field
+      >>> -                     # spaced form still accepted
+        >>>> url = x
+        >>>> weight = 1
+      >>>-
+        >>>> url = y
+  >-                            # second element
+    >> host = b.com
+
+ports                           # scalar elements
+  >- 25565
+  >- 25566
+  >- 25567
+
+weights                         # typing composes with `-`
+  >-: int = 1
+  >-: int = 2
+
+
+# === Dotted section header — re-anchors baseline (like TOML [a.b.c]) ===
+services.web.frontend           # selects/creates services.web.frontend
+  > replicas = 3                # services.web.frontend.replicas (depth is RELATIVE)
+  > image = nginx:latest        # ':' in a value is fine -> bare string
+
+
+# === Appending sequence headers — primary surface for nested lists of maps ===
+# `a.b[]` appends an element to sequence a.b and re-anchors; fields stay 1 deep
+# no matter how deep the LIST nests. Edit-stable (append, not index).
+jobs.test
+  > runs-on = ubuntu-latest
+jobs.test.steps[]               # append a step, re-anchor here
+  > uses = actions/setup-node@v4
+  > with.node-version = 20
+jobs.test.steps[]               # append another step
+  > run = npm test
+
+
+# === Index addressing — for editing an EXISTING element (edit-fragile) ===
+clusters[0].name = alpha        # clusters is a sequence; element 0
+clusters[0].size = 3
+clusters[1].name = beta         # element 1 (skipping [1] would be an error)
+clusters[1].size = 5
+
+
+# === Flow mode — value starting with [ or { (fig-inline OR pasted JSON) ===
+flow
+  > tags = [a, b, c]            # fig-inline: bare strings
+  > audience = [friends, Adam Harris, Makena Harris]   # bare values keep spaces
+  > point = { x = 1, y = 2 }    # fig-inline object: `=` pairs, bare keys
+  > pasted = { "x": 1, "y": [2, 3] }   # JSON object: `:` pairs, quoted keys
+  > jsonc = [1, 2, 3,]          # JSONC: trailing comma (and `#` comments) OK
+  > matrix = [[1, 2], [3, 4]]   # nested
+  > records = [{ id = 1 }, { id = 2 }]
+  > empty_list = []             # required spelling for an empty sequence
+  > empty_map = {}              # required spelling for an empty map
+
+
+# === Multiline strings — two flavors ===
+docs
+  > license = '''               # '' raw/verbatim: no escapes, whitespace exact
+Copyright (c) 2026
+All rights reserved. \n is literal here.
+'''
+# ^ raw content is flush-left ON PURPOSE: in a raw block leading indentation
+#   becomes part of the value, so it opts out of the file's count-aligned indent.
+  > banner = """                # "" escaped + smart-dedent
+      Welcome!
+      Enjoy your ☃ stay.
+      """
+# ^ escaped content CAN be indented: the common leading indent (6 spaces here,
+#   including the closing """) is stripped, so the value is "Welcome!\nEnjoy…".
+
+
+# === Comments ===
+# A run of #-lines is one logical block comment; a printer may downgrade a
+# stored block comment to exactly this shape.
+logging
+  > # a DEPTH-PREFIXED comment (note the `>`) attaches to the next sibling
+  > level = info                # inline comment (after whitespace)
+  > format = json

@@ -237,6 +237,18 @@ fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
     switch (format) {
         // Canonical is the lossless oracle: every kind round-trips.
         .canonical => return null,
+        // fig natively represents every kind EXCEPT a char literal — its
+        // `codepoint` text degrades to a plain decoded string (see
+        // `src/fig/printer.zig`'s `writeExtended`). Enum atoms and non-finite
+        // floats round-trip losslessly too, but only via an explicit `: enum`/
+        // `: float` annotation, which is a syntax choice, not a value loss.
+        .fig => switch (kind) {
+            .extended => |e| if (e.kind == .char_literal)
+                return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) }
+            else
+                return null,
+            else => return null,
+        },
         // Plain JSON / JSONC: no datetimes, enums, chars; non-finite floats quote.
         .json, .jsonc => switch (kind) {
             .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
@@ -286,6 +298,7 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
         // number; TOML as an integer.
         .char_literal => switch (format) {
             .toml => "integer",
+            .fig => "string",
             else => "number",
         },
         // Non-finite floats quote in plain JSON/JSONC; elsewhere they degrade to
@@ -311,16 +324,16 @@ fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
         .json => false,
         .json5, .jsonc, .zon => pretty,
-        .yaml, .toml, .canonical => true,
+        .yaml, .toml, .canonical, .fig => true,
     };
 }
 
 /// Whether `format` has block-comment syntax (`/* … */`). Only the JSON5 family
-/// and canonical do; YAML/TOML/ZON degrade a block comment to a line run.
+/// and canonical do; YAML/TOML/ZON/fig degrade a block comment to a line run.
 fn blockComments(format: Format) bool {
     return switch (format) {
         .json5, .jsonc, .canonical => true,
-        .json, .yaml, .toml, .zon => false,
+        .json, .yaml, .toml, .zon, .fig => false,
     };
 }
 

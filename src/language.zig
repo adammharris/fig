@@ -14,10 +14,13 @@ pub const YAML = if (build_options.lang_yaml) @import("yaml/yaml.zig").Language 
 pub const TOML = if (build_options.lang_toml) @import("toml/toml.zig").Language else void;
 pub const ZON = if (build_options.lang_zon) @import("zon/zon.zig").Language else void;
 pub const XML = if (build_options.lang_xml) @import("xml/xml.zig").Language else void;
+pub const FIG = if (build_options.lang_fig) @import("fig/fig.zig").Language else void;
 
-/// A format `detect` can recognize. The native `.fig` format and the `jsonc`
-/// dialect are deliberately excluded: jsonc overlaps json/json5 on most input,
-/// and native is an explicit selection rather than something to sniff.
+/// A format `detect` can recognize. The `jsonc` dialect, `canonical`, and the
+/// `fig` authoring dialect are deliberately excluded: jsonc overlaps
+/// json/json5 on most input, and both canonical and fig are explicit
+/// selections rather than something to sniff (fig's grammar overlaps heavily
+/// with TOML/YAML, so sniffing it would just steal their ambiguous input).
 pub const Detected = enum { json, json5, yaml, toml, zon, xml };
 
 /// Best-effort content sniffing: try each COMPILED-IN parser and return the

@@ -16,14 +16,15 @@ const JsonPrinter = if (build_options.lang_json) @import("../json/printer.zig") 
 const YamlPrinter = if (build_options.lang_yaml) @import("../yaml/printer.zig") else void;
 const TomlPrinter = if (build_options.lang_toml) @import("../toml/printer.zig") else void;
 const ZonPrinter = if (build_options.lang_zon) @import("../zon/printer.zig") else void;
+const FigPrinter = if (build_options.lang_fig) @import("../fig/printer.zig") else void;
 // The canonical form is the AST's own 1:1 encoding — always compiled in (no
 // language gate), so it needs no `void` fallback or comptime guard below.
 const CanonicalPrinter = @import("../canonical/printer.zig");
 
 /// The canonical output format families. `canonical` (formerly `native`) is the
-/// AST's own 1:1 oracle encoding; the human-facing `fig` authoring dialect is a
-/// separate surface not yet wired here (see DESIGN.md).
-pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, canonical };
+/// AST's own 1:1 oracle encoding; `fig` is the human-facing authoring dialect
+/// (lossy at the edges — see src/fig/DESIGN.md).
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, canonical, fig };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -99,6 +100,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
         .canonical => CanonicalPrinter.print(writer, ast),
+        .fig => if (comptime build_options.lang_fig) FigPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
 
@@ -119,5 +121,6 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .canonical => CanonicalPrinter.printNode(writer, ast, id, 0),
+        .fig => if (comptime build_options.lang_fig) FigPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
     };
 }

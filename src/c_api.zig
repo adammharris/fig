@@ -2280,9 +2280,10 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             .yaml => .yaml,
             .toml => .toml,
             .zon => .zon,
-            // `serializeFormatOf` never yields `.canonical`; the arm keeps the switch
+            // `serializeFormatOf` never yields `.canonical`/`.fig` (neither is a
+            // member of the C ABI's `FigFormat` yet); these arms keep the switch
             // total. null would mean decode-only (no envelope on output).
-            .canonical => null,
+            .canonical, .fig => null,
         };
         const decoded = try arena.create(AST);
         decoded.* = try Lossless.decode(arena, base_ast);

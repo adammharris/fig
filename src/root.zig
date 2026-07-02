@@ -13,11 +13,14 @@ pub const Diagnostics = @import("diagnostics.zig");
 /// The canonical form: the AST's own 1:1, total, bijective text encoding — the
 /// comparison oracle and lossless serialization. (Formerly "native".) The
 /// human-facing `fig` authoring dialect is a separate surface over the same AST;
-/// see DESIGN.md.
+/// see src/fig/DESIGN.md.
 pub const Canonical = @import("canonical/canonical.zig");
 /// Deprecated alias for `Canonical`; kept so existing Zig consumers (the Diaryx
 /// git dep) keep building. Prefer `Canonical`.
 pub const Native = Canonical;
+/// The fig authoring dialect: the human-facing, hand-writable surface over the
+/// same AST. Reader + `fig fmt` printer; see src/fig/DESIGN.md.
+pub const Fig = @import("fig/fig.zig");
 
 /// Reflection-based deserialization into native Zig types (à la `std.json`).
 pub const deserialize = @import("deserialize.zig");
@@ -31,6 +34,7 @@ test {
     _ = @import("toml/toml.zig");
     _ = @import("zon/zon.zig");
     _ = @import("xml/xml.zig");
+    _ = @import("fig/fig.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");

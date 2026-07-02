@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
     const enable_toml = b.option(bool, "toml", "Include TOML support") orelse true;
     const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
     const enable_xml = b.option(bool, "xml", "Include XML support") orelse true;
+    const enable_fig = b.option(bool, "fig", "Include the fig authoring dialect support") orelse true;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
@@ -50,6 +51,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_toml", enable_toml);
     options.addOption(bool, "lang_zon", enable_zon);
     options.addOption(bool, "lang_xml", enable_xml);
+    options.addOption(bool, "lang_fig", enable_fig);
     // Library version surfaced through the C ABI (`fig_version` /
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one
     // canonical package version — and split into the components the ABI's
@@ -66,7 +68,6 @@ pub fn build(b: *std.Build) void {
     // target. Calling `addOptions` per-module would generate a fresh module from
     // the same generated file, which Zig rejects ("file belongs to two modules").
     const options_mod = options.createModule();
-
 
     const mod = b.addModule("fig", .{
         .root_source_file = b.path("src/root.zig"),
@@ -434,8 +435,7 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(&ts_test.step);
 
     const test_filters =
-        b.option([]const []const u8, "test-filter", "Only run tests matching this filter")
-        orelse &.{};
+        b.option([]const []const u8, "test-filter", "Only run tests matching this filter") orelse &.{};
 
     const mod_tests = b.addTest(.{
         .root_module = mod,
