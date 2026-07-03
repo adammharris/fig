@@ -1,0 +1,11 @@
+name = "Fig"
+grammar = "fig"
+path_suffixes = ["fig"]
+line_comments = ["# "]
+autoclose_before = ",]}"
+brackets = [
+  { start = "[", end = "]", close = true, newline = false },
+  { start = "{", end = "}", close = true, newline = false },
+  { start = "\"", end = "\"", close = true, newline = false },
+  { start = "'", end = "'", close = true, newline = false },
+]

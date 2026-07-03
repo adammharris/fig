@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "fig",
+      "scope": "source.fig",
+      "file-types": ["fig"],
+      "highlights": ["queries/highlights.scm"]
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "license": "MIT OR Apache-2.0",
+    "description": "Tree-sitter grammar for the fig authoring dialect",
+    "links": {
+      "repository": "https://github.com/amh421/fig"
+    }
+  }
+}

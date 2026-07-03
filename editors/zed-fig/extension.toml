@@ -1,0 +1,20 @@
+id = "fig"
+name = "Fig"
+version = "0.0.1"
+schema_version = 1
+authors = ["Adam Harris <amh421@icloud.com>"]
+description = "Syntax highlighting for the fig authoring dialect"
+repository = "https://github.com/amh421/fig"
+
+# The grammar lives in a subdirectory of this same repo (a monorepo layout).
+# Zed clones `repository` at `rev`, then looks in `path` for the grammar.
+#
+# IMPORTANT: `rev` must be a COMMIT that actually contains
+# editors/tree-sitter-fig (grammar.js + generated src/parser.c). After you
+# commit the grammar, update this sha to that commit, then re-run
+# `zed: install dev extension`. During local iteration you re-commit the grammar
+# and bump this rev (Zed has no "live" local-grammar mode — it builds from git).
+[grammars.fig]
+repository = "file:///Users/adamharris/Documents/fig"
+path = "editors/tree-sitter-fig"
+rev = "147bbfb12234a7165a8d5db1a9fc5b76476ab28f"

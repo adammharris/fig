@@ -1,0 +1,253 @@
+==================
+container header and assignments
+==================
+
+database
+  > host = localhost
+  > port = 5432
+
+---
+
+(document
+  (header
+    key: (keypath
+      (key
+        (bare_key))))
+  (markers)
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (markers)
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number)))
+
+==================
+literal-else-string values
+==================
+
+version = 2
+title = My Application
+flag = "true"
+movie = 12 monkeys
+zip = 007
+enabled = true
+missing = null
+when = 2026-07-01T12:00:00Z
+day = 2026-07-01
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (string_double))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (boolean))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (null))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (datetime))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (datetime)))
+
+==================
+explicit typing and enum atom
+==================
+
+port: int = 8080
+mode: enum = creative
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (bare_string)))
+
+==================
+elements, index, headers
+==================
+
+servers
+  > *
+    >> host = a.com
+ports
+  >* 25565
+clusters[0].name = alpha
+jobs.test.steps[]
+  > run = npm test
+
+---
+
+(document
+  (header
+    key: (keypath
+      (key
+        (bare_key))))
+  (markers)
+  (element
+    (star))
+  (markers)
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (header
+    key: (keypath
+      (key
+        (bare_key))))
+  (markers)
+  (element
+    (star)
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key))
+      (index
+        (integer))
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (header
+    key: (keypath
+      (key
+        (bare_key))
+      (key
+        (bare_key))
+      (key
+        (bare_key))
+      (index)))
+  (markers)
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string)))
+
+==================
+flow arrays and objects
+==================
+
+tags = [a, b, c]
+point = { x = 1, y = 2 }
+pasted = { "x": 1, "y": [2, 3] }
+empty_list = []
+empty_map = {}
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array
+        (flow_bare)
+        (flow_bare)
+        (flow_bare))))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_object
+        key: (bare_key)
+        value: (number)
+        key: (bare_key)
+        value: (number))))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_object
+        key: (string_double)
+        value: (number)
+        key: (string_double)
+        value: (flow
+          (flow_array
+            (number)
+            (number))))))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array)))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_object))))
+
+==================
+comments
+==================
+
+# full line comment
+level = info                # trailing comment
+
+---
+
+(document
+  (comment)
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string)
+    (comment)))

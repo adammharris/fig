@@ -1,0 +1,22 @@
+{
+  "name": "tree-sitter-fig",
+  "version": "0.0.1",
+  "description": "Tree-sitter grammar for the fig authoring dialect (syntax highlighting)",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["tree-sitter", "parser", "fig"],
+  "tree-sitter": [
+    {
+      "scope": "source.fig",
+      "file-types": ["fig"],
+      "highlights": ["queries/highlights.scm"]
+    }
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "parse": "tree-sitter parse"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.25.0"
+  }
+}

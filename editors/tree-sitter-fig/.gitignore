@@ -1,0 +1,8 @@
+node_modules/
+# Generated parser artifacts are committed so Zed can build the grammar
+# without running `tree-sitter generate`. If you prefer to regenerate on the
+# fly, uncomment the next lines.
+# src/
+build/
+*.wasm
+*.log
