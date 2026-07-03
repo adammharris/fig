@@ -17,4 +17,4 @@ repository = "https://github.com/amh421/fig"
 [grammars.fig]
 repository = "file:///Users/adamharris/Documents/fig"
 path = "editors/tree-sitter-fig"
-rev = "147bbfb12234a7165a8d5db1a9fc5b76476ab28f"
+rev = "a7a4d24ad31e298c54c7c02821a20ab6d9b15da6"
