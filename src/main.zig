@@ -12,6 +12,41 @@ const Io = std.Io;
 // deriving straight from the public AST (see `cli/gron.zig`).
 const gron = @import("cli/gron.zig");
 
+// Logging for the CLI binary. `std.log`'s default handler (`std.log.defaultLog`)
+// writes to stderr through `std.Options.debug_io` — a statically initialized,
+// globally-shared `Io.Threaded` singleton, deliberately independent from the
+// application's own `Io` instance (see the doc comment on `debug_io`). That
+// means it opens its own positional `Io.File.Writer` over fd 2, separate from
+// `stderr_terminal` below, each tracking its own `pos` from 0. When stderr is a
+// regular file (redirected to disk rather than a tty), both writers do
+// `pwrite`-style positional writes, so whichever one flushes second overwrites
+// bytes the other already wrote instead of appending after them — corrupting
+// the output. (Interleaving on a tty is harmless because tty writes are
+// non-positional appends; the corruption only bites on redirection, which is
+// why this was easy to miss.) Route `std.log` through `stderr_terminal` once
+// `main` has constructed it, so there is only ever one `Io.File.Writer`/one
+// `pos` counter over stderr.
+pub const std_options: std.Options = .{ .logFn = logFn };
+
+/// Set by `main` right after `stderr_terminal` is constructed. `null` before
+/// that point (there are no `std.log` call sites that early), in which case we
+/// fall back to the stdlib default.
+var g_log_terminal: ?*Io.Terminal = null;
+
+fn logFn(
+    comptime level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    const t = g_log_terminal orelse return std.log.defaultLog(level, scope, format, args);
+    std.log.defaultLogFileTerminal(level, scope, format, args, t.*) catch return;
+    // `std.log.defaultLog` flushes before returning (its `unlockStderr` does
+    // so implicitly); match that so a log line right before `process.exit`
+    // isn't lost sitting in `stderr_terminal`'s buffer.
+    t.writer.flush() catch {};
+}
+
 const title_string = "\n=========\n   FIG\n=========\n\n";
 // The version of the linked fig core, so the CLI never drifts from the library
 // it ships. Sourced from `build.zig` (the same numbers `fig_version` exposes).
@@ -449,6 +484,9 @@ pub fn main(init: std.process.Init) !void {
     var stderr = Io.File.stderr().writer(io, &stderr_buf);
     var stderr_terminal = std.Io.Terminal{ .writer = &stderr.interface, .mode = stderr_color_mode };
     var stdout_terminal = std.Io.Terminal{ .writer = &stdout.interface, .mode = stdout_color_mode };
+    // From here on, route `std.log` through this same writer (see `logFn`) so
+    // it can't clobber `stderr_terminal`'s bytes when stderr is redirected.
+    g_log_terminal = &stderr_terminal;
 
     // Accessing command line arguments:
     var args = try init.minimal.args.iterateAllocator(init.gpa);
@@ -690,7 +728,7 @@ pub fn main(init: std.process.Init) !void {
                     if (!opts.output_explicit) to = from;
                 }
                 var fig_report: fig.Language.FIG.Parser.Report = .{};
-                const parsed = parseSliceAs(from, .{}, init.arena.allocator(), content, &fig_report) catch |err| {
+                const parsed = parseSliceAs(from, .{}, init.arena.allocator(), content, false, &fig_report) catch |err| {
                     // A fig parse failure renders as a `file:line:col` teaching
                     // message (DESIGN.md: every diagnostic names the fix) and
                     // exits cleanly — no error-return trace for a user typo.
@@ -1066,8 +1104,23 @@ fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?F
         _ = try fig.Embed.extract(allocator, content, embed_type);
     } else {
         var report: fig.Language.FIG.Parser.Report = .{};
-        _ = parseSliceAs(format, spec, allocator, content, &report) catch |err| {
-            if (report.diag) |d| fig_report.* = try d.renderAlloc(allocator, content, file);
+        // `recover` so a fig file reports EVERY error in one pass (a language
+        // server squiggles them all; `check` shouldn't hide errors 2..N behind
+        // the first). Each renders as its own `file:line:col` teaching block,
+        // concatenated in source order. Non-fig formats stop at their first
+        // error (`report.errors` stays empty) — fall back to the single `diag`.
+        _ = parseSliceAs(format, spec, allocator, content, true, &report) catch |err| {
+            if (report.errors.len > 0) {
+                var aw = std.Io.Writer.Allocating.init(allocator);
+                defer aw.deinit();
+                for (report.errors) |d| {
+                    const rendered = try d.renderAlloc(allocator, content, file);
+                    aw.writer.writeAll(rendered) catch return error.OutOfMemory;
+                }
+                fig_report.* = aw.toOwnedSlice() catch return error.OutOfMemory;
+            } else if (report.diag) |d| {
+                fig_report.* = try d.renderAlloc(allocator, content, file);
+            }
             return err;
         };
         if (report.warnings.len > 0) {
@@ -1137,7 +1190,7 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
 /// `file:line:col` report), `warnings` (authoring lints) always. Only the
 /// `.fig` branch fills it; the other formats keep their error-name reporting
 /// for now.
-fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8, fig_report: ?*fig.Language.FIG.Parser.Report) !fig.Document {
+fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8, recover: bool, fig_report: ?*fig.Language.FIG.Parser.Report) !fig.Document {
     return switch (format) {
         .json => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON) else error.FormatDisabled,
         .jsonc => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSONC) else error.FormatDisabled,
@@ -1149,7 +1202,13 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         .canonical => fig.Canonical.parse(allocator, content),
         .fig => if (comptime build_options.lang_fig) blk: {
             var local: fig.Language.FIG.Parser.Report = .{};
-            break :blk fig.Language.FIG.Parser.parseWithReport(allocator, content, fig.Language.FIG.default_type, fig_report orelse &local);
+            const r = fig_report orelse &local;
+            // `recover` collects the whole file's errors (`check`); otherwise
+            // stop at the first (`get`/convert only needs to fail once).
+            break :blk if (recover)
+                fig.Language.FIG.Parser.parseCollecting(allocator, content, fig.Language.FIG.default_type, r)
+            else
+                fig.Language.FIG.Parser.parseWithReport(allocator, content, fig.Language.FIG.default_type, r);
         } else error.FormatDisabled,
         // gron ("ungron") reconstructs the AST from its `path = value` lines,
         // reusing the JSON parser for each RHS — so it needs JSON compiled in.
