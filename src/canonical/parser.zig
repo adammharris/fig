@@ -36,7 +36,7 @@ owned_strings: std.ArrayList([]const u8) = .empty,
 // Reference layer, grown in lockstep with `nodes` (a null per node) and patched
 // when a prefix is seen. Only materialized into the AST when `ref_seen`.
 node_anchors: std.ArrayList(?[]const u8) = .empty,
-node_tags: std.ArrayList(?[]const u8) = .empty,
+node_tags: std.ArrayList(?AST.Tag) = .empty,
 anchors: std.ArrayList(AST.Anchor) = .empty,
 ref_seen: bool = false,
 // Comment layer, also grown in lockstep with `nodes`. `pending_leading` buffers
@@ -203,7 +203,10 @@ fn parseNode(self: *Parser) ParserError!AST.Node.Id {
     }
     if (tag) |text| {
         self.ref_seen = true;
-        self.node_tags.items[id] = text;
+        // Canonical is the exact-byte oracle: keep the tag VERBATIM in `.text`
+        // so its spelling round-trips (a `.kind` tag appears in canonical output
+        // only for a fig/builder-origin AST — see the printer).
+        self.node_tags.items[id] = .{ .text = text };
     }
     return id;
 }

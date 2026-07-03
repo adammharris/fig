@@ -86,16 +86,19 @@ root: Node.Id,
 /// Complete node tree, such that `ast.nodes[node.id] == node`
 nodes: []const Node,
 
-// ── YAML reference/annotation layer (side-tables) ──────────────────────────
+// ── Type-tag + reference layer (side-tables) ────────────────────────────────
 // These hold the DECODED data the resolver/materializer/printers need. Printers
 // take `*const AST` (never `Document`), so the decoded names/strings must live
 // here; only the source *spans* of the `&name`/`!tag` tokens live on `Document`.
-// All three are empty (`&.{}`) for documents with no anchors/aliases/tags, and
-// for non-YAML formats.
+// All three are empty (`&.{}`) for documents with no tags/anchors/aliases.
 
-/// Indexed by node id: the decoded tag string attached to that node (e.g.
-/// `"!!str"`, `"!foo"`), or null. Empty when the document declares no tags.
-node_tags: []const ?[]const u8 = &.{},
+/// Indexed by node id: the CROSS-FORMAT TYPE TAG attached to that node, or null.
+/// A type tag is a type assertion on a node — a fig `: int =`, a YAML `!!int`,
+/// and a canonical `!!int` all decode to the same `Tag`. Not YAML-specific:
+/// every surface that can annotate a node's type populates and reads this table
+/// (YAML/canonical via `!`-sigils, fig via `: type =`). Empty when the document
+/// declares no tags. See `Tag`.
+node_tags: []const ?Tag = &.{},
 
 /// Indexed by node id: the anchor NAME defined on that node (no leading `&`),
 /// or null. Empty when the document declares no anchors.
@@ -120,6 +123,33 @@ anchors: []const Anchor = &.{},
 node_comments: []const NodeComments = &.{},
 
 pub const Anchor = struct { name: []const u8, node: Node.Id };
+
+/// A cross-format type tag attached to a node (the `node_tags` element). It
+/// unifies fig's `: type =` annotation, YAML's `!!str`/`!foo`, and canonical's
+/// `!`-sigil into one concept: a type assertion carried alongside the value.
+pub const Tag = union(enum) {
+    /// A normalized, cross-format type identity — the companion to `Node.Kind`
+    /// (its tags, with `number` split into `integer`/`float`, the one
+    /// distinction a bare kind tag can't otherwise carry). A fig `: int =`, a
+    /// YAML `!!int`, and a canonical `!!int` all decode to `.{ .kind = .integer }`,
+    /// so this arm is what crosses formats. `extended` kinds (enum/datetime) are
+    /// NOT here — they are distinct node kinds that self-annotate, never a tag.
+    kind: KindTag,
+    /// A format tag with no core type meaning (a YAML custom `!foo`/`!<uri>`),
+    /// stored verbatim (leading `!` included) so YAML re-emits it byte-for-byte.
+    /// A format that can't represent it drops it (fig tier-3).
+    text: []const u8,
+
+    pub const KindTag = enum { null_, boolean, string, integer, float, sequence, mapping };
+
+    pub fn eql(self: Tag, other: Tag) bool {
+        if (activeTag(self) != activeTag(other)) return false;
+        return switch (self) {
+            .kind => |k| k == other.kind,
+            .text => |t| util.eql(u8, t, other.text),
+        };
+    }
+};
 
 pub const Comment = struct {
     /// Marker-stripped content. A `block` comment may contain newlines; a `line`
@@ -197,6 +227,20 @@ pub fn commentsEql(self: AST, b: AST) bool {
         const x: NodeComments = if (i < self.node_comments.len) self.node_comments[i] else .{};
         const y: NodeComments = if (i < b.node_comments.len) b.node_comments[i] else .{};
         if (!x.eql(y)) return false;
+    }
+    return true;
+}
+
+/// Compare two ASTs' type-tag layers. Separate from `eql` (which ignores tags,
+/// like comments) so round-trip tests can assert an explicit annotation survived.
+pub fn tagsEql(self: AST, b: AST) bool {
+    const n = @max(self.node_tags.len, b.node_tags.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const x: ?Tag = if (i < self.node_tags.len) self.node_tags[i] else null;
+        const y: ?Tag = if (i < b.node_tags.len) b.node_tags[i] else null;
+        if ((x == null) != (y == null)) return false;
+        if (x) |xt| if (!xt.eql(y.?)) return false;
     }
     return true;
 }

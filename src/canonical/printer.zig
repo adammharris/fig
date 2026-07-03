@@ -108,9 +108,21 @@ fn prefixes(self: *Printer, id: AST.Node.Id) Error!void {
         try self.writer.writeAll(name);
         try self.writer.writeByte(' ');
     };
-    // `node_tags` stores the tag verbatim, leading `!` included (e.g. `!!str`).
+    // A `.text` tag prints verbatim (leading `!` included, e.g. `!!str`); a
+    // normalized `.kind` tag (fig/builder origin) prints as its core shorthand.
     if (id < a.node_tags.len) if (a.node_tags[id]) |tag| {
-        try self.writer.writeAll(tag);
+        try self.writer.writeAll(switch (tag) {
+            .text => |t| t,
+            .kind => |k| switch (k) {
+                .null_ => "!!null",
+                .boolean => "!!bool",
+                .string => "!!str",
+                .integer => "!!int",
+                .float => "!!float",
+                .sequence => "!!seq",
+                .mapping => "!!map",
+            },
+        });
         try self.writer.writeByte(' ');
     };
 }

@@ -57,7 +57,7 @@ node_spans: std.ArrayList(Span) = .empty,
 // `addNode`. Decoded strings (node_tags/node_anchors) hand off to the AST; spans
 // hand off to the Document. `anchors` is the name→id table (filled in a later
 // phase; empty for tag-only documents).
-node_tags: std.ArrayList(?[]const u8) = .empty,
+node_tags: std.ArrayList(?AST.Tag) = .empty,
 node_anchors: std.ArrayList(?[]const u8) = .empty,
 node_tag_spans: std.ArrayList(?Span) = .empty,
 node_anchor_spans: std.ArrayList(?Span) = .empty,
@@ -2055,7 +2055,9 @@ fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParserError!AST.Node.
     if (tag) |t| node_span.start = @min(node_span.start, t.span.start);
     if (anchor) |a| node_span.start = @min(node_span.start, a.span.start);
     try self.node_spans.append(self.allocator, node_span);
-    try self.node_tags.append(self.allocator, if (tag) |t| t.text else null);
+    // YAML stores the tag VERBATIM (leading `!` kept) in the `.text` arm — its
+    // exact spelling round-trips, and the materializer decodes core tags from it.
+    try self.node_tags.append(self.allocator, if (tag) |t| AST.Tag{ .text = t.text } else null);
     try self.node_tag_spans.append(self.allocator, if (tag) |t| t.span else null);
     try self.node_anchors.append(self.allocator, if (anchor) |a| a.name else null);
     try self.node_anchor_spans.append(self.allocator, if (anchor) |a| a.span else null);
@@ -2279,7 +2281,7 @@ test "yaml tag: attaches to mapping value and extends span left" {
     const value = try doc.ast.getValByPath(&.{.{ .key = "k" }});
     // At parse the value is still classified structurally (tags apply at
     // materialize), but the tag string is recorded on the side-table...
-    try testing.expectEqualSlices(u8, "!!int", doc.ast.node_tags[value.id].?);
+    try testing.expectEqualSlices(u8, "!!int", doc.ast.node_tags[value.id].?.text);
     // ...and the node's span was extended leftward to cover the `!!int ` prefix.
     try testing.expectEqualSlices(u8, "!!int 5", Span.of(u8, doc.span(value), doc.source));
     try testing.expectEqualSlices(u8, "!!int", Span.of(u8, doc.tagSpan(value).?, doc.source));
@@ -2290,7 +2292,7 @@ test "yaml tag: on root scalar" {
     defer doc.deinit(testing.allocator);
     const root = doc.ast.nodes[doc.ast.root];
     try testing.expectEqualSlices(u8, "foo", root.kind.string);
-    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[root.id].?);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[root.id].?.text);
 }
 
 test "yaml tag: bare bang is a tagged null root" {
@@ -2298,7 +2300,7 @@ test "yaml tag: bare bang is a tagged null root" {
     defer doc.deinit(testing.allocator);
     const root = doc.ast.nodes[doc.ast.root];
     try testing.expect(root.kind == .null_);
-    try testing.expectEqualSlices(u8, "!", doc.ast.node_tags[root.id].?);
+    try testing.expectEqualSlices(u8, "!", doc.ast.node_tags[root.id].?.text);
 }
 
 test "yaml tag: empty value is a tagged null" {
@@ -2306,7 +2308,7 @@ test "yaml tag: empty value is a tagged null" {
     defer doc.deinit(testing.allocator);
     const value = try doc.ast.getValByPath(&.{.{ .key = "t" }});
     try testing.expect(value.kind == .null_);
-    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[value.id].?);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[value.id].?.text);
 }
 
 test "yaml tag: two tags on one node is rejected" {
@@ -2324,7 +2326,7 @@ test "yaml directive: %TAG declares a handle used by a tag" {
     defer doc.deinit(testing.allocator);
     const root = doc.ast.nodes[doc.ast.root];
     try testing.expectEqualSlices(u8, "bar", root.kind.string);
-    try testing.expectEqualSlices(u8, "!e!foo", doc.ast.node_tags[root.id].?);
+    try testing.expectEqualSlices(u8, "!e!foo", doc.ast.node_tags[root.id].?.text);
 }
 
 test "yaml directive: a reserved directive is ignored" {
@@ -2369,7 +2371,7 @@ test "yaml tag: flow tagged-null value" {
     defer doc.deinit(testing.allocator);
     const a_val = try doc.ast.getValByPath(&.{.{ .key = "a" }});
     try testing.expect(a_val.kind == .null_);
-    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[a_val.id].?);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[a_val.id].?.text);
 }
 
 test "yaml tag: flow tagged-null key" {
@@ -2379,7 +2381,7 @@ test "yaml tag: flow tagged-null key" {
     const kv = doc.ast.nodes[root.kind.mapping.?];
     const key = doc.ast.nodes[kv.kind.keyvalue.key];
     try testing.expect(key.kind == .null_);
-    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[key.id].?);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[key.id].?.text);
 }
 
 test "yaml tag: deferred null sequence item keeps its tag and the next item" {
@@ -2390,7 +2392,7 @@ test "yaml tag: deferred null sequence item keeps its tag and the next item" {
     const item0 = try doc.ast.getValByPath(&.{.{ .index = 0 }});
     const item1 = try doc.ast.getValByPath(&.{.{ .index = 1 }});
     try testing.expect(item0.kind == .null_);
-    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[item0.id].?);
+    try testing.expectEqualSlices(u8, "!!str", doc.ast.node_tags[item0.id].?.text);
     try testing.expectEqualSlices(u8, "y", item1.kind.string);
     try testing.expect(doc.ast.node_tags[item1.id] == null);
 }
@@ -2556,7 +2558,7 @@ test "yaml: a property-only line at a different column than its node" {
     defer doc.deinit(testing.allocator);
     const v = try doc.ast.getValByPath(&.{.{ .key = "folded" }});
     try testing.expect(v.kind == .string);
-    try testing.expectEqualSlices(u8, "!foo", doc.ast.node_tags[v.id].?);
+    try testing.expectEqualSlices(u8, "!foo", doc.ast.node_tags[v.id].?.text);
 }
 
 test "yaml block scalar: next-line header with explicit indent over the owner column" {

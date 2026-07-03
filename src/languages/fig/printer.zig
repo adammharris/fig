@@ -554,6 +554,10 @@ fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?us
             .allow_leading_trailing => {},
         }
     }
+    // A tag-annotated scalar needs `: type =`, which only exists in block
+    // position — so it forces its container out of inline flow (same reason as
+    // enum_literal/number_special below).
+    if (self.kindTagOf(id) != null) return null;
     switch (self.ast.nodes[id].kind) {
         .null_ => return 4,
         .boolean => |b| return @as(usize, if (b) 4 else 5),
@@ -748,11 +752,48 @@ fn keyWidth(self: *const Printer, key_id: AST.Node.Id) usize {
     };
 }
 
-/// `enum_literal`/`number_special` scalars only round-trip through the fig
-/// dialect via an explicit `: type`, since there is no bare spelling for them
-/// (DESIGN.md "Enum: explicit-only"). Returns whether an annotation was
-/// written (an annotated element needs ` = ` where a plain one has a space).
+/// The `.kind` type tag on `id` (`ast.node_tags`), or null when the node is
+/// untagged or carries a verbatim `.text` tag (a YAML custom tag fig can't
+/// spell). This is how a fig `: type =` annotation round-trips.
+fn kindTagOf(self: *const Printer, id: AST.Node.Id) ?AST.Tag.KindTag {
+    if (id < self.ast.node_tags.len) if (self.ast.node_tags[id]) |t| switch (t) {
+        .kind => |k| return k,
+        .text => {},
+    };
+    return null;
+}
+
+fn isStringTagged(self: *const Printer, id: AST.Node.Id) bool {
+    return if (self.kindTagOf(id)) |k| k == .string else false;
+}
+
+/// Write an explicit `: type` annotation for `id`, if it needs one. Two sources:
+/// a stored `.kind` type tag (a fig `: int/float/string/bool =` that round-trips
+/// via `ast.node_tags`), or an `extended` scalar with no bare spelling
+/// (`enum_literal`/`number_special`, DESIGN.md "Enum: explicit-only"). Returns
+/// whether an annotation was written (an annotated line needs ` = ` where a
+/// plain one has a space).
 fn writeTypeAnnotation(self: *Printer, id: AST.Node.Id) Error!bool {
+    if (self.kindTagOf(id)) |k| switch (k) {
+        .integer => {
+            try self.writer.writeAll(": int");
+            return true;
+        },
+        .float => {
+            try self.writer.writeAll(": float");
+            return true;
+        },
+        .string => {
+            try self.writer.writeAll(": string");
+            return true;
+        },
+        .boolean => {
+            try self.writer.writeAll(": bool");
+            return true;
+        },
+        // null/seq/map carry no fig `: type =` spelling — emit no annotation.
+        .null_, .sequence, .mapping => {},
+    };
     switch (self.ast.nodes[id].kind) {
         .extended => |e| switch (e.kind) {
             .enum_literal => {
@@ -778,6 +819,11 @@ fn value(self: *Printer, id: AST.Node.Id, in_flow: bool) Error!void {
         .number => |n| try self.writer.writeAll(n.raw),
         .string => |s| if (!in_flow and std.mem.indexOfScalar(u8, s, '\n') != null) {
             try self.writeMultilineString(s);
+        } else if (!in_flow and self.isStringTagged(id) and isTotalSinkSafe(s)) {
+            // A `: string =`-tagged value re-emits BARE: the annotation is a
+            // total sink (sniffing off on re-read), so no quotes are needed even
+            // for a value that would otherwise commit to flow (`[ 1 + 2 ]`).
+            try self.writer.writeAll(s);
         } else {
             try self.writeBareOrQuoted(s, false, in_flow);
         },
@@ -908,6 +954,25 @@ fn quotedWidth(s: []const u8) usize {
 
 fn scalarStringWidth(s: []const u8, is_key: bool, in_flow: bool) usize {
     return if (isBareSafe(s, is_key, in_flow)) s.len else quotedWidth(s);
+}
+
+/// Whether `s` survives verbatim as the RHS of a `: string =` assignment — the
+/// total-sink form, which `scanBareRestOfLine` reads to end-of-line with
+/// sniffing and flow-commitment BOTH off. Unlike `isBareSafe` there is no sniff
+/// or bracket-commit check (that is the annotation's whole point — `[ 1 + 2 ]`
+/// stays bare); only the mechanical scan hazards matter: a leading/trailing
+/// space is trimmed, a control char breaks the line, and a `#` at line-start or
+/// after whitespace opens a comment. When false, the printer quotes instead.
+fn isTotalSinkSafe(s: []const u8) bool {
+    if (s.len == 0) return false;
+    if (s[0] == ' ' or s[s.len - 1] == ' ') return false;
+    for (s) |c| if (c == '\n' or c == '\r' or c == '\t') return false;
+    var prev_ws = true; // line-start counts as "after whitespace"
+    for (s) |c| {
+        if (c == '#' and prev_ws) return false;
+        prev_ws = (c == ' ');
+    }
+    return true;
 }
 
 fn isBareSafe(s: []const u8, is_key: bool, in_flow: bool) bool {
@@ -1571,9 +1636,28 @@ test "typed sequence elements keep their annotations" {
         \\>* and a long plain string element so the whole weights sequence stays out of the inline budget
     ,
         \\weights
-        \\> * 1
+        \\> *: int = 1
         \\> *: enum = heavy
         \\> * and a long plain string element so the whole weights sequence stays out of the inline budget
         \\
     );
+}
+
+test "explicit type annotations round-trip (the : type surface + verbatim lexeme)" {
+    // A REDUNDANT annotation (the value already sniffs to the type) is preserved.
+    try expectPrint("num: int = 3\n", "num: int = 3\n");
+    // A trailing-dot float keeps BOTH its lexeme (`1.`, not `1.0`) and its `: float`.
+    try expectPrint("sig: float = 1.\n", "sig: float = 1.\n");
+    // A leading-zero int keeps its padding (`09`, not `9`).
+    try expectPrint("lead: int = 09\n", "lead: int = 09\n");
+    // A `: string` total sink re-emits BARE — no re-quoting the bracketed value.
+    try expectPrint("strs: string = [ 1 + 2 ]\n", "strs: string = [ 1 + 2 ]\n");
+    // Idempotence + parse→print→parse stability across all four together.
+    try expectRoundTrip("num: int = 3\nsig: float = 1.\nlead: int = 09\nstrs: string = [ 1 + 2 ]\n");
+}
+
+test "a : string value that can't go bare falls back to quoted, keeping the tag" {
+    // A leading space makes the total-sink bare form lossy (it would be trimmed),
+    // so the printer quotes — but the redundant `: string` annotation survives.
+    try expectPrint("s: string = \"  x\"\n", "s: string = \"  x\"\n");
 }

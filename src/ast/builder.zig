@@ -51,6 +51,13 @@ comments: std.ArrayList(PendingComments) = .empty,
 /// Not part of any finished AST.
 view_comments: std.ArrayList(NodeComments) = .empty,
 any_comments: bool = false,
+/// Type tags by node id (`ast.node_tags`). Unlike `comments`/`spans` this is
+/// NOT grown per-node in `append` — tags are rare, so `setTag` grows it to the
+/// tagged id on demand (null-filling the gap). A build that never tags a node
+/// carries the AST's `&.{}` default; readers length-guard the table, so a short
+/// slice is fine. Frozen into the AST's plain slice by `finish` when `any_tags`.
+node_tags: std.ArrayList(?AST.Tag) = .empty,
+any_tags: bool = false,
 
 pub const Entry = struct { key: Node.Id, value: Node.Id };
 
@@ -79,6 +86,9 @@ pub fn deinit(self: *Builder) void {
     self.comments.deinit(self.allocator);
     self.view_comments.deinit(self.allocator);
     self.spans.deinit(self.allocator);
+    // Only the outer list is ours; any `.text` tag payload aliases owned_strings
+    // (freed above) — same discipline as the AST's own `node_tags` free.
+    self.node_tags.deinit(self.allocator);
 }
 
 /// Set `id`'s source span (a byte range into the input `id` was parsed from).
@@ -155,6 +165,19 @@ pub fn setTrailingComment(self: *Builder, id: Node.Id, comment: Comment) Allocat
     const text = try self.dupe(comment.text);
     self.comments.items[id].trailing = .{ .text = text, .style = comment.style };
     self.any_comments = true;
+}
+
+/// Attach a cross-format type tag to an already-added node (`ast.node_tags`),
+/// replacing any tag previously set on `id`. A `.text` tag is copied into owned
+/// storage; a `.kind` tag owns nothing. The table grows to `id` on demand
+/// (null-filling any gap), so tagging is pay-per-use.
+pub fn setTag(self: *Builder, id: Node.Id, tag: AST.Tag) Allocator.Error!void {
+    while (self.node_tags.items.len <= id) try self.node_tags.append(self.allocator, null);
+    self.node_tags.items[id] = switch (tag) {
+        .kind => tag,
+        .text => |t| .{ .text = try self.dupe(t) },
+    };
+    self.any_tags = true;
 }
 
 pub fn addNull(self: *Builder) Allocator.Error!Node.Id {
@@ -239,8 +262,9 @@ pub fn addMappingFromEntries(self: *Builder, kv_ids: []const Node.Id) Allocator.
 
 /// Freeze the builder into an owned `AST` rooted at `root`. The builder is
 /// reset to empty, so a subsequent `deinit` is harmless. The returned AST
-/// owns its nodes and strings; free it with `ast.deinit()`. It carries no
-/// YAML reference layer (anchors/tags) — those side-tables stay empty.
+/// owns its nodes and strings; free it with `ast.deinit()`. It carries the type
+/// tags set via `setTag` (the AST's `node_tags`); the YAML anchor/alias
+/// reference layer stays empty (no builder API populates it).
 pub fn finish(self: *Builder, root: Node.Id) Allocator.Error!AST {
     const nodes = try self.nodes.toOwnedSlice(self.allocator);
     self.nodes = .empty;
@@ -270,6 +294,10 @@ pub fn finish(self: *Builder, root: Node.Id) Allocator.Error!AST {
         }
         ast.node_comments = table;
     }
+    if (self.any_tags) {
+        ast.node_tags = try self.node_tags.toOwnedSlice(self.allocator);
+        self.node_tags = .empty;
+    }
     return ast;
 }
 
@@ -295,12 +323,14 @@ pub fn view(self: *Builder, root: Node.Id) Allocator.Error!AST {
             });
         node_comments = self.view_comments.items;
     }
+    const node_tags: []const ?AST.Tag = if (self.any_tags) self.node_tags.items else &.{};
     return .{
         .allocator = self.allocator,
         .owned_strings = self.owned_strings.items,
         .root = root,
         .nodes = self.nodes.items,
         .node_comments = node_comments,
+        .node_tags = node_tags,
     };
 }
 
@@ -389,6 +419,27 @@ test "Builder constructs an AST that serializes" {
             \\
         , yw.buffered());
     }
+}
+
+test "Builder.setTag surfaces a normalized kind tag as a YAML core tag" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    const testing = std.testing;
+    var b = Builder.init(testing.allocator);
+    defer b.deinit();
+    const v = try b.addNumberRaw("09", false); // integer lexeme kept verbatim
+    try b.setTag(v, .{ .kind = .integer });
+    const k = try b.addString("id");
+    const root = try b.addMapping(&.{.{ .key = k, .value = v }});
+    var ast = try b.finish(root);
+    defer ast.deinit();
+    try testing.expect(ast.node_tags[v].?.kind == .integer);
+
+    var buf: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try ast.serialize(&w, .yaml);
+    // A `.kind` tag renders as its YAML core-schema shorthand; the lexeme is kept.
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "!!int") != null);
+    try testing.expect(std.mem.indexOf(u8, w.buffered(), "09") != null);
 }
 
 test "strip_comments drops carried comments across formats" {

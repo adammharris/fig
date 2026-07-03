@@ -211,34 +211,56 @@ const Materializer = struct {
     // ── tags ──────────────────────────────────────────────────────────────
 
     fn applyScalarTag(self: *const Materializer, node: AST.Node) Error!AST.Node.Kind {
-        const tag = self.src.node_tags[node.id] orelse return node.kind;
-        if (coreTagName(tag)) |name| {
-            if (std.mem.eql(u8, name, "str")) return .{ .string = self.scalarText(node) };
-            if (std.mem.eql(u8, name, "null")) return .null_;
-            if (std.mem.eql(u8, name, "bool")) return self.asBool(node);
-            if (std.mem.eql(u8, name, "int")) return .{ .number = .{ .raw = self.scalarText(node), .kind = .integer } };
-            if (std.mem.eql(u8, name, "float")) return .{ .number = .{ .raw = self.scalarText(node), .kind = .float } };
-            if (std.mem.eql(u8, name, "seq") or std.mem.eql(u8, name, "map")) return error.TagTypeMismatch;
-            // a `!!`-secondary tag with an unrecognized core name is custom.
-        }
-        return self.customTag(tag, node.kind);
+        const name = self.coreName(self.src.node_tags[node.id] orelse return node.kind) orelse
+            return self.customTag(node.id, node.kind);
+        if (std.mem.eql(u8, name, "str")) return .{ .string = self.scalarText(node) };
+        if (std.mem.eql(u8, name, "null")) return .null_;
+        if (std.mem.eql(u8, name, "bool")) return self.asBool(node);
+        if (std.mem.eql(u8, name, "int")) return .{ .number = .{ .raw = self.scalarText(node), .kind = .integer } };
+        if (std.mem.eql(u8, name, "float")) return .{ .number = .{ .raw = self.scalarText(node), .kind = .float } };
+        if (std.mem.eql(u8, name, "seq") or std.mem.eql(u8, name, "map")) return error.TagTypeMismatch;
+        // a `!!`-secondary tag with an unrecognized core name is custom.
+        return self.customTag(node.id, node.kind);
     }
 
     fn checkCollectionTag(self: *const Materializer, node: AST.Node, comptime want: enum { seq, map }) Error!void {
         const tag = self.src.node_tags[node.id] orelse return;
-        if (coreTagName(tag)) |name| {
+        if (self.coreName(tag)) |name| {
             const ok = if (want == .seq) "seq" else "map";
             if (std.mem.eql(u8, name, ok)) return;
             if (eqlAny(name, &.{ "seq", "map", "str", "int", "float", "bool", "null" }))
                 return error.TagTypeMismatch;
         }
-        _ = try self.customTag(tag, node.kind); // strict-errors on unknown; lax no-op
+        _ = try self.customTag(node.id, node.kind); // strict-errors on unknown; lax no-op
     }
 
-    /// A non-core tag: the non-specific `!` is a no-op; anything else is rejected
-    /// in strict mode and dropped (node kept as parsed) in lax mode.
-    fn customTag(self: *const Materializer, tag: []const u8, kind: AST.Node.Kind) Error!AST.Node.Kind {
-        if (std.mem.eql(u8, tag, "!")) return kind;
+    /// The core-schema type name (`str`, `int`, …) a `Tag` denotes, or null when
+    /// it is a genuinely custom tag. A `.kind` tag names its type directly; a
+    /// `.text` tag is decoded from its YAML spelling via `coreTagName`.
+    fn coreName(self: *const Materializer, tag: AST.Tag) ?[]const u8 {
+        _ = self;
+        return switch (tag) {
+            .text => |t| coreTagName(t),
+            .kind => |k| switch (k) {
+                .null_ => "null",
+                .boolean => "bool",
+                .string => "str",
+                .integer => "int",
+                .float => "float",
+                .sequence => "seq",
+                .mapping => "map",
+            },
+        };
+    }
+
+    /// A non-core tag on node `id`: a normalized `.kind` tag is always valid; a
+    /// verbatim non-specific `!` is a no-op; any other custom tag is rejected in
+    /// strict mode and dropped (node kept as parsed) in lax mode.
+    fn customTag(self: *const Materializer, id: AST.Node.Id, kind: AST.Node.Kind) Error!AST.Node.Kind {
+        switch (self.src.node_tags[id] orelse return kind) {
+            .kind => return kind,
+            .text => |t| if (std.mem.eql(u8, t, "!")) return kind,
+        }
         if (self.mode == .strict) return error.UnknownTag;
         return kind;
     }

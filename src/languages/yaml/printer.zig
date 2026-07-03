@@ -213,8 +213,27 @@ fn writeProps(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!vo
         try writer.writeByte(' ');
     };
     if (id < ast.node_tags.len) if (ast.node_tags[id]) |tag| {
-        try writer.writeAll(tag);
+        try writer.writeAll(tagText(tag));
         try writer.writeByte(' ');
+    };
+}
+
+/// Render a type tag as YAML: a verbatim `.text` tag as-is (its exact spelling),
+/// or a normalized `.kind` tag as the core-schema shorthand (`!!int`, `!!str`, …)
+/// — the latter is what a fig/canonical-origin tag becomes when reserialized to
+/// YAML.
+fn tagText(tag: AST.Tag) []const u8 {
+    return switch (tag) {
+        .text => |t| t,
+        .kind => |k| switch (k) {
+            .null_ => "!!null",
+            .boolean => "!!bool",
+            .string => "!!str",
+            .integer => "!!int",
+            .float => "!!float",
+            .sequence => "!!seq",
+            .mapping => "!!map",
+        },
     };
 }
 
@@ -229,7 +248,7 @@ fn writePropsAfterColon(writer: *Writer, ast: *const AST, id: AST.Node.Id) Write
     };
     if (id < ast.node_tags.len) if (ast.node_tags[id]) |tag| {
         try writer.writeByte(' ');
-        try writer.writeAll(tag);
+        try writer.writeAll(tagText(tag));
     };
 }
 

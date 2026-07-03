@@ -454,6 +454,11 @@ const TNode = struct {
     /// `AST.trailingCommentAnchor`-equivalent: the value itself for a
     /// scalar/container, always applied directly to this node's built id.
     trailing: ?AST.Comment = null,
+    /// The explicit `: type =` annotation, recorded as a cross-format type tag
+    /// (`ast.node_tags`) so the annotation round-trips through `fig fmt`. Set by
+    /// `applyKnownType`/`parseAssignedValue`; applied in `buildNode`. Null for an
+    /// untyped value (`key = value`).
+    tag: ?AST.Tag = null,
     /// Own leading comments — meaningful only when this TNode is NOT a map
     /// entry's value (sequence elements and root have no wrapping key to bind
     /// to instead).
@@ -1231,7 +1236,14 @@ fn boxNode(self: *Parser, node: TNode) Error!*TNode {
 fn parseAssignedValue(self: *Parser, type_name: ?[]const u8) Error!TNode {
     self.skipSpacesTabs();
     if (type_name) |t| {
-        if (std.mem.eql(u8, t, "string")) return self.parseUntypedValue(true);
+        if (std.mem.eql(u8, t, "string")) {
+            // `: string =` selects the raw-text sub-parser AND records the tag, so
+            // the annotation round-trips and `fig fmt` can re-emit the value bare
+            // (the annotation turns sniffing off on re-read — no re-quoting needed).
+            var node = try self.parseUntypedValue(true);
+            node.tag = .{ .kind = .string };
+            return node;
+        }
         const res = self.scanBareRestOfLine();
         if (res.text.len == 0) return error.FigInvalidValue;
         // `scanBareRestOfLine` has parked `pos` at end-of-line (past any trailing
@@ -1457,36 +1469,42 @@ fn looksLikeTrailingDotNumber(text: []const u8) bool {
 }
 
 /// Explicit typing (`key: type = value`): the annotation is checked and
-/// coercing, never stored (DESIGN.md "Explicit typing").
+/// coercing, and now also STORED as a cross-format type tag (`ast.node_tags`)
+/// so it round-trips (DESIGN.md "Explicit typing"). The value's VERBATIM lexeme
+/// is kept as the node's `raw`/`text` — the coercion normalizers below run only
+/// to *validate* (a genuine mismatch still errors), never to rewrite the bytes,
+/// so `1.`/`09` survive exactly. `enum`/`datetime` map to distinct `extended`
+/// node kinds that self-annotate on print, so they carry no tag.
 fn applyKnownType(self: *Parser, type_name: []const u8, text: []const u8) Error!TNode {
     if (std.mem.eql(u8, type_name, "int")) {
         if (tok.sniffNumber(text)) |n| {
             if (n.kind != .integer) return error.FigTypeMismatch;
-            return .{ .value = .{ .number = n } };
+            return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
         }
         // Coercion opt-in: a leading-zero decimal (`09`, `007`) is a *string*
         // when bare (the Leading-zero rule), but `: int` is the author
-        // overriding that default — strip the padding to a valid integer raw.
-        if (try self.normalizeDecimal(text)) |raw|
-            return .{ .value = .{ .number = .{ .raw = raw, .kind = .integer } } };
+        // overriding that default. Validate the shape (null → mismatch); keep the
+        // authored lexeme verbatim so the padding round-trips.
+        if ((try self.normalizeDecimal(text)) != null)
+            return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
         return error.FigTypeMismatch;
     }
     if (std.mem.eql(u8, type_name, "float")) {
         if (std.mem.eql(u8, text, "inf") or std.mem.eql(u8, text, "-inf") or std.mem.eql(u8, text, "nan")) {
             return .{ .value = .{ .extended = .{ .kind = .number_special, .text = text } } };
         }
-        if (tok.sniffNumber(text)) |n|
-            return .{ .value = .{ .number = .{ .raw = n.raw, .kind = .float } } };
+        if (tok.sniffNumber(text)) |_|
+            return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
         // Coercion opt-in: a trailing-dot (`1.`) or leading-zero (`09`) token is
-        // a string when bare, but `: float` overrides — normalize to a valid
-        // float raw (`1.` → `1.0`, `09` → `9.0`) so it round-trips everywhere.
-        if (try self.normalizeCoercedFloat(text)) |raw|
-            return .{ .value = .{ .number = .{ .raw = raw, .kind = .float } } };
+        // a string when bare, but `: float` overrides. Validate the shape (null →
+        // mismatch); keep the authored lexeme verbatim (`1.` stays `1.`).
+        if ((try self.normalizeCoercedFloat(text)) != null)
+            return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
         return error.FigTypeMismatch;
     }
     if (std.mem.eql(u8, type_name, "bool")) {
-        if (std.mem.eql(u8, text, "true")) return .{ .value = .{ .boolean = true } };
-        if (std.mem.eql(u8, text, "false")) return .{ .value = .{ .boolean = false } };
+        if (std.mem.eql(u8, text, "true")) return .{ .value = .{ .boolean = true }, .tag = .{ .kind = .boolean } };
+        if (std.mem.eql(u8, text, "false")) return .{ .value = .{ .boolean = false }, .tag = .{ .kind = .boolean } };
         return error.FigTypeMismatch;
     }
     if (std.mem.eql(u8, type_name, "enum")) {
@@ -1875,6 +1893,7 @@ fn buildNode(self: *Parser, b: *AST.Builder, node: *TNode) Error!AST.Node.Id {
         },
     };
     b.setSpan(id, node.span);
+    if (node.tag) |tag| try b.setTag(id, tag);
     if (node.trailing) |t| try b.setTrailingComment(id, t);
     for (node.dangling.items) |c| try b.addDanglingComment(id, c);
     return id;
@@ -2134,7 +2153,7 @@ test "explicit typing rejects a mismatch" {
     try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "port: int = hello\n", .Fig));
 }
 
-test "explicit typing coerces number lookalikes that bare-sniffing rejects" {
+test "explicit typing coerces number lookalikes but keeps the verbatim lexeme + tag" {
     var ast = try parseAbstract(testing.allocator,
         \\a: float = 1.
         \\b: int = 09
@@ -2143,16 +2162,24 @@ test "explicit typing coerces number lookalikes that bare-sniffing rejects" {
         \\e: string = [ 1 + 2 ]
     , .Fig);
     defer ast.deinit();
-    // `1.` → the float `1.0`; the padding/trailing-dot is normalized so the raw
-    // round-trips through every target (invalid `1.`/`09` never reach the AST).
-    try testing.expectEqualStrings("1.0", (try ast.getValByPath(&.{.{ .key = "a" }})).kind.number.raw);
+    // `: float`/`: int` accept a trailing-dot / leading-zero lexeme (bare-sniffing
+    // rejects them), but the VERBATIM bytes are kept as the number raw — the
+    // annotation is stored as a type tag, so both the lexeme and the `: type`
+    // surface round-trip through `fig fmt`.
+    const a = try ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expect(a.kind.number.kind == .float);
+    try testing.expectEqualStrings("1.", a.kind.number.raw);
+    try testing.expect(ast.node_tags[a.id].?.kind == .float);
     const b = try ast.getValByPath(&.{.{ .key = "b" }});
     try testing.expect(b.kind.number.kind == .integer);
-    try testing.expectEqualStrings("9", b.kind.number.raw);
-    try testing.expectEqualStrings("9.0", (try ast.getValByPath(&.{.{ .key = "c" }})).kind.number.raw);
-    try testing.expectEqualStrings("-7", (try ast.getValByPath(&.{.{ .key = "d" }})).kind.number.raw);
+    try testing.expectEqualStrings("09", b.kind.number.raw);
+    try testing.expect(ast.node_tags[b.id].?.kind == .integer);
+    try testing.expectEqualStrings("09", (try ast.getValByPath(&.{.{ .key = "c" }})).kind.number.raw);
+    try testing.expectEqualStrings("-007", (try ast.getValByPath(&.{.{ .key = "d" }})).kind.number.raw);
     // `: string` is a total sink: the bracketed RHS is verbatim text, not flow.
-    try testing.expectEqualStrings("[ 1 + 2 ]", (try ast.getValByPath(&.{.{ .key = "e" }})).kind.string);
+    const e = try ast.getValByPath(&.{.{ .key = "e" }});
+    try testing.expectEqualStrings("[ 1 + 2 ]", e.kind.string);
+    try testing.expect(ast.node_tags[e.id].?.kind == .string);
 }
 
 test "type-mismatch diagnostic anchors on the value span, not the trailing comment" {
