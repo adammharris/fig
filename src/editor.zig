@@ -474,7 +474,7 @@ pub fn Editor(comptime Language: type) type {
             const source = self.source.items;
             if (isFlow(source, span)) {
                 const first = node.kind.sequence;
-                try self.insertFlowItem(span, first != null, value_text);
+                try self.insertFlowItem(parsed, node, span, first != null, value_text);
                 return;
             }
             // A non-flow TOML sequence is an array-of-tables; use
@@ -1129,14 +1129,36 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 
-        fn insertFlowItem(self: *Self, span: Span, non_empty: bool, value_text: []const u8) !void {
+        /// Insert `value_text` as the new last item of the flow sequence
+        /// `node`/`span`. Splices immediately after the current last
+        /// element rather than before the closing `]`, so a pre-existing
+        /// trailing comma (legal in fig/JSON5 flow arrays) isn't doubled
+        /// into an empty element that fails to reparse. When the array is
+        /// laid out one item per line, the new item follows that same
+        /// one-per-line style, indented to match the first item — mirroring
+        /// `insertFlowMapEntry`'s multi-line handling.
+        fn insertFlowItem(self: *Self, parsed: Document, node: AST.Node, span: Span, non_empty: bool, value_text: []const u8) !void {
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
-            const at = if (non_empty) blk: {
-                try out.appendSlice(self.allocator, ", ");
-                break :blk span.end - 1; // before the closing ']'
-            } else span.start + 1; // just after '['
+            const source = self.source.items;
+            if (non_empty) {
+                const last = (try parsed.ast.lastChild(&node)).?;
+                const last_end = parsed.span(last).end;
+                const close = span.end - 1; // the ']'
+                if (std.mem.indexOfScalar(u8, source[last_end..close], '\n') != null) {
+                    const first_item = (try parsed.ast.child(&node)).?;
+                    const col = columnOf(source, parsed.span(first_item).start);
+                    try out.appendSlice(self.allocator, ",\n");
+                    try out.appendNTimes(self.allocator, ' ', col);
+                } else {
+                    try out.appendSlice(self.allocator, ", ");
+                }
+                try out.appendSlice(self.allocator, value_text);
+                try self.replaceAtSpan(Span.init(last_end, last_end), out.items);
+                return;
+            }
             try out.appendSlice(self.allocator, value_text);
+            const at = span.start + 1; // just after '['
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 

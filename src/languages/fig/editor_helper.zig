@@ -704,6 +704,26 @@ test "fig inline array append/prepend/remove (flow)" {
     try expectFigSource(&ed, "ports = [0, 1, 3]\n");
 }
 
+test "fig inline array append with pre-existing trailing comma (single line)" {
+    // A trailing comma before ']' is legal fig flow-array syntax; appending
+    // must not double it into an empty element that fails to reparse.
+    var ed = try newFigEditor("ports = [1, 2,]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectFigSource(&ed, "ports = [1, 2, 3,]\n");
+}
+
+test "fig inline array append onto a multi-line one-item-per-line array" {
+    // Regression: appending used to splice right before the closing ']',
+    // which — combined with the pre-existing trailing comma after the last
+    // item — produced a doubled comma that failed to reparse. The fix
+    // splices after the last item and keeps the one-per-line style.
+    var ed = try newFigEditor("contents = [\n  a,\n  b,\n]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "contents" }}, "c");
+    try expectFigSource(&ed, "contents = [\n  a,\n  b,\n  c,\n]\n");
+}
+
 // --- renameContainer: no dedicated op — replaceKeyAtPath already does it ---
 
 test "fig rename a container's key via the generic replaceKeyAtPath" {

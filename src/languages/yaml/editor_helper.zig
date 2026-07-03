@@ -286,6 +286,22 @@ test "yaml append empty flow seq" {
     try expectSource(&ed, "t: [a]\n");
 }
 
+test "yaml append flow seq with pre-existing trailing comma" {
+    // A trailing comma before ']' is legal flow-sequence syntax; appending
+    // must not double it into an empty element that fails to reparse.
+    var ed = try newYamlEditor("t: [a, b,]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "t" }}, "c");
+    try expectSource(&ed, "t: [a, b, c,]\n");
+}
+
+test "yaml append onto a multi-line one-item-per-line flow seq" {
+    var ed = try newYamlEditor("t: [\n  a,\n  b,\n]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "t" }}, "c");
+    try expectSource(&ed, "t: [\n  a,\n  b,\n  c,\n]\n");
+}
+
 test "yaml remove block seq middle" {
     var ed = try newYamlEditor("- a\n- b\n- c\n");
     defer ed.deinit();

@@ -966,6 +966,23 @@ test "toml inline array append/prepend/remove" {
     try expectTomlSource(&ed, "ports = [0, 1, 3]\n");
 }
 
+test "toml inline array append with pre-existing trailing comma" {
+    // A trailing comma before ']' is legal TOML inline-array syntax;
+    // appending must not double it into an empty element that fails to
+    // reparse.
+    var ed = try newTomlEditor("ports = [1, 2,]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectTomlSource(&ed, "ports = [1, 2, 3,]\n");
+}
+
+test "toml inline array append onto a multi-line one-item-per-line array" {
+    var ed = try newTomlEditor("ports = [\n  1,\n  2,\n]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectTomlSource(&ed, "ports = [\n  1,\n  2,\n  3,\n]\n");
+}
+
 test "toml inline array ops on array-of-tables are refused" {
     var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
     defer ed.deinit();

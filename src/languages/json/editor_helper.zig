@@ -139,3 +139,34 @@ test "json5 delete leaves an unrelated earlier comment intact" {
         \\}
     );
 }
+
+test "json5 array append with pre-existing trailing comma" {
+    // JSON5 permits a trailing comma before ']'; appending must not double
+    // it into an empty element that fails to reparse.
+    var ed = try newJson5Editor("{ ports: [1, 2,] }");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectJson5Source(&ed, "{ ports: [1, 2, 3,] }");
+}
+
+test "json5 array append onto a multi-line one-item-per-line array" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  ports: [
+        \\    1,
+        \\    2,
+        \\  ],
+        \\}
+    );
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "ports" }}, "3");
+    try expectJson5Source(&ed,
+        \\{
+        \\  ports: [
+        \\    1,
+        \\    2,
+        \\    3,
+        \\  ],
+        \\}
+    );
+}
