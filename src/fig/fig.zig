@@ -35,4 +35,5 @@ test {
     _ = @import("tokenizer.zig");
     _ = @import("parser.zig");
     _ = @import("printer.zig");
+    _ = @import("editor_helper.zig");
 }

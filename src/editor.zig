@@ -11,15 +11,18 @@ const json_string = @import("util/json_string.zig");
 const log = std.log.scoped(.editor);
 
 // Format-specific editing logic the generic engine delegates to from its
-// `if (Language == Toml/Yaml)` branches: TOML's multi-region gather + whole-table
-// ops, and YAML's reference-layer / block-framing helpers. See each module's
+// `if (Language == Toml/Yaml/Fig)` branches: TOML's multi-region gather +
+// whole-table ops, YAML's reference-layer / block-framing helpers, and fig's
+// marker-prefix-copying block/flow insert + append/prepend. See each module's
 // header for the split rationale. These modules also hold that language's editor
 // tests, so editor-test code lives next to the concern it exercises.
 const toml_edit = @import("toml/editor_helper.zig");
 const yaml_edit = @import("yaml/editor_helper.zig");
+const fig_edit = @import("fig/editor_helper.zig");
 // Language tags used by the comptime branches above.
 const Toml = @import("toml/toml.zig").Language;
 const Yaml = @import("yaml/yaml.zig").Language;
+const Fig = @import("fig/fig.zig").Language;
 // Used only for the comptime comment-marker choice (ZON uses `//`, like Zig).
 const Zon = @import("zon/zon.zig").Language;
 
@@ -226,7 +229,16 @@ pub fn Editor(comptime Language: type) type {
             const span = parsed.span(node);
             const source = self.source.items;
             const line_start = lineStartBefore(source, span.start);
-            const indent = source[line_start..firstNonSpace(source, line_start)];
+            // fig's `#`-only comment line needs the same `>` marker-run prefix
+            // as the line it anchors above (comment depth is load-bearing for
+            // attachment — DESIGN.md "Comments") — `firstNonSpace` would stop
+            // at the `>` and yield bare whitespace, dropping the markers
+            // entirely. `span.start` already sits right after that prefix for
+            // every fig node (see `TNode.span`'s doc comment in
+            // `fig/parser.zig`), so slicing back to the line start recovers it
+            // exactly. Every other language's prefix is pure whitespace, where
+            // `firstNonSpace` and `span.start` agree anyway.
+            const indent = if (Language == Fig) source[line_start..span.start] else source[line_start..firstNonSpace(source, line_start)];
 
             var buf: std.ArrayList(u8) = .empty;
             defer buf.deinit(self.allocator);
@@ -393,6 +405,8 @@ pub fn Editor(comptime Language: type) type {
             const source = self.source.items;
             if (Language == Toml)
                 return toml_edit.tomlInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
+            if (Language == Fig)
+                return fig_edit.figInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -433,6 +447,18 @@ pub fn Editor(comptime Language: type) type {
                 const fns = firstNonSpace(source, lineStartBefore(source, span.start));
                 if (fns < source.len and source[fns] == '[') return error.CannotDeleteTable;
             }
+            // A fig block (non-flow) mapping/sequence value may be a
+            // re-entered/scattered container (DESIGN.md "Re-entering a path
+            // to add new keys is fine") — TOML's `CannotDeleteTable` twin,
+            // refusing rather than risk swallowing an interleaved foreign
+            // sibling on a scattered container's line-based delete. A flow
+            // (`{…}`/`[…]`) value is always tightly contiguous, so it deletes
+            // normally below.
+            if (Language == Fig) {
+                const val = parsed.ast.nodes[node.kind.keyvalue.value];
+                if ((val.kind == .mapping or val.kind == .sequence) and !isFlow(source, parsed.span(val)))
+                    return error.CannotDeleteContainer;
+            }
             const line_start = lineStartBefore(source, span.start);
             const del_start = commentBlockStart(source, line_start, comment_style);
             const del_end = lineEndAfter(source, span.end -| 1);
@@ -454,6 +480,7 @@ pub fn Editor(comptime Language: type) type {
             // A non-flow TOML sequence is an array-of-tables; use
             // `appendTableToArray` for those. (TOML has no block scalar array.)
             if (Language == Toml) return error.NotAnInlineArray;
+            if (Language == Fig) return fig_edit.figAppendSeqLine(self, parsed, node, value_text);
             const last = (try parsed.ast.lastChild(&node)) orelse return error.NotASequence;
             const first_item = (try parsed.ast.child(&node)).?;
             const dash_col = dashColumn(source, parsed.span(first_item).start);
@@ -473,6 +500,7 @@ pub fn Editor(comptime Language: type) type {
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
+            if (Language == Fig) return fig_edit.figPrependSeqLine(self, parsed, node, value_text);
             const first_item = (try parsed.ast.child(&node)) orelse return error.NotASequence;
             const first_start = parsed.span(first_item).start;
             const line_start = lineStartBefore(source, first_start);
@@ -1442,6 +1470,27 @@ test "setTrailingComment appends and then replaces a YAML same-line comment" {
 test "addLeadingComment on TOML uses #" {
     if (comptime !build_options.lang_toml) return error.SkipZigTest;
     try expectCommentEdit(Toml, .TOML_1_1, "a = 1\nb = 2\n", "a = 1\n# note\nb = 2\n", .leading, &.{.{ .key = "b" }}, "note");
+}
+
+// This instantiation (plus every `Editor(Fig)` call below) is also what pulls
+// `fig/editor_helper.zig` into the test build's reachability graph — `zig
+// test` discovers a file's `test` blocks only once something forces it to be
+// analyzed, and a bare top-level `const fig_edit = @import(...)` is not
+// enough on its own (mirrors why the TOML test above matters for
+// `toml/editor_helper.zig`, and why `fig/editor_helper.zig`'s OWN tests carry
+// the rest of `Editor(Fig)`'s coverage rather than duplicating it here).
+test "addLeadingComment on fig uses # at the target's own marker depth" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    try expectCommentEdit(Fig, .Fig, "a = 1\nb = 2\n", "a = 1\n# note\nb = 2\n", .leading, &.{.{ .key = "b" }}, "note");
+    try expectCommentEdit(
+        Fig,
+        .Fig,
+        "database\n> pool\n> > size = 10\n",
+        "database\n> pool\n> > # note\n> > size = 10\n",
+        .leading,
+        &.{ .{ .key = "database" }, .{ .key = "pool" }, .{ .key = "size" } },
+        "note",
+    );
 }
 
 test "comment ops on JSONC use // and respect indentation" {

@@ -25,8 +25,12 @@
 //!     to the next sibling line as its leading run.
 //!   * Only LF line endings are recognized as line breaks (a lone `\r` is
 //!     treated as ordinary trivia and trimmed where comments are captured).
-//!   * The in-place editor (`edit`/`set`/`insert`/`delete`) is not wired for
-//!     `.fig` — this module is the reader half of "reader + `fig fmt`".
+//!
+//! Every built node also carries a source `Span` (see "AST assembly" below) —
+//! the foundation `Editor(fig.Language.FIG)` needs to splice edits in place
+//! (`edit`/`set`/`insert`/`delete`/`comment`; see `editor_helper.zig`).
+//! Whole-container structural ops (rename/move/reorder a header, analogous to
+//! TOML's `renameTable`/`moveTable`) are not implemented yet.
 
 pub const Parser = @This();
 
@@ -281,6 +285,13 @@ last_append_steps: ?[]const Step = null,
 /// the cursor has already moved past the token that actually offends (set via
 /// `failAt`). `pos` is the right answer everywhere else.
 fail_offset: ?usize = null,
+/// Byte offset of the start of the line currently being processed (set once
+/// per iteration of the main loop in `run`). The fallback span anchor for a
+/// container whose opener carries no more precise position of its own (a
+/// bare `*` element-opener, an `[]`-append-created element, …) — always a
+/// valid position on that container's own opening line, which is all
+/// `Editor(Fig)`'s line-based splicing needs (see `lineStartBefore`).
+cur_line_start: usize = 0,
 /// Authoring-time lints collected during the pass (arena-backed; duped out to
 /// the caller by `parseWithReport`). Empty unless a warn site fired.
 warnings: std.ArrayList(Warning) = .empty,
@@ -330,6 +341,10 @@ const Mapping = struct {
 
 const MEntry = struct {
     key: []const u8,
+    /// Source span of the key token itself (quotes included when quoted) —
+    /// mirrors every other parser's `keyvalue.key` span convention, so
+    /// `Editor(Fig)` can splice a rename in place.
+    key_span: Span = Span.init(0, 0),
     /// Leading comments bind to the KEY (matches `AST.leadingCommentAnchor` for
     /// a `keyvalue`).
     key_leading: std.ArrayList(AST.Comment) = .empty,
@@ -368,6 +383,12 @@ const TValue = union(enum) {
 
 const TNode = struct {
     value: TValue,
+    /// Source span of this value. For a scalar, the token's own tight span
+    /// (quotes/brackets included where the value opens with one). For a
+    /// container, the position right after its opening marker/bracket at
+    /// creation time (`buildNode` widens `.end` to the container's full
+    /// extent once every child's own span is known — see "AST assembly").
+    span: Span = Span.init(0, 0),
     /// `AST.trailingCommentAnchor`-equivalent: the value itself for a
     /// scalar/container, always applied directly to this node's built id.
     trailing: ?AST.Comment = null,
@@ -397,7 +418,12 @@ const Frame = struct {
 };
 
 const IndexKind = union(enum) { literal: usize, append_or_last };
-const Step = union(enum) { key: []const u8, index: IndexKind };
+/// A dotted-path key segment plus its own source span (quotes included when
+/// quoted) — carried through path navigation so every container the path
+/// touches (intermediate dotted segments included) can stamp an accurate
+/// `key_span` on the `MEntry` it creates or reuses.
+const KeySeg = struct { name: []const u8, span: Span };
+const Step = union(enum) { key: KeySeg, index: IndexKind };
 
 /// The outcome of resolving a HEADER line's final path segment: the container
 /// to push as the next frame, its owner TNode (trailing/dangling target), and
@@ -452,9 +478,7 @@ fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Repor
     const root_id = try self.buildRoot(&b);
     var ast = try b.finish(root_id);
     errdefer ast.deinit();
-
-    const node_spans = try allocator.alloc(Span, ast.nodes.len);
-    @memset(node_spans, Span.init(0, 0));
+    const node_spans = try b.takeSpans();
 
     return .{ .source = input, .ast = ast, .node_spans = node_spans };
 }
@@ -477,6 +501,7 @@ fn warn(self: *Parser, code: Warning.Code, offset: usize) Error!void {
 fn run(self: *Parser) Error!void {
     while (self.pos < self.source.len) {
         const line_start = self.pos;
+        self.cur_line_start = line_start;
         self.skipSpacesTabs(); // cosmetic indent — never load-bearing (linted below)
         const indent = self.source[line_start..self.pos];
         const m = try self.scanMarkers();
@@ -737,9 +762,9 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
     switch (last) {
         .key => |k| {
             const m = try parent.asMapping();
-            if (self.findEntry(m, k) != null) return error.FigDuplicateKey;
+            if (self.findEntry(m, k.name) != null) return error.FigDuplicateKey;
             const entry = try self.allocator.create(MEntry);
-            entry.* = .{ .key = k, .value = value_node };
+            entry.* = .{ .key = k.name, .key_span = k.span, .value = value_node };
             try self.appendComments(&entry.key_leading, leading);
             try m.entries.append(self.allocator, entry);
         },
@@ -767,6 +792,12 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
 /// The element `*` marker (and its separator) has already been consumed by
 /// `scanMarkers`; `pos` sits on the element body (or a typing `:`).
 fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!void {
+    // The position right after the `> *` marker prefix — before any trailing
+    // whitespace is skipped — so a bare `*` opener (no value on its own line)
+    // still anchors its container's span at a real, reconstructable position
+    // on its own line (`Editor(Fig)` copies this prefix verbatim for a new
+    // sibling element).
+    const body_start = self.pos;
     self.skipSpacesTabs();
     const leading = try self.drainPendingLeading();
     const seq = try target.asSequence();
@@ -776,7 +807,7 @@ fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!
         const child = try self.allocator.create(PendingContainer);
         child.* = .{};
         const el = try self.allocator.create(TNode);
-        el.* = .{ .value = .{ .container = child } };
+        el.* = .{ .value = .{ .container = child }, .span = Span.init(body_start, body_start) };
         try self.appendComments(&el.leading, leading);
         try seq.elements.append(self.allocator, el);
         if (try self.scanTrailingCommentOnly()) |cm| el.trailing = .{ .text = cm };
@@ -845,24 +876,24 @@ fn scanKeyPath(self: *Parser) Error![]Step {
     return steps.toOwnedSlice(self.allocator);
 }
 
-fn scanKeySeg(self: *Parser) Error![]const u8 {
+fn scanKeySeg(self: *Parser) Error!KeySeg {
     const c = self.peek() orelse return error.FigBadKey;
+    const start = self.pos;
     if (c == '"') {
         const r = try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return r.text;
+        return .{ .name = r.text, .span = Span.init(start, r.end) };
     }
     if (c == '\'') {
         const r = try tok.scanSingleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return r.text;
+        return .{ .name = r.text, .span = Span.init(start, r.end) };
     }
-    const start = self.pos;
     while (self.pos < self.source.len and tok.isBareKeyChar(self.source[self.pos])) self.pos += 1;
     if (self.pos == start) return error.FigBadKey;
     const text = self.source[start..self.pos];
     if (text[0] == '-' or text[0] == '>') return error.FigBadKey;
-    return text;
+    return .{ .name = text, .span = Span.init(start, self.pos) };
 }
 
 fn scanIndexSeg(self: *Parser) Error!IndexKind {
@@ -909,8 +940,8 @@ fn navigateIntermediate(self: *Parser, start: *PendingContainer, steps: []const 
     return cur;
 }
 
-fn getOrCreateMapContainer(self: *Parser, m: *Mapping, key: []const u8) Error!*PendingContainer {
-    if (self.findEntry(m, key)) |e| {
+fn getOrCreateMapContainer(self: *Parser, m: *Mapping, seg: KeySeg) Error!*PendingContainer {
+    if (self.findEntry(m, seg.name)) |e| {
         return switch (e.value.value) {
             .container => |c| c.open(),
             else => error.FigKeyNotContainer,
@@ -919,7 +950,7 @@ fn getOrCreateMapContainer(self: *Parser, m: *Mapping, key: []const u8) Error!*P
     const child = try self.allocator.create(PendingContainer);
     child.* = .{};
     const entry = try self.allocator.create(MEntry);
-    entry.* = .{ .key = key, .value = .{ .value = .{ .container = child } } };
+    entry.* = .{ .key = seg.name, .key_span = seg.span, .value = .{ .value = .{ .container = child }, .span = seg.span } };
     try m.entries.append(self.allocator, entry);
     return child;
 }
@@ -936,7 +967,7 @@ fn getOrCreateSeqContainer(self: *Parser, s: *Sequence, idx: IndexKind) Error!*P
                 const child = try self.allocator.create(PendingContainer);
                 child.* = .{};
                 const el = try self.allocator.create(TNode);
-                el.* = .{ .value = .{ .container = child } };
+                el.* = .{ .value = .{ .container = child }, .span = Span.init(self.cur_line_start, self.cur_line_start) };
                 try s.elements.append(self.allocator, el);
                 return child;
             } else return error.FigIndexSkipped;
@@ -960,7 +991,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
     switch (last) {
         .key => |k| {
             const m = try parent.asMapping();
-            if (self.findEntry(m, k)) |e| {
+            if (self.findEntry(m, k.name)) |e| {
                 const c = switch (e.value.value) {
                     .container => |cc| try cc.open(),
                     else => return error.FigDuplicateKey,
@@ -970,7 +1001,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
             const child = try self.allocator.create(PendingContainer);
             child.* = .{};
             const entry = try self.allocator.create(MEntry);
-            entry.* = .{ .key = k, .value = .{ .value = .{ .container = child } } };
+            entry.* = .{ .key = k.name, .key_span = k.span, .value = .{ .value = .{ .container = child }, .span = k.span } };
             try m.entries.append(self.allocator, entry);
             return .{ .container = child, .owner = &entry.value, .entry = entry };
         },
@@ -990,7 +1021,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
                         const child = try self.allocator.create(PendingContainer);
                         child.* = .{};
                         const el = try self.allocator.create(TNode);
-                        el.* = .{ .value = .{ .container = child } };
+                        el.* = .{ .value = .{ .container = child }, .span = Span.init(self.cur_line_start, self.cur_line_start) };
                         try s.elements.append(self.allocator, el);
                         return .{ .container = child, .owner = el, .entry = null };
                     } else return error.FigIndexSkipped;
@@ -1000,7 +1031,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
                     child.* = .{};
                     _ = try child.asMapping(); // append-created elements are always map-shaped
                     const el = try self.allocator.create(TNode);
-                    el.* = .{ .value = .{ .container = child } };
+                    el.* = .{ .value = .{ .container = child }, .span = Span.init(self.cur_line_start, self.cur_line_start) };
                     try s.elements.append(self.allocator, el);
                     return .{ .container = child, .owner = el, .entry = null };
                 },
@@ -1024,6 +1055,7 @@ fn parseAssignedValue(self: *Parser, type_name: ?[]const u8) Error!TNode {
         const res = self.scanBareRestOfLine();
         if (res.text.len == 0) return error.FigInvalidValue;
         var node = try self.applyKnownType(t, res.text);
+        node.span = self.spanOf(res.text);
         if (res.comment) |cm| node.trailing = .{ .text = cm };
         return node;
     }
@@ -1050,7 +1082,7 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
                 const res = self.scanBareRestOfLine();
                 if (res.text.len == 0) return error.FigInvalidValue;
                 // Opened with a delimiter → sniffing is off; it is a string.
-                var node: TNode = .{ .value = .{ .string = res.text } };
+                var node: TNode = .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) };
                 if (res.comment) |cm| node.trailing = .{ .text = cm };
                 return node;
             }
@@ -1080,7 +1112,7 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             const res = self.scanBareRestOfLine();
             if (res.text.len == 0) return error.FigInvalidValue;
             var node: TNode = if (force_string_bare)
-                .{ .value = .{ .string = res.text } }
+                .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) }
             else
                 try self.sniffToNodeWarned(res.text, vstart);
             if (res.comment) |cm| node.trailing = .{ .text = cm };
@@ -1091,13 +1123,14 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
 
 fn parseQuotedOrTriple(self: *Parser, q: u8, force_string_bare: bool) Error!TNode {
     _ = force_string_bare; // a quoted/multiline RHS is always a valid string
+    const start = self.pos;
     if (self.isTripleAt(self.pos, q)) {
         const r = if (q == '\'')
             try tok.scanTripleSingle(self.allocator, self.source, self.pos)
         else
             try tok.scanTripleDouble(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        var node: TNode = .{ .value = .{ .string = r.text } };
+        var node: TNode = .{ .value = .{ .string = r.text }, .span = Span.init(start, r.end) };
         const trailing = try self.scanTrailingCommentOnly();
         node.trailing = if (r.opener_comment) |oc| .{ .text = oc } else if (trailing) |t| .{ .text = t } else null;
         return node;
@@ -1107,19 +1140,19 @@ fn parseQuotedOrTriple(self: *Parser, q: u8, force_string_bare: bool) Error!TNod
     else
         try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
     self.pos = r.end;
-    var node: TNode = .{ .value = .{ .string = r.text } };
+    var node: TNode = .{ .value = .{ .string = r.text }, .span = Span.init(start, r.end) };
     if (try self.scanTrailingCommentOnly()) |t| node.trailing = .{ .text = t };
     return node;
 }
 
 fn sniffToNode(self: *Parser, text: []const u8) TNode {
-    _ = self;
+    const span = self.spanOf(text);
     return switch (tok.sniffBare(text)) {
-        .null_ => .{ .value = .null_ },
-        .boolean => |b| .{ .value = .{ .boolean = b } },
-        .number => |n| .{ .value = .{ .number = n } },
-        .datetime => |d| .{ .value = .{ .extended = .{ .kind = d.kind, .text = d.raw } } },
-        .string => .{ .value = .{ .string = text } },
+        .null_ => .{ .value = .null_, .span = span },
+        .boolean => |b| .{ .value = .{ .boolean = b }, .span = span },
+        .number => |n| .{ .value = .{ .number = n }, .span = span },
+        .datetime => |d| .{ .value = .{ .extended = .{ .kind = d.kind, .text = d.raw } }, .span = span },
+        .string => .{ .value = .{ .string = text }, .span = span },
     };
 }
 
@@ -1332,6 +1365,7 @@ fn skipFlowWs(self: *Parser) void {
 }
 
 fn parseFlowArray(self: *Parser) Error!TNode {
+    const open = self.pos;
     self.advance(); // '['
     const seq = try self.allocator.create(PendingContainer);
     seq.* = .{ .closed = true };
@@ -1339,7 +1373,7 @@ fn parseFlowArray(self: *Parser) Error!TNode {
     self.skipFlowWs();
     if (self.peek() == ']') {
         self.advance();
-        return .{ .value = .{ .container = seq } };
+        return .{ .value = .{ .container = seq }, .span = Span.init(open, self.pos) };
     }
     while (true) {
         const v = try self.parseFlowScalarOrNested();
@@ -1361,10 +1395,11 @@ fn parseFlowArray(self: *Parser) Error!TNode {
         }
         return error.FigUnclosedFlow;
     }
-    return .{ .value = .{ .container = seq } };
+    return .{ .value = .{ .container = seq }, .span = Span.init(open, self.pos) };
 }
 
 fn parseFlowObject(self: *Parser) Error!TNode {
+    const open = self.pos;
     self.advance(); // '{'
     const map = try self.allocator.create(PendingContainer);
     map.* = .{ .closed = true };
@@ -1372,7 +1407,7 @@ fn parseFlowObject(self: *Parser) Error!TNode {
     self.skipFlowWs();
     if (self.peek() == '}') {
         self.advance();
-        return .{ .value = .{ .container = map } };
+        return .{ .value = .{ .container = map }, .span = Span.init(open, self.pos) };
     }
     // A flow object is EITHER fig-inline (`=` pairs, keys bare or quoted) OR
     // JSON (`:` pairs, keys quoted) — the pair separator selects the spelling,
@@ -1397,7 +1432,7 @@ fn parseFlowObject(self: *Parser) Error!TNode {
         const v = try self.parseFlowScalarOrNested();
         if (self.findEntry(m, key.text) != null) return error.FigDuplicateKey;
         const entry = try self.allocator.create(MEntry);
-        entry.* = .{ .key = key.text, .value = v };
+        entry.* = .{ .key = key.text, .key_span = key.span, .value = v };
         try m.entries.append(self.allocator, entry);
         self.skipFlowWs();
         const p = self.peek() orelse return error.FigUnclosedFlow;
@@ -1416,27 +1451,27 @@ fn parseFlowObject(self: *Parser) Error!TNode {
         }
         return error.FigUnclosedFlow;
     }
-    return .{ .value = .{ .container = map } };
+    return .{ .value = .{ .container = map }, .span = Span.init(open, self.pos) };
 }
 
-const FlowKey = struct { text: []const u8, quoted: bool };
+const FlowKey = struct { text: []const u8, quoted: bool, span: Span };
 
 fn parseFlowKey(self: *Parser) Error!FlowKey {
     const c = self.peek() orelse return error.FigBadKey;
+    const start = self.pos;
     if (c == '"') {
         const r = try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return .{ .text = r.text, .quoted = true };
+        return .{ .text = r.text, .quoted = true, .span = Span.init(start, r.end) };
     }
     if (c == '\'') {
         const r = try tok.scanSingleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return .{ .text = r.text, .quoted = true };
+        return .{ .text = r.text, .quoted = true, .span = Span.init(start, r.end) };
     }
-    const start = self.pos;
     while (self.pos < self.source.len and !isFlowKeyStop(self.source[self.pos])) self.pos += 1;
     if (self.pos == start) return error.FigBadKey;
-    return .{ .text = self.source[start..self.pos], .quoted = false };
+    return .{ .text = self.source[start..self.pos], .quoted = false, .span = Span.init(start, self.pos) };
 }
 
 /// A bare flow KEY ends at the separator/space/close set (keys never contain
@@ -1462,19 +1497,21 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
             const text = self.scanFlowBareBracket();
             if (text.len == 0) return error.FigInvalidValue;
             // Opened with a delimiter → sniffing is off; it is a string.
-            return .{ .value = .{ .string = text } };
+            return .{ .value = .{ .string = text }, .span = self.spanOf(text) };
         }
         return self.parseFlowValue();
     }
     if (c == '"') {
+        const start = self.pos;
         const r = try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return .{ .value = .{ .string = r.text } };
+        return .{ .value = .{ .string = r.text }, .span = Span.init(start, r.end) };
     }
     if (c == '\'') {
+        const start = self.pos;
         const r = try tok.scanSingleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
-        return .{ .value = .{ .string = r.text } };
+        return .{ .value = .{ .string = r.text }, .span = Span.init(start, r.end) };
     }
     const vstart = self.pos;
     const text = self.scanFlowBareValue();
@@ -1538,11 +1575,17 @@ fn scanFlowBareBracket(self: *Parser) []const u8 {
 // ── AST assembly (bottom-up, via AST.Builder) ────────────────────────────────
 
 fn buildRoot(self: *Parser, b: *AST.Builder) Error!AST.Node.Id {
-    var root_wrap: TNode = .{ .value = .{ .container = &self.root } };
+    var root_wrap: TNode = .{ .value = .{ .container = &self.root }, .span = Span.init(0, 0) };
     root_wrap.dangling = self.root_dangling;
     return self.buildNode(b, &root_wrap);
 }
 
+/// Build `node` into `b`, returning its id. For a container, `node.span.end`
+/// is widened here to the full extent of its subtree — every child's own span
+/// is already final by the time it's read back (`buildNode` recurses
+/// bottom-up), so no separate position-tracking pass is needed during the
+/// original line scan; only each container's OPENING position (stamped at
+/// creation time — see `TNode.span`'s doc comment) had to be recorded there.
 fn buildNode(self: *Parser, b: *AST.Builder, node: *TNode) Error!AST.Node.Id {
     const id: AST.Node.Id = switch (node.value) {
         .null_ => try b.addNull(),
@@ -1550,39 +1593,64 @@ fn buildNode(self: *Parser, b: *AST.Builder, node: *TNode) Error!AST.Node.Id {
         .string => |s| try b.addString(s),
         .number => |n| try b.addNumberRaw(n.raw, n.kind == .float),
         .extended => |e| try b.addExtended(e.kind, e.text),
-        .container => |c| try self.buildContainer(b, c),
+        .container => |c| blk: {
+            const built = try self.buildContainer(b, c);
+            node.span.end = @max(node.span.end, built.end);
+            break :blk built.id;
+        },
     };
+    b.setSpan(id, node.span);
     if (node.trailing) |t| try b.setTrailingComment(id, t);
     for (node.dangling.items) |c| try b.addDanglingComment(id, c);
     return id;
 }
 
-fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!AST.Node.Id {
+const BuiltContainer = struct { id: AST.Node.Id, end: usize };
+
+fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!BuiltContainer {
     switch (c.kind) {
         .undecided => return error.FigEmptyContainer,
         .mapping => {
-            var entries: std.ArrayList(AST.Builder.Entry) = .empty;
+            var kv_ids: std.ArrayList(AST.Node.Id) = .empty;
+            var end: usize = 0;
             for (c.mapping.entries.items) |e| {
                 const key_id = try b.addString(e.key);
+                b.setSpan(key_id, e.key_span);
                 if (e.key_leading.items.len > 0) try b.setComments(key_id, .{ .leading = e.key_leading.items });
                 const value_id = try self.buildNode(b, &e.value);
-                try entries.append(self.allocator, .{ .key = key_id, .value = value_id });
+                const kv_id = try b.addKeyValue(key_id, value_id);
+                b.setSpan(kv_id, Span.init(e.key_span.start, e.value.span.end));
+                end = @max(end, e.value.span.end);
+                try kv_ids.append(self.allocator, kv_id);
             }
-            return b.addMapping(entries.items);
+            return .{ .id = try b.addMappingFromEntries(kv_ids.items), .end = end };
         },
         .sequence => {
             var ids: std.ArrayList(AST.Node.Id) = .empty;
+            var end: usize = 0;
             for (c.sequence.elements.items) |el| {
                 const el_id = try self.buildNode(b, el);
+                end = @max(end, el.span.end);
                 for (el.leading.items) |lc| try b.addLeadingComment(el_id, lc);
                 try ids.append(self.allocator, el_id);
             }
-            return b.addSequence(ids.items);
+            return .{ .id = try b.addSequence(ids.items), .end = end };
         },
     }
 }
 
 // ── Char-level helpers ───────────────────────────────────────────────────────
+
+/// Span of `text` within `self.source`, valid only when `text` is literally a
+/// subslice of it — true for every bare/trimmed token (`scanBareRestOfLine`,
+/// `scanFlowBareValue`/`scanFlowBareBracket`, a bare key segment) but NOT for
+/// a quoted/decoded string (those track their own `(start, r.end)` at the call
+/// site, since escape decoding allocates a new buffer).
+fn spanOf(self: *const Parser, text: []const u8) Span {
+    const base = @intFromPtr(self.source.ptr);
+    const start = @intFromPtr(text.ptr) - base;
+    return Span.init(start, start + text.len);
+}
 
 fn peek(self: *Parser) ?u8 {
     return if (self.pos < self.source.len) self.source[self.pos] else null;
@@ -1804,6 +1872,108 @@ test "markdown links are bare strings as sequence elements too" {
 
 test "a bracket that never closes on its line still errors (truncation)" {
     try testing.expectError(error.FigUnclosedFlow, parseAbstract(testing.allocator, "x = [oops\n", .Fig));
+}
+
+// ── Span tests (Editor(Fig) foundation — see DESIGN.md's "no in-place editor
+// yet" note; this is the prerequisite the editor's span-splice engine needs) ──
+
+fn expectSpan(source: []const u8, path: []const AST.PathSegment, expected: []const u8) !void {
+    const doc = try parse(testing.allocator, source, .Fig);
+    defer doc.deinit(testing.allocator);
+    const node = try doc.ast.getValByPath(path);
+    const span = doc.span(node);
+    try testing.expectEqualStrings(expected, source[span.start..span.end]);
+}
+
+/// Same as `expectSpan`, but reads the *keyvalue* wrapper's span (the raw node
+/// at `path`, unwrapped by neither `getKeyByPath` nor `getValByPath`) — what
+/// `Editor(Fig)`'s `deleteKey`/`moveKey` splice.
+fn expectEntrySpan(source: []const u8, path: []const AST.PathSegment, expected: []const u8) !void {
+    const doc = try parse(testing.allocator, source, .Fig);
+    defer doc.deinit(testing.allocator);
+    const node = try doc.ast.getNodeByPath(path);
+    const span = doc.span(node);
+    try testing.expectEqualStrings(expected, source[span.start..span.end]);
+}
+
+test "span: scalar assignment values are tight" {
+    try expectSpan("x = 1\n", &.{.{ .key = "x" }}, "1");
+    try expectSpan("title = My server\n", &.{.{ .key = "title" }}, "My server");
+    try expectSpan("s = \"hi\\n\"\n", &.{.{ .key = "s" }}, "\"hi\\n\"");
+    try expectSpan("s = 'raw'\n", &.{.{ .key = "s" }}, "'raw'");
+}
+
+test "span: keys are tight, quotes included" {
+    try expectSpan("x = 1\n", &.{.{ .key = "x" }}, "1");
+    const doc = try parse(testing.allocator, "\"my key\" = 1\n", .Fig);
+    defer doc.deinit(testing.allocator);
+    const key = try doc.ast.getKeyByPath(&.{.{ .key = "my key" }});
+    try testing.expectEqualStrings("\"my key\"", "\"my key\" = 1\n"[doc.span(key).start..doc.span(key).end]);
+}
+
+test "span: nested marker-block value" {
+    const src =
+        \\database
+        \\> host = localhost
+        \\> pool
+        \\> > size = 10
+        \\
+    ;
+    try expectSpan(src, &.{ .{ .key = "database" }, .{ .key = "host" } }, "localhost");
+    try expectSpan(src, &.{ .{ .key = "database" }, .{ .key = "pool" }, .{ .key = "size" } }, "10");
+}
+
+test "span: dotted flattener key segment" {
+    const src =
+        \\cache
+        \\> redis.host = 127.0.0.1
+        \\
+    ;
+    try expectSpan(src, &.{ .{ .key = "cache" }, .{ .key = "redis" }, .{ .key = "host" } }, "127.0.0.1");
+}
+
+test "span: flow container covers exactly its brackets" {
+    try expectSpan("ports = [80, 443]\n", &.{.{ .key = "ports" }}, "[80, 443]");
+    try expectSpan("p = { x = 1, y = 2 }\n", &.{.{ .key = "p" }}, "{ x = 1, y = 2 }");
+    try expectSpan("ports = [80, 443]\n", &.{ .{ .key = "ports" }, .{ .index = 1 } }, "443");
+}
+
+test "span: a nested block container's keyvalue covers header through last body line" {
+    const src =
+        \\database
+        \\> host = localhost
+        \\> pool
+        \\> > size = 10
+        \\other = 1
+        \\
+    ;
+    try expectEntrySpan(src, &.{ .{ .key = "database" }, .{ .key = "pool" } }, "pool\n> > size = 10");
+    try expectEntrySpan(src, &.{.{ .key = "database" }}, "database\n> host = localhost\n> pool\n> > size = 10");
+}
+
+test "span: sequence element (map-shaped) covers its own body only" {
+    const src =
+        \\servers
+        \\> *
+        \\>> host = a.com
+        \\> *
+        \\>> host = b.com
+        \\
+    ;
+    try expectSpan(src, &.{ .{ .key = "servers" }, .{ .index = 0 }, .{ .key = "host" } }, "a.com");
+    try expectSpan(src, &.{ .{ .key = "servers" }, .{ .index = 1 }, .{ .key = "host" } }, "b.com");
+}
+
+test "span: append header re-anchored elements" {
+    const src =
+        \\jobs.test.steps[]
+        \\> uses = a
+        \\jobs.test.steps[]
+        \\> run = b
+        \\
+    ;
+    try expectSpan(src, &.{ .{ .key = "jobs" }, .{ .key = "test" }, .{ .key = "steps" }, .{ .index = 0 }, .{ .key = "uses" } }, "a");
+    try expectSpan(src, &.{ .{ .key = "jobs" }, .{ .key = "test" }, .{ .key = "steps" }, .{ .index = 1 }, .{ .key = "run" } }, "b");
 }
 
 test "quotes: raw vs escaped" {

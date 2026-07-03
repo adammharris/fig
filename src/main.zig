@@ -27,10 +27,13 @@ const max_size = Io.Limit.limited(10 * 1024 * 1024);
 // counterpart; the `get` handler intercepts it before the serializer dispatch.
 // `canonical` (formerly `native`) is the AST's 1:1 oracle encoding, selectable
 // only via `--input/--output canonical` — it owns no file extension. `fig` is
-// the human-facing authoring dialect: it owns `.fig` and has a reader +
-// `fig fmt` printer (see `get`), but no in-place editor yet, so `edit`/`set`/
-// `insert`/`delete`/`comment` reject it (see src/fig/DESIGN.md). `gron` is a CLI-only
-// echo format with no `AST.SerializeFormat` counterpart.
+// the human-facing authoring dialect: it owns `.fig`, has a reader + `fig fmt`
+// printer (see `get`), and `Editor(fig.Language.FIG)` wires `edit`/`set`/
+// `insert`/`delete`/`comment` through the same span-splice engine as
+// TOML/YAML/ZON (see `fig/editor_helper.zig`; whole-container structural ops —
+// rename/move/reorder a header, like TOML's `renameTable`/`moveTable` — are
+// not implemented yet). `gron` is a CLI-only echo format with no
+// `AST.SerializeFormat` counterpart.
 const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, canonical, fig, gron };
 
 const CliAction = enum {
@@ -539,9 +542,14 @@ pub fn main(init: std.process.Init) !void {
                 // The canonical form is a parse/print pair with no span-splicing
                 // editor; convert via `get` instead of editing in place.
                 .canonical => return error.UnsupportedCanonicalEdit,
-                // fig has a reader + `fig fmt` printer (see `get`), but no
-                // span-splicing in-place editor yet; convert via `get` instead.
-                .fig => return error.FigAuthoringNotImplemented,
+                // fig value/key replacement: `Editor(Fig)` splices the exact
+                // node span (`Fig.Parser` now tracks real spans — see
+                // `fig/parser.zig`'s "AST assembly" section), same as TOML.
+                // The replacement is taken verbatim as a fig literal.
+                .fig => if (comptime build_options.lang_fig)
+                    try applyToFile(fig.Language.FIG, init.arena.allocator(), io, input, opts.path, opts.replacement, op, fig.Language.FIG.default_type)
+                else
+                    return error.FormatDisabled,
                 // gron is a CLI-only get/echo format with no in-place editor.
                 .gron => return error.UnsupportedGronEdit,
             }
@@ -886,7 +894,10 @@ pub fn main(init: std.process.Init) !void {
                         return error.FormatDisabled,
                     .xml => return error.UnsupportedXmlEdit,
                     .canonical => return error.UnsupportedCanonicalEdit,
-                    .fig => return error.FigAuthoringNotImplemented,
+                    .fig => if (comptime build_options.lang_fig)
+                        try getCommentFromFile(fig.Language.FIG, a, io, input, opts.path, opts.inline_comment, fig.Language.FIG.default_type)
+                    else
+                        return error.FormatDisabled,
                     .gron => return error.UnsupportedGronEdit,
                 };
                 // Print the comment followed by a newline. An absent comment (null)
@@ -932,7 +943,10 @@ pub fn main(init: std.process.Init) !void {
                     return error.FormatDisabled,
                 .xml => return error.UnsupportedXmlEdit,
                 .canonical => return error.UnsupportedCanonicalEdit,
-                .fig => return error.FigAuthoringNotImplemented,
+                .fig => if (comptime build_options.lang_fig)
+                    try applyToFile(fig.Language.FIG, a, io, input, opts.path, opts.text, op, fig.Language.FIG.default_type)
+                else
+                    return error.FormatDisabled,
                 .gron => return error.UnsupportedGronEdit,
             }
         },
@@ -1430,7 +1444,10 @@ fn applyStructuralEdit(
         .xml => return error.UnsupportedXmlEdit,
         .json5 => return error.UnsupportedJson5Edit,
         .canonical => return error.UnsupportedCanonicalEdit,
-        .fig => return error.FigAuthoringNotImplemented,
+        .fig => if (comptime build_options.lang_fig)
+            try applyToFile(fig.Language.FIG, allocator, io, input, path, text, op, fig.Language.FIG.default_type)
+        else
+            return error.FormatDisabled,
         .gron => return error.UnsupportedGronEdit,
     }
 }

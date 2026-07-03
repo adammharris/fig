@@ -27,10 +27,18 @@ const AST = @import("ast.zig");
 const Node = AST.Node;
 const Comment = AST.Comment;
 const NodeComments = AST.NodeComments;
+const Span = @import("../util/span.zig");
 
 allocator: Allocator,
 nodes: std.ArrayList(Node) = .empty,
 owned_strings: std.ArrayList([]const u8) = .empty,
+/// Parallel to `nodes` (one zero-span entry appended per node by `append`).
+/// Opt-in: a build that never calls `setSpan` just carries zero spans, which
+/// `takeSpans` still returns (so a `Document` built from them has the right
+/// length, if a caller wants one). Only the fig parser populates this today —
+/// every other parser tracks spans itself alongside its own direct node
+/// construction (see each parser's `node_spans`/`addNode`).
+spans: std.ArrayList(Span) = .empty,
 /// Parallel to `nodes` (one entry appended per node, default-empty). Only
 /// materialized into the finished AST when `any_comments` is set, so a build
 /// that never touches comments carries the AST's `&.{}` default. The runs are
@@ -70,6 +78,26 @@ pub fn deinit(self: *Builder) void {
     }
     self.comments.deinit(self.allocator);
     self.view_comments.deinit(self.allocator);
+    self.spans.deinit(self.allocator);
+}
+
+/// Set `id`'s source span (a byte range into the input `id` was parsed from).
+/// Only meaningful for a builder whose caller tracks source positions (fig's
+/// parser does; a hand-assembled AST with no source text leaves every span at
+/// its `append`-time default of `Span.init(0, 0)`).
+pub fn setSpan(self: *Builder, id: Node.Id, span: Span) void {
+    self.spans.items[id] = span;
+}
+
+/// Move out the per-node span table built via `setSpan` (parallel to `nodes`,
+/// one entry per node in id order — the same length as `ast.nodes` after
+/// `finish`). Call any time after the ids of interest were minted (`finish`
+/// does not consume `spans`, so this may run before or after it). The caller
+/// owns the returned slice.
+pub fn takeSpans(self: *Builder) Allocator.Error![]Span {
+    const spans = try self.spans.toOwnedSlice(self.allocator);
+    self.spans = .empty;
+    return spans;
 }
 
 /// Attach comments to an already-added node, REPLACING any previously set on
@@ -193,6 +221,22 @@ pub fn addMapping(self: *Builder, entries: []const Entry) Allocator.Error!Node.I
     return self.append(.{ .mapping = first });
 }
 
+/// Add one `keyvalue` node wrapping `key`/`value`, returning its own id —
+/// the lower-level twin of `addMapping` for a caller that needs the entry's
+/// id before assembling the mapping (e.g. to `setSpan` it). Pair with
+/// `addMappingFromEntries`.
+pub fn addKeyValue(self: *Builder, key: Node.Id, value: Node.Id) Allocator.Error!Node.Id {
+    return self.append(.{ .keyvalue = .{ .key = key, .value = value } });
+}
+
+/// Add a mapping from already-built `keyvalue` node ids (as returned by
+/// `addKeyValue`), in order. Siblings are linked exactly like `addMapping`;
+/// this just skips minting the `keyvalue` wrappers itself.
+pub fn addMappingFromEntries(self: *Builder, kv_ids: []const Node.Id) Allocator.Error!Node.Id {
+    self.link(kv_ids);
+    return self.append(.{ .mapping = if (kv_ids.len == 0) null else kv_ids[0] });
+}
+
 /// Freeze the builder into an owned `AST` rooted at `root`. The builder is
 /// reset to empty, so a subsequent `deinit` is harmless. The returned AST
 /// owns its nodes and strings; free it with `ast.deinit()`. It carries no
@@ -266,9 +310,11 @@ fn append(self: *Builder, kind: Node.Kind) Allocator.Error!Node.Id {
     const id: Node.Id = @intCast(self.nodes.items.len);
     try self.nodes.append(self.allocator, .{ .id = id, .kind = kind, .next_sibling = null });
     errdefer _ = self.nodes.pop();
-    // Keep the comment table the same length as `nodes` so `setComments`
-    // can index it directly. Costs one empty struct per node on every build.
+    // Keep the comment/span tables the same length as `nodes` so `setComments`/
+    // `setSpan` can index them directly. Costs one empty struct + one zero span
+    // per node on every build.
     try self.comments.append(self.allocator, .{});
+    try self.spans.append(self.allocator, Span.init(0, 0));
     return id;
 }
 
