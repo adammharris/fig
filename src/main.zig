@@ -670,7 +670,19 @@ pub fn main(init: std.process.Init) !void {
                     from = try resolveFormatFromContent(init.arena.allocator(), content, opts.file);
                     if (!opts.output_explicit) to = from;
                 }
-                break :blk try parseSliceAs(from, .{}, init.arena.allocator(), content);
+                var fig_diag: ?fig.Language.FIG.Parser.Diagnostic = null;
+                break :blk parseSliceAs(from, .{}, init.arena.allocator(), content, &fig_diag) catch |err| {
+                    // A fig parse failure renders as a `file:line:col` teaching
+                    // message (DESIGN.md: every diagnostic names the fix) and
+                    // exits cleanly — no error-return trace for a user typo.
+                    if (fig_diag) |d| {
+                        const report = try d.renderAlloc(init.arena.allocator(), content, opts.file);
+                        try stderr_terminal.writer.writeAll(report);
+                        try stderr_terminal.writer.flush();
+                        std.process.exit(2);
+                    }
+                    return err;
+                };
             };
 
             // XML is reader-only: a `--from`/detected source but never a `--to`
@@ -917,7 +929,8 @@ pub fn main(init: std.process.Init) !void {
             // bad file makes the whole run exit non-zero — the CI contract.
             var any_failed = false;
             for (opts.files) |file| {
-                if (checkOne(a, io, file, opts.format, opts.spec)) |fmt| {
+                var fig_report: ?[]const u8 = null;
+                if (checkOne(a, io, file, opts.format, opts.spec, &fig_report)) |fmt| {
                     if (!opts.quiet) {
                         try stdout_terminal.setColor(.green);
                         try stdout_terminal.writer.writeAll("ok");
@@ -931,6 +944,13 @@ pub fn main(init: std.process.Init) !void {
                     }
                 } else |err| {
                     any_failed = true;
+                    // A fig failure was already rendered as a full
+                    // `file:line:col: error: …` teaching report; print it
+                    // verbatim instead of the generic `file: ErrorName` line.
+                    if (fig_report) |report| {
+                        try stderr_terminal.writer.writeAll(report);
+                        continue;
+                    }
                     try stderr_terminal.setColor(.red);
                     try stderr_terminal.writer.writeAll("error");
                     try stderr_terminal.setColor(.reset);
@@ -959,8 +979,10 @@ pub fn main(init: std.process.Init) !void {
 /// known — an unknown/inapplicable version is reported like a parse error. When
 /// the extension implies an embedded region (e.g. markdown frontmatter) the
 /// inner document is extracted and parsed. Any IO/parse/spec error propagates to
-/// the caller, which reports it.
-fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8) !Format {
+/// the caller, which reports it — except a fig parse failure, which also fills
+/// `fig_report` with a rendered `file:line:col` teaching message (built here,
+/// where the source bytes are still in scope) for the caller to print verbatim.
+fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8, fig_report: *?[]const u8) !Format {
     const input = try getInput(io, file, .read_only);
     defer if (!std.mem.eql(u8, file, "-")) input.close(io);
     const content = try readAll(allocator, io, input);
@@ -989,7 +1011,11 @@ fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?F
     if (embed) |embed_type| {
         _ = try fig.Embed.extract(allocator, content, embed_type);
     } else {
-        _ = try parseSliceAs(format, spec, allocator, content);
+        var fig_diag: ?fig.Language.FIG.Parser.Diagnostic = null;
+        _ = parseSliceAs(format, spec, allocator, content, &fig_diag) catch |err| {
+            if (fig_diag) |d| fig_report.* = try d.renderAlloc(allocator, content, file);
+            return err;
+        };
     }
     return format;
 }
@@ -1042,7 +1068,12 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
 /// consumed only once. `.jsonc`/`.json5` select the JSON dialect; `.yml` aliases
 /// YAML; `.canonical` is the AST's 1:1 oracle grammar. `spec` picks the version
 /// where one is selectable (TOML 1.0 vs 1.1, YAML version).
-fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8) !fig.Document {
+///
+/// `fig_diag` (optional) receives the fig authoring dialect's parse diagnostic
+/// on failure — the position + teaching message the caller renders as a
+/// `file:line:col` report. Only the `.fig` branch fills it; the other formats
+/// keep their error-name reporting for now.
+fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8, fig_diag: ?*?fig.Language.FIG.Parser.Diagnostic) !fig.Document {
     return switch (format) {
         .json => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON) else error.FormatDisabled,
         .jsonc => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSONC) else error.FormatDisabled,
@@ -1052,7 +1083,10 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
         .canonical => fig.Canonical.parse(allocator, content),
-        .fig => if (comptime build_options.lang_fig) fig.Language.FIG.Parser.parse(allocator, content, fig.Language.FIG.default_type) else error.FormatDisabled,
+        .fig => if (comptime build_options.lang_fig) blk: {
+            var local: ?fig.Language.FIG.Parser.Diagnostic = null;
+            break :blk fig.Language.FIG.Parser.parseWithDiagnostic(allocator, content, fig.Language.FIG.default_type, fig_diag orelse &local);
+        } else error.FormatDisabled,
         // gron ("ungron") reconstructs the AST from its `path = value` lines,
         // reusing the JSON parser for each RHS — so it needs JSON compiled in.
         .gron => if (comptime build_options.lang_json) gron.parseDocument(allocator, content) else error.FormatDisabled,

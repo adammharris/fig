@@ -88,7 +88,104 @@ pub const Error = error{
     FigUnclosedFlow,
     /// One flow object mixed `=` (fig) and `:` (JSON) pair separators.
     FigMixedFlowSeparators,
+    /// A bare key before `:` in a flow object (`{x: 1}`) — JSON pairs require
+    /// quoted keys; fig pairs use `=`.
+    FigFlowBareKeyColon,
 } || tok.ScanError;
+
+/// The teaching message for `code` — DESIGN.md's "every diagnostic names the
+/// fix": the format teaches its own conventions at the point of failure,
+/// because the target user is editing over SSH with no docs open. One sentence,
+/// always spelling the valid fig form.
+pub fn describe(code: Error) []const u8 {
+    return switch (code) {
+        error.FigForeignSyntaxColon => "`:` introduces a type, not a value; write `key = value`, or `key: type = value`",
+        error.FigFlowBareKeyColon => "a bare key cannot take a `:` pair; write `key = 1` (fig) or `\"key\": 1` (JSON)",
+        error.FigForeignSyntaxDash => "`-` is YAML's element marker; fig elements are `*` — write `> *` then `> > host = a.com` (a scalar element is `* value`)",
+        error.FigForeignSyntaxBracket => "`[section]` / `[[x]]` is TOML; fig section headers are bare dotted paths — write `section`, or `x[]` to append an element",
+        error.FigElementInlineField => "an element's fields go on following lines; write `> *` then `> > host = a.com`, not `* host = a.com`",
+        error.FigRootMarker => "root keys carry zero markers; remove the `>` (a marker line needs a parent header above it)",
+        error.FigSkippedLevel => "this line skips a nesting level; depth may only grow one `>` at a time — add the missing parent line, or drop the extra `>`",
+        error.FigBadMarkerSeparator => "put a space between the marker run and what follows: `> key`, not `>key`",
+        error.FigBadKey => "empty or malformed key; a bare key cannot contain `.` `:` `=` `[` or whitespace, or begin with `>`/`-` — quote it: `\"my.key\" = x`",
+        error.FigDuplicateKey => "duplicate key: this key already has a value here; remove one of the definitions (re-enter a header only to add NEW keys)",
+        error.FigMixedContainerChildren => "a container holds either `key = value` entries or `*` elements, never both",
+        error.FigMixedSequenceAddressing => "one sequence cannot mix `[]`/`[i]` addressing with `*` element lines; pick one spelling",
+        error.FigKeyNotContainer => "this path steps into an existing non-container value; remove the extra path segment, or restructure the earlier value",
+        error.FigIndexSkipped => "sequence indices cannot skip ahead; write the earlier element first (even `[n] = null`)",
+        error.FigIndexAlreadySet => "this index already has a value; address a new index, or use a header-final `[]` to append",
+        error.FigEmptyAppendTarget => "a non-final `[]` means \"the last element\", but this sequence is empty; append one first with a header-final `[]`",
+        error.FigEmptyContainer => "this container has no children; write an inline empty value instead: `key = {}` (map) or `key = []` (sequence)",
+        error.FigInvalidValue => "missing value; write one after `=`, or `{}`/`[]` for an empty container",
+        error.FigTypeMismatch => "the value does not satisfy its `: type` annotation; fix the value, or drop/correct the annotation",
+        error.FigUnknownType => "unknown type name; the built-in types are int, float, bool, string, enum, datetime, date, time",
+        error.FigTrailingContent => "unexpected content after this line's value or header; quote the whole value if it is one string (a `#` comment needs a space before it)",
+        error.FigDanglingContinuation => "`+` has no `[]` append header to re-run; move it directly after its `a.b[]` group, or repeat the header",
+        error.FigClosedFlowValue => "a value written inline as `[…]`/`{…}` is closed and cannot be extended later; write the block or header form if it needs to grow",
+        error.FigUnclosedFlow => "this `[`/`{` value never finds its matching close; close it, or quote the whole value to make it a string",
+        error.FigMixedFlowSeparators => "a flow object is fig (`=` pairs) or JSON (`:` pairs), never both in one object",
+        error.FigUnclosedString => "unclosed string; add the closing quote (a single-line quote cannot span lines — use `'''` for multi-line)",
+        error.FigBadEscape => "invalid escape; double quotes support \\n \\t \\r \\\\ \\\" \\uXXXX — use single quotes ('…') for raw text with literal backslashes",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+/// A parse failure plus the byte position where the parser stopped. The parser
+/// is single-pass, so when an error is returned its cursor sits on (or just
+/// after) the offending token — precise enough for `file:line:col` without
+/// threading a location through every error site.
+pub const Diagnostic = struct {
+    code: Error,
+    /// Byte offset into the source where parsing stopped.
+    offset: usize,
+
+    pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
+
+    /// 1-based line/column of `offset`, plus the full offending line.
+    pub fn locate(self: Diagnostic, source: []const u8) Location {
+        var at = @min(self.offset, source.len);
+        // A cursor resting exactly past a newline means the error was detected
+        // while finishing the previous line (duplicate key, unclosed flow at
+        // EOF, …) — report end-of-that-line, not column 1 of an empty next one.
+        if (at > 0 and source[at - 1] == '\n') at -= 1;
+        var line: usize = 1;
+        var line_start: usize = 0;
+        for (source[0..at], 0..) |c, i| {
+            if (c == '\n') {
+                line += 1;
+                line_start = i + 1;
+            }
+        }
+        const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
+        return .{ .line = line, .column = at - line_start + 1, .line_text = source[line_start..line_end] };
+    }
+
+    /// Render the compiler-style report: `file:line:col: error: <message>`,
+    /// then the offending source line and a caret marking the column. Caller
+    /// owns the returned bytes.
+    pub fn renderAlloc(self: Diagnostic, allocator: Allocator, source: []const u8, file: []const u8) Allocator.Error![]u8 {
+        const loc = self.locate(source);
+        var aw = std.Io.Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        render(self, &aw.writer, loc, file) catch return error.OutOfMemory;
+        return aw.toOwnedSlice();
+    }
+
+    fn render(self: Diagnostic, w: *std.Io.Writer, loc: Location, file: []const u8) std.Io.Writer.Error!void {
+        try w.print("{s}:{d}:{d}: error: {s}\n", .{ file, loc.line, loc.column, describe(self.code) });
+        // The offending line, capped so a pathological line can't flood the
+        // terminal. The caret line mirrors tabs so it stays aligned under them.
+        const max_shown = 160;
+        const shown = loc.line_text[0..@min(loc.line_text.len, max_shown)];
+        if (shown.len == 0) return; // EOF/blank line: nothing to point into
+        try w.print("    {s}{s}\n", .{ shown, if (shown.len < loc.line_text.len) "…" else "" });
+        if (loc.column - 1 <= shown.len) {
+            try w.writeAll("    ");
+            for (shown[0 .. loc.column - 1]) |c| try w.writeByte(if (c == '\t') '\t' else ' ');
+            try w.writeAll("^\n");
+        }
+    }
+};
 
 /// Arena for the whole intermediate tree — freed in one shot after the final
 /// AST is built, so nothing here needs manual `deinit`.
@@ -103,6 +200,10 @@ stack: std.ArrayList(Frame) = .empty,
 /// deeper lines / comments / blanks / `+` lines follow — the target a `+`
 /// continuation line re-runs. Any other zero-marker structural line clears it.
 last_append_steps: ?[]const Step = null,
+/// Overrides `pos` as the `Diagnostic` offset when set — for error sites where
+/// the cursor has already moved past the token that actually offends (set via
+/// `failAt`). `pos` is the right answer everywhere else.
+fail_offset: ?usize = null,
 
 // ── Intermediate tree types ─────────────────────────────────────────────────
 
@@ -233,12 +334,23 @@ pub fn parseAbstract(allocator: Allocator, input: []const u8, format: Type) !AST
 }
 
 pub fn parse(allocator: Allocator, input: []const u8, format: Type) Error!Document {
+    var diag: ?Diagnostic = null;
+    return parseWithDiagnostic(allocator, input, format, &diag);
+}
+
+/// `parse`, but on failure also fills `out_diag` with the error code and the
+/// byte offset where parsing stopped — the hook the CLI (and eventually the C
+/// ABI) uses to render `file:line:col` teaching messages. Untouched on success.
+pub fn parseWithDiagnostic(allocator: Allocator, input: []const u8, format: Type, out_diag: *?Diagnostic) Error!Document {
     _ = format;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
 
     var self: Parser = .{ .allocator = arena_state.allocator(), .source = input };
-    try self.run();
+    self.run() catch |err| {
+        out_diag.* = .{ .code = err, .offset = self.fail_offset orelse self.pos };
+        return err;
+    };
 
     var b = AST.Builder.init(allocator);
     // `finish` only moves `nodes`/`owned_strings` out; the comment side-table's
@@ -254,6 +366,14 @@ pub fn parse(allocator: Allocator, input: []const u8, format: Type) Error!Docume
     @memset(node_spans, Span.init(0, 0));
 
     return .{ .source = input, .ast = ast, .node_spans = node_spans };
+}
+
+/// Return `err` with the diagnostic caret pinned to `offset` — for the sites
+/// where the cursor has already scanned past the token that actually offends
+/// (e.g. the `:` of `key: value`, consumed before the missing `=` is noticed).
+fn failAt(self: *Parser, offset: usize, err: Error) Error {
+    self.fail_offset = offset;
+    return err;
 }
 
 // ── Main line loop ──────────────────────────────────────────────────────────
@@ -448,6 +568,7 @@ fn parseKeyLine(self: *Parser, target: *PendingContainer, depth: u32) Error!void
     const steps = try self.scanKeyPath();
     self.skipSpacesTabs();
     if (self.peek() == ':') {
+        const colon_pos = self.pos;
         self.advance();
         self.skipSpacesTabs();
         const type_start = self.pos;
@@ -455,7 +576,9 @@ fn parseKeyLine(self: *Parser, target: *PendingContainer, depth: u32) Error!void
         const type_name = self.source[type_start..self.pos];
         if (type_name.len == 0) return error.FigBadKey;
         self.skipSpacesTabs();
-        if (self.peek() != '=') return error.FigForeignSyntaxColon;
+        // `key: value` (the YAML habit) — the `:` is the offending token, not
+        // the spot where the missing `=` was noticed, so pin the caret there.
+        if (self.peek() != '=') return self.failAt(colon_pos, error.FigForeignSyntaxColon);
         self.advance();
         try self.finishAssignment(target, steps, type_name);
     } else if (self.peek() == '=') {
@@ -549,6 +672,7 @@ fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!
     }
 
     if (self.peek() == ':') {
+        const colon_pos = self.pos;
         self.advance();
         self.skipSpacesTabs();
         const type_start = self.pos;
@@ -556,7 +680,8 @@ fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!
         const type_name = self.source[type_start..self.pos];
         if (type_name.len == 0) return error.FigBadKey;
         self.skipSpacesTabs();
-        if (self.peek() != '=') return error.FigForeignSyntaxColon;
+        // Same caret pin as `parseKeyLine`: the `:` is the offending token.
+        if (self.peek() != '=') return self.failAt(colon_pos, error.FigForeignSyntaxColon);
         self.advance();
         var node = try self.parseAssignedValue(type_name);
         self.consumeLineEnd();
@@ -1061,7 +1186,8 @@ fn parseFlowObject(self: *Parser) Error!TNode {
     // A flow object is EITHER fig-inline (`=` pairs, keys bare or quoted) OR
     // JSON (`:` pairs, keys quoted) — the pair separator selects the spelling,
     // and it may not change within one object. `:` with a bare key is the
-    // YAML/JSON5 habit and errors with the same fix as the block layer.
+    // YAML/JSON5 habit; its own error code so the message can name both fixes
+    // (`key = 1` fig / `"key": 1` JSON).
     var mode: ?enum { fig, json } = null;
     while (true) {
         const key = try self.parseFlowKey();
@@ -1069,7 +1195,7 @@ fn parseFlowObject(self: *Parser) Error!TNode {
         const sep = self.peek() orelse return error.FigUnclosedFlow;
         const this_mode: @TypeOf(mode) = switch (sep) {
             '=' => .fig,
-            ':' => if (key.quoted) .json else return error.FigForeignSyntaxColon,
+            ':' => if (key.quoted) .json else return error.FigFlowBareKeyColon,
             else => return error.FigUnclosedFlow,
         };
         if (mode) |mm| {
@@ -1527,7 +1653,7 @@ test "flow: bare values may contain spaces (up to the comma)" {
 }
 
 test "flow: JSON vs fig split — bare key + colon is the foreign-syntax error" {
-    try testing.expectError(error.FigForeignSyntaxColon, parseAbstract(testing.allocator, "p = {x: 1}\n", .Fig));
+    try testing.expectError(error.FigFlowBareKeyColon, parseAbstract(testing.allocator, "p = {x: 1}\n", .Fig));
 }
 
 test "flow: an object may not mix = and : separators" {
@@ -1721,8 +1847,41 @@ test "flow values are closed: no later dotted/header/index extension" {
 }
 
 test "full kitchen-sink file parses" {
-    const src = @embedFile("testdata/kitchen_sink.fig.txt");
+    const src = @embedFile("testdata/kitchen_sink.fig");
     var ast = try parseAbstract(testing.allocator, src, .Fig);
     defer ast.deinit();
     try testing.expectEqualStrings("2", (try ast.getValByPath(&.{.{ .key = "version" }})).kind.number.raw);
+}
+
+test "diagnostic captures the failing position" {
+    // Line 3 (`level: info`) is the YAML-habit error; the cursor stops after
+    // the would-be type name, still on line 3.
+    const src = "logging\n> format = json\n> level: info\n";
+    var diag: ?Diagnostic = null;
+    const result = parseWithDiagnostic(testing.allocator, src, .Fig, &diag);
+    try testing.expectError(error.FigForeignSyntaxColon, result);
+    const d = diag.?;
+    try testing.expectEqual(@as(Error!void, error.FigForeignSyntaxColon), @as(Error!void, d.code));
+    const loc = d.locate(src);
+    try testing.expectEqual(@as(usize, 3), loc.line);
+    try testing.expectEqualStrings("> level: info", loc.line_text);
+}
+
+test "diagnostic renders file:line:col, the source line, and a caret" {
+    const src = "key: value\n";
+    var diag: ?Diagnostic = null;
+    _ = parseWithDiagnostic(testing.allocator, src, .Fig, &diag) catch {};
+    const rendered = try diag.?.renderAlloc(testing.allocator, src, "app.fig");
+    defer testing.allocator.free(rendered);
+    try testing.expect(std.mem.startsWith(u8, rendered, "app.fig:1:"));
+    try testing.expect(std.mem.indexOf(u8, rendered, "error: `:` introduces a type, not a value") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "\n    key: value\n") != null);
+    try testing.expect(std.mem.indexOf(u8, rendered, "^\n") != null);
+}
+
+test "diagnostic is untouched on success" {
+    var diag: ?Diagnostic = null;
+    var parsed = try parseWithDiagnostic(testing.allocator, "a = 1\n", .Fig, &diag);
+    defer parsed.deinit(testing.allocator);
+    try testing.expect(diag == null);
 }
