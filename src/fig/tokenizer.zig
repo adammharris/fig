@@ -182,6 +182,53 @@ fn restIsCommentOnly(source: []const u8, from: usize) bool {
     return saw_space and source[i] == '#';
 }
 
+/// Flow-element twin of `classifyBracketCommit`. Inside a flow collection an
+/// element ends at the next top-level `,`/`]`/`}` (or newline / `#` / EOF), not
+/// at end-of-line, and flow spans newlines — so both the terminal test and the
+/// scan range differ from the block-layer classifier. A balanced bracket group
+/// followed by a flow terminator is genuine nested flow (`[1, 2]` as a list
+/// member); one followed by more content is a bare-string element (`[Blog](/x)`,
+/// a markdown link) — the flow-position form of the balanced-then-trailing rule
+/// that lets markdown links go unquoted. There is no `.unclosed` outcome: an
+/// unterminated bracket is left to the flow parser (which raises
+/// FigUnclosedFlow), so this reports `.flow`.
+pub fn classifyFlowBracket(source: []const u8, start: usize) BracketCommit {
+    std.debug.assert(source[start] == '[' or source[start] == '{');
+    var depth: usize = 0;
+    var i = start;
+    while (i < source.len) {
+        switch (source[i]) {
+            '\'', '"' => i = skipQuotedSpan(source, i) orelse return .flow,
+            '[', '{' => {
+                depth += 1;
+                i += 1;
+            },
+            ']', '}' => {
+                depth -= 1;
+                i += 1;
+                if (depth == 0)
+                    return if (flowRestIsTerminator(source, i)) .flow else .bare_trailing;
+            },
+            else => i += 1,
+        }
+    }
+    return .flow;
+}
+
+/// After a flow element's balanced close at `from`, does the next non-blank byte
+/// terminate the element (`,`/`]`/`}`), end the line/input, or open a comment
+/// (`#`)? If so the bracket group WAS the whole value → genuine nested flow;
+/// otherwise more content follows and it is a bare-string element.
+fn flowRestIsTerminator(source: []const u8, from: usize) bool {
+    var i = from;
+    while (i < source.len and (source[i] == ' ' or source[i] == '\t' or source[i] == '\r')) : (i += 1) {}
+    if (i >= source.len) return true;
+    return switch (source[i]) {
+        ',', ']', '}', '\n', '#' => true,
+        else => false,
+    };
+}
+
 // ── Quoted / multiline string scanning ──────────────────────────────────────
 // Each scanner starts at the OPENING delimiter and returns the decoded text
 // plus the index just past the CLOSING delimiter. Decoded text is always
@@ -403,6 +450,20 @@ test "classifyBracketCommit: flow vs bare-trailing vs unclosed" {
     try std.testing.expect(classifyBracketCommit("[80, 443", 0) == .unclosed);
     try std.testing.expect(classifyBracketCommit("[\n", 0) == .unclosed);
     try std.testing.expect(classifyBracketCommit("['unterminated]", 0) == .unclosed);
+}
+
+test "classifyFlowBracket: nested flow vs bare-trailing element" {
+    // A balanced group followed by a flow terminator is a nested collection.
+    try std.testing.expect(classifyFlowBracket("[1, 2], 3]", 0) == .flow);
+    try std.testing.expect(classifyFlowBracket("[1, 2]]", 0) == .flow);
+    try std.testing.expect(classifyFlowBracket("{ x = 1 }, y]", 0) == .flow);
+    try std.testing.expect(classifyFlowBracket("[a, b]\n", 0) == .flow);
+    // A balanced group with trailing content is a bare-string element (a
+    // markdown link, glob, regex) — the flow twin of the block bare-trailing.
+    try std.testing.expect(classifyFlowBracket("[Blog](/x), [Resume](/y)]", 0) == .bare_trailing);
+    try std.testing.expect(classifyFlowBracket("[a-z]*.md, next]", 0) == .bare_trailing);
+    // Unterminated → left to the flow parser (reported as flow).
+    try std.testing.expect(classifyFlowBracket("[1, 2", 0) == .flow);
 }
 
 test "scanTripleSingle is verbatim" {

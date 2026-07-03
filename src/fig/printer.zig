@@ -34,6 +34,14 @@ pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey };
 /// Deepest `>` count a section header's block body may reach before the map is
 /// hoisted into per-child sections instead.
 const max_body_depth = 2;
+/// A flow-representable sequence with more than this many elements breaks onto
+/// multiple lines (one element per line) even when it would fit the width
+/// budget. Short lists (`[a, b, c]`) stay inline; longer ones read and diff
+/// better stacked. Six keeps typical frontmatter lists (a handful of tags,
+/// authors, audiences) inline while stacking the long index-style lists that
+/// motivated multi-line flow. Independent of the width test below — either
+/// trigger (too wide, or too many items) breaks the list.
+const max_inline_seq_items = 6;
 /// Recursion guard for the section path buffer (collapse/hoist recursion is
 /// bounded by tree depth; 128 dotted segments is far past any real config).
 const path_cap = 128;
@@ -167,15 +175,22 @@ fn emitSection(self: *Printer, kv_id: AST.Node.Id) Error!void {
             try self.mapBody(v, 1);
         },
         .sequence => |first_opt| {
-            if (self.fitsInline(v, self.pathWidth() + 3, .allow_trailing))
+            if (self.seqLen(v) <= max_inline_seq_items and
+                self.fitsInline(v, self.pathWidth() + 3, .allow_trailing))
                 return self.sectionAssign(kv.key, v);
             // A list of maps is the append header's home turf: `path[]` for
             // the first element, `+` for the rest, fields one `>` deep.
             if (first_opt != null and self.allElementsMappings(v) and
                 !self.keyHasLeading(kv.key) and !self.hasTrailingOrDangling(v))
                 return self.emitAppendGroup(v);
-            // Otherwise a header + `>-` element lines (scalars/inline stay
-            // one line each; anything else nests).
+            // A flow-representable scalar/nested-list list that overflowed the
+            // inline budget (or the item-count threshold) stacks as multi-line
+            // flow — `path = [` / one element per line / `]` — the terse
+            // surface for long frontmatter lists (markdown links, tags, …).
+            if (self.multilineFlowEligible(v, .allow_trailing))
+                return self.sectionMultilineFlowSeq(kv.key, v);
+            // Otherwise a header + `* v` element lines (elements carrying
+            // comments, multi-line strings, or enum/float atoms land here).
             try self.beginSection(true, kv.key);
             try self.writePath();
             try self.trailingComment(v);
@@ -202,6 +217,19 @@ fn sectionAssign(self: *Printer, anchor_key: AST.Node.Id, v: AST.Node.Id) Error!
         },
     }
     try self.trailingComment(v);
+    try self.writer.writeByte('\n');
+}
+
+/// A section whose value is a multi-line flow list: `path = [` then one element
+/// per line then `]`. Used for long flow-representable scalar/nested-list values
+/// at the document root. Deliberately NOT blank-line separated (`multiline =
+/// false`): a stacked list is still one assignment, so it packs tight with its
+/// scalar neighbors — the frontmatter look — rather than reading as a section.
+fn sectionMultilineFlowSeq(self: *Printer, anchor_key: AST.Node.Id, v: AST.Node.Id) Error!void {
+    try self.beginSection(false, anchor_key);
+    try self.writePath();
+    try self.writer.writeAll(" = ");
+    try self.multilineFlowSeq(v, 0, v);
     try self.writer.writeByte('\n');
 }
 
@@ -259,7 +287,11 @@ fn isFlatChild(self: *const Printer, kv_id: AST.Node.Id) bool {
     const chain = self.resolveChain(kv_id);
     const end = self.ast.nodes[chain.end_kv].kind.keyvalue;
     return switch (self.ast.nodes[end.value].kind) {
-        .mapping, .sequence => self.fitsInline(end.value, 2 + chain.key_width + 3, .allow_trailing),
+        .mapping => self.fitsInline(end.value, 2 + chain.key_width + 3, .allow_trailing),
+        // Mirrors mapEntryLine's inline test exactly: past the item-count
+        // threshold a sequence stacks (multiple lines), so it is not flat.
+        .sequence => self.seqLen(end.value) <= max_inline_seq_items and
+            self.fitsInline(end.value, 2 + chain.key_width + 3, .allow_trailing),
         else => true,
     };
 }
@@ -270,6 +302,96 @@ fn allElementsMappings(self: *const Printer, seq_id: AST.Node.Id) bool {
         if (self.ast.nodes[el].kind != .mapping) return false;
     }
     return true;
+}
+
+fn seqLen(self: *const Printer, seq_id: AST.Node.Id) usize {
+    var n: usize = 0;
+    var cur = self.ast.nodes[seq_id].kind.sequence;
+    while (cur) |el| : (cur = self.ast.nodes[el].next_sibling) n += 1;
+    return n;
+}
+
+fn hasMappingElement(self: *const Printer, seq_id: AST.Node.Id) bool {
+    var cur = self.ast.nodes[seq_id].kind.sequence;
+    while (cur) |el| : (cur = self.ast.nodes[el].next_sibling) {
+        if (self.ast.nodes[el].kind == .mapping) return true;
+    }
+    return false;
+}
+
+/// Is this sequence a candidate for MULTI-LINE flow (`[` / one element per line
+/// / `]`) rather than `> *` block lines? Requires a non-empty list, no direct
+/// mapping element (lists of maps stay on the append-header / block path —
+/// DESIGN.md: flow of maps is brace-heavy), no element that flow would quote
+/// but block leaves bare (the quote-avoidance rule below), and full
+/// flow-representability with no comment dropped (`inlineWidth` returns null on
+/// a dangling comment, a leading/trailing comment barred by `policy`, an
+/// enum/float/char atom, an alias, or an object-in-object). The caller reaches
+/// here only after the inline form was rejected for width or the item-count
+/// threshold.
+fn multilineFlowEligible(self: *const Printer, seq_id: AST.Node.Id, policy: CommentPolicy) bool {
+    if (self.ast.nodes[seq_id].kind.sequence == null) return false; // empty → `= []`
+    if (self.hasMappingElement(seq_id)) return false;
+    if (self.flowQuotesWhatBlockLeavesBare(seq_id)) return false;
+    return self.inlineWidth(seq_id, policy) != null;
+}
+
+/// The quote-avoidance rule (DESIGN.md "Multi-line flow"): would the flow
+/// spelling force quotes onto an element that block position renders bare?
+/// Prose with a top-level comma is the common case — `,` terminates a bare
+/// flow value but is ordinary text in a block bare string — so a list of
+/// sentences reads better as `> *` lines than as a stack of quoted flow
+/// elements. Elements needing quotes in BOTH positions (`true`, a leading
+/// space, genuine nested flow) don't count against flow: quoting is the same
+/// price either way. Recurses into nested sequences (their interiors are
+/// flow-quoted too when the outer value stays flow); map elements never reach
+/// here (excluded by `multilineFlowEligible`).
+fn flowQuotesWhatBlockLeavesBare(self: *const Printer, id: AST.Node.Id) bool {
+    switch (self.ast.nodes[id].kind) {
+        .string => |s| return !isBareSafe(s, false, true) and isBareSafe(s, false, false),
+        .sequence => |first_opt| {
+            var cur = first_opt;
+            while (cur) |el| : (cur = self.ast.nodes[el].next_sibling) {
+                if (self.flowQuotesWhatBlockLeavesBare(el)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// Render a sequence as multi-line flow: `[`, then each element on its own line
+/// (two-space cosmetic indent, trailing comma), then `]` back at the opening
+/// line's `indent`. The interior is a suspended flow region — the block layer's
+/// markers do not apply, so the indentation is purely visual and the re-parse
+/// ignores it. `comment_anchor`'s trailing comment (if any) prints after the
+/// opening `[` — the multiline-string opener rule's flow twin — so the comment
+/// stays next to the key instead of trailing the far-away `]`. Each element
+/// re-decides fits-or-breaks independently: a nested list rejected for the
+/// inline form (width budget or item-count threshold, same triggers as the
+/// caller) stacks recursively; everything else prints with its inline
+/// (`in_flow`) spelling.
+fn multilineFlowSeq(self: *Printer, seq_id: AST.Node.Id, indent: usize, comment_anchor: ?AST.Node.Id) Error!void {
+    try self.writer.writeByte('[');
+    if (comment_anchor) |a| try self.trailingComment(a);
+    try self.writer.writeByte('\n');
+    const inner = indent + 2;
+    var cur = self.ast.nodes[seq_id].kind.sequence;
+    while (cur) |el| : (cur = self.ast.nodes[el].next_sibling) {
+        for (0..inner) |_| try self.writer.writeByte(' ');
+        const el_node = self.ast.nodes[el];
+        if (el_node.kind == .sequence and el_node.kind.sequence != null and
+            (self.seqLen(el) > max_inline_seq_items or
+                !self.fitsInline(el, inner + 1, .strict))) // +1: the trailing comma
+        {
+            try self.multilineFlowSeq(el, inner, null);
+        } else {
+            try self.value(el, true);
+        }
+        try self.writer.writeAll(",\n");
+    }
+    for (0..indent) |_| try self.writer.writeByte(' ');
+    try self.writer.writeByte(']');
 }
 
 // ── Block bodies ─────────────────────────────────────────────────────────────
@@ -301,15 +423,35 @@ fn mapEntryLine(self: *Printer, kv_id: AST.Node.Id, depth: usize) Error!void {
     try self.writeMarkers(depth);
     try self.writeChainKeys(kv_id, chain.end_kv);
     const v = end.value;
+    const prefix_width = 2 * depth + chain.key_width + 3;
     switch (self.ast.nodes[v].kind) {
-        .mapping, .sequence => {
-            if (self.fitsInline(v, 2 * depth + chain.key_width + 3, .allow_trailing)) {
+        .mapping => {
+            if (self.fitsInline(v, prefix_width, .allow_trailing)) {
                 try self.writer.writeAll(" = ");
                 try self.flowValue(v);
                 try self.trailingComment(v);
                 try self.writer.writeByte('\n');
             } else {
                 // Nested container header (`> key`, children one deeper).
+                try self.trailingComment(v);
+                try self.writer.writeByte('\n');
+                try self.body(v, depth + 1);
+            }
+        },
+        .sequence => {
+            if (self.seqLen(v) <= max_inline_seq_items and
+                self.fitsInline(v, prefix_width, .allow_trailing))
+            {
+                try self.writer.writeAll(" = ");
+                try self.flowValue(v);
+                try self.trailingComment(v);
+                try self.writer.writeByte('\n');
+            } else if (self.multilineFlowEligible(v, .allow_trailing)) {
+                try self.writer.writeAll(" = ");
+                try self.multilineFlowSeq(v, 2 * depth, v);
+                try self.writer.writeByte('\n');
+            } else {
+                // Nested sequence header (`> key`, `>> *` elements deeper).
                 try self.trailingComment(v);
                 try self.writer.writeByte('\n');
                 try self.body(v, depth + 1);
@@ -325,7 +467,7 @@ fn mapEntryLine(self: *Printer, kv_id: AST.Node.Id, depth: usize) Error!void {
     }
 }
 
-/// Emit every element of sequence `id` as `>-` lines at `depth` (bare `-` at
+/// Emit every element of sequence `id` as `> *` lines at `depth` (bare `*` at
 /// the root), then the sequence's own dangling comment run.
 fn seqBody(self: *Printer, seq_id: AST.Node.Id, depth: usize) Error!void {
     var cur = self.ast.nodes[seq_id].kind.sequence;
@@ -333,13 +475,31 @@ fn seqBody(self: *Printer, seq_id: AST.Node.Id, depth: usize) Error!void {
         try self.leadingComments(el, depth);
         try self.writeElementMarkers(depth);
         switch (self.ast.nodes[el].kind) {
-            .mapping, .sequence => {
+            .mapping => {
                 // Element leading comments are already printed, so they don't
                 // block the inline form.
                 if (self.fitsInline(el, elementPrefixWidth(depth), .allow_leading_trailing)) {
                     try self.writer.writeByte(' ');
                     try self.flowValue(el);
                     try self.trailingComment(el);
+                    try self.writer.writeByte('\n');
+                } else {
+                    try self.trailingComment(el);
+                    try self.writer.writeByte('\n');
+                    try self.body(el, depth + 1);
+                }
+            },
+            .sequence => {
+                if (self.seqLen(el) <= max_inline_seq_items and
+                    self.fitsInline(el, elementPrefixWidth(depth), .allow_leading_trailing))
+                {
+                    try self.writer.writeByte(' ');
+                    try self.flowValue(el);
+                    try self.trailingComment(el);
+                    try self.writer.writeByte('\n');
+                } else if (self.multilineFlowEligible(el, .allow_leading_trailing)) {
+                    try self.writer.writeByte(' ');
+                    try self.multilineFlowSeq(el, elementPrefixWidth(depth), el);
                     try self.writer.writeByte('\n');
                 } else {
                     try self.trailingComment(el);
@@ -455,6 +615,7 @@ fn blockDepthMap(self: *const Printer, map_id: AST.Node.Id, depth: usize) usize 
             },
             .sequence => {
                 if (self.fitsInline(end.value, 2 * depth + chain.key_width + 3, .allow_trailing)) continue;
+                if (self.multilineFlowEligible(end.value, .allow_trailing)) continue; // flow value, no block depth
                 maxd = @max(maxd, self.blockDepthSeq(end.value, depth + 1));
             },
             else => {},
@@ -474,6 +635,7 @@ fn blockDepthSeq(self: *const Printer, seq_id: AST.Node.Id, depth: usize) usize 
             },
             .sequence => {
                 if (self.fitsInline(el, elementPrefixWidth(depth), .allow_leading_trailing)) continue;
+                if (self.multilineFlowEligible(el, .allow_leading_trailing)) continue; // flow value, no block depth
                 maxd = @max(maxd, self.blockDepthSeq(el, depth + 1));
             },
             else => {},
@@ -482,9 +644,9 @@ fn blockDepthSeq(self: *const Printer, seq_id: AST.Node.Id, depth: usize) usize 
     return maxd;
 }
 
-/// Columns before an element's value: `- ` at root, `> >- ` etc. below.
+/// Columns before an element's value: `* ` at root, `> > * ` etc. below.
 fn elementPrefixWidth(depth: usize) usize {
-    return if (depth == 0) 2 else 2 * depth + 1;
+    return 2 * depth + 2;
 }
 
 const Chain = struct { end_kv: AST.Node.Id, key_width: usize };
@@ -564,15 +726,11 @@ fn writeMarkers(self: *Printer, depth: usize) Error!void {
     for (0..depth) |_| try self.writer.writeAll("> ");
 }
 
-/// The marker run for an element line: the `-` glues to the final marker
-/// (`> >-`); a root element is a bare `-`.
+/// The marker run for an element line: the depth run, then the `*` bullet in
+/// its own cell (`> > *`); a root element is a bare `*`.
 fn writeElementMarkers(self: *Printer, depth: usize) Error!void {
-    if (depth == 0) {
-        try self.writer.writeByte('-');
-        return;
-    }
-    for (0..depth - 1) |_| try self.writer.writeAll("> ");
-    try self.writer.writeAll(">-");
+    for (0..depth) |_| try self.writer.writeAll("> ");
+    try self.writer.writeByte('*');
 }
 
 fn writeKey(self: *Printer, key_id: AST.Node.Id) Error!void {
@@ -766,14 +924,15 @@ fn isBareSafe(s: []const u8, is_key: bool, in_flow: bool) bool {
         switch (s[0]) {
             '\'', '"' => return false, // opens a committed string form
             '[', '{' => {
-                // In flow position a leading bracket always opens a nested
-                // collection — there is no bare-trailing rescue there.
-                if (in_flow) return false;
                 // A leading bracket is bare-safe only when it re-parses as a
                 // bare string — a balanced close with trailing content
                 // (markdown link, glob, regex). A terminal close would commit
                 // to flow and a non-closing bracket would error (DESIGN.md
-                // "Committed values").
+                // "Committed values"). In flow position the same rule holds via
+                // the bracket-aware flow scanner, so it short-circuits here
+                // (skipping the blanket `,`/`]`/`}` rejection below, which those
+                // interior — balanced — brackets would otherwise trip).
+                if (in_flow) return flowLeadingBracketBare(s);
                 if (tok.classifyBracketCommit(s, 0) != .bare_trailing) return false;
             },
             else => {},
@@ -798,6 +957,33 @@ fn isBareSafe(s: []const u8, is_key: bool, in_flow: bool) bool {
         }
     }
     return true;
+}
+
+/// A flow value whose first char is `[`/`{` is bare-safe only as a
+/// balanced-then-trailing string (markdown link, glob, regex) that the
+/// bracket-aware flow scanner (`scanFlowBareBracket`) reproduces verbatim. That
+/// needs a tail after the first balanced group (else it is genuine nested flow,
+/// which must be quoted to stay a string) and no depth-0 `,`/`]`/`}` or
+/// `#`-comment that would truncate the value. `\n`/`\r`/`\t` and edge spaces are
+/// already rejected by the caller.
+fn flowLeadingBracketBare(s: []const u8) bool {
+    if (tok.classifyFlowBracket(s, 0) != .bare_trailing) return false;
+    var depth: usize = 0;
+    var prev_space = false;
+    for (s) |c| {
+        switch (c) {
+            '[', '{' => depth += 1,
+            ']', '}' => {
+                if (depth == 0) return false;
+                depth -= 1;
+            },
+            ',' => if (depth == 0) return false,
+            '#' => if (prev_space and depth == 0) return false,
+            else => {},
+        }
+        prev_space = (c == ' ' or c == '\t');
+    }
+    return depth == 0;
 }
 
 fn leadingComments(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
@@ -920,7 +1106,7 @@ test "a deep map hoists into dotted sections (and nested lists of maps into [] h
         \\>>> shared-version-key = a deliberately long value to keep the release table from fitting inline here
         \\>>> tag-message-etc = another deliberately long value to keep the release table from fitting inline
         \\>> replacements
-        \\>>> -
+        \\>>> *
         \\>>>> file = README.md
         \\>>>> search = a deliberately long pattern string so this element cannot fit in the inline flow budget
     ,
@@ -956,25 +1142,236 @@ test "a sequence of maps prints as a [] append header with + continuations" {
     );
 }
 
-test "scalar lists inline when they fit, header + >- lines when they don't" {
+test "scalar lists inline when short, multi-line flow when long" {
+    // A short list stays inline; one that overflows the width budget stacks as
+    // multi-line flow (one element per line) rather than `> *` block lines.
+    // A stacked list is still one assignment, so it packs tight with its
+    // neighbors — no blank-line separation.
     try expectPrint(
         \\ports
-        \\> - 1
-        \\> - 2
+        \\> * 1
+        \\> * 2
         \\members
-        \\>- crates/some_long_crate_name_one
-        \\>- crates/some_long_crate_name_two
-        \\>- crates/some_long_crate_name_three
-        \\>- crates/some_long_crate_name_four
+        \\>* crates/some_long_crate_name_one
+        \\>* crates/some_long_crate_name_two
+        \\>* crates/some_long_crate_name_three
+        \\>* crates/some_long_crate_name_four
     ,
         \\ports = [1, 2]
+        \\members = [
+        \\  crates/some_long_crate_name_one,
+        \\  crates/some_long_crate_name_two,
+        \\  crates/some_long_crate_name_three,
+        \\  crates/some_long_crate_name_four,
+        \\]
         \\
+    );
+}
+
+test "a list of more than six short items stacks even when it would fit inline" {
+    try expectPrint(
+        \\letters = [a, b, c, d, e, f, g]
+    ,
+        \\letters = [
+        \\  a,
+        \\  b,
+        \\  c,
+        \\  d,
+        \\  e,
+        \\  f,
+        \\  g,
+        \\]
+        \\
+    );
+    // Exactly six still fits on one line.
+    try expectPrint(
+        \\letters = [a, b, c, d, e, f]
+    ,
+        \\letters = [a, b, c, d, e, f]
+        \\
+    );
+}
+
+test "a scalar list with a comment on an element keeps the > * block form" {
+    // A dropped comment is never worth a prettier shape, so a list whose
+    // elements carry comments falls back to `> *` lines (multi-line flow
+    // discards interior comments).
+    try expectPrint(
         \\members
-        \\>- crates/some_long_crate_name_one
-        \\>- crates/some_long_crate_name_two
-        \\>- crates/some_long_crate_name_three
-        \\>- crates/some_long_crate_name_four
+        \\> # the first crate
+        \\> * crates/some_long_crate_name_one
+        \\> * crates/some_long_crate_name_two
+        \\> * crates/some_long_crate_name_three
+        \\> * crates/some_long_crate_name_four
+    ,
+        \\members
+        \\> # the first crate
+        \\> * crates/some_long_crate_name_one
+        \\> * crates/some_long_crate_name_two
+        \\> * crates/some_long_crate_name_three
+        \\> * crates/some_long_crate_name_four
         \\
+    );
+}
+
+test "markdown links stay bare inside multi-line flow (the frontmatter case)" {
+    // The motivating example: a `contents` list of markdown links. Each link is
+    // a balanced-then-trailing bare string — no `> *`, no quotes.
+    try expectPrint(
+        \\contents
+        \\> * [Archived Documents](</Archive/Archived documents.md>)
+        \\> * [Blog](/Blog/Blog.md)
+        \\> * [Creative Writing](</Creative Writing/Creative Writing.md>)
+        \\> * [Daily Index](/Daily/daily_index.md)
+        \\> * [Resume](/Resume.md)
+        \\> * [Utility](/Utility/utility.md)
+        \\> * [Writing For Today](</Writing for today.md>)
+    ,
+        \\contents = [
+        \\  [Archived Documents](</Archive/Archived documents.md>),
+        \\  [Blog](/Blog/Blog.md),
+        \\  [Creative Writing](</Creative Writing/Creative Writing.md>),
+        \\  [Daily Index](/Daily/daily_index.md),
+        \\  [Resume](/Resume.md),
+        \\  [Utility](/Utility/utility.md),
+        \\  [Writing For Today](</Writing for today.md>),
+        \\]
+        \\
+    );
+}
+
+test "a short markdown-link list stays inline and bare" {
+    try expectPrint(
+        \\links = ["[Blog](/Blog/Blog.md)", "[Resume](/Resume.md)"]
+    ,
+        \\links = [[Blog](/Blog/Blog.md), [Resume](/Resume.md)]
+        \\
+    );
+}
+
+test "quote-avoidance: prose with commas prefers > * block lines over stacked flow" {
+    // A top-level `,` terminates a bare flow value, so flow would force quotes
+    // onto the second element; block position keeps both bare. Bare beats
+    // quoted, so the list takes the `> *` form.
+    try expectPrint(
+        \\random = [test of very long things in a list to see if it works, "hello there, this is also a long test; hopefully it works"]
+    ,
+        \\random
+        \\> * test of very long things in a list to see if it works
+        \\> * hello there, this is also a long test; hopefully it works
+        \\
+    );
+    // A short comma-carrying list that FITS stays inline — quote-avoidance
+    // only arbitrates between the two broken forms, never un-inlines.
+    try expectPrint(
+        \\pair = [a, "b, c"]
+    ,
+        \\pair = [a, "b, c"]
+        \\
+    );
+    // An element quoted in BOTH positions (`true` sniffs to bool bare) doesn't
+    // count against flow: quoting is the same price either way.
+    try expectPrint(
+        \\flags = [crates/some_long_crate_name_one, crates/some_long_crate_name_two, crates/some_long_crate_name_three, "true"]
+    ,
+        \\flags = [
+        \\  crates/some_long_crate_name_one,
+        \\  crates/some_long_crate_name_two,
+        \\  crates/some_long_crate_name_three,
+        \\  "true",
+        \\]
+        \\
+    );
+    // The rule recurses: a comma-prose string trapped inside a NESTED list
+    // would be flow-quoted too, so the whole value goes block.
+    try expectPrint(
+        \\notes = [[first long note about the thing, "second note, with a comma inside it somewhere"], [third]]
+    ,
+        \\notes
+        \\> *
+        \\> > * first long note about the thing
+        \\> > * second note, with a comma inside it somewhere
+        \\> * [third]
+        \\
+    );
+}
+
+test "a multi-line flow list's trailing comment sits on the opener line" {
+    // The `'''` opener rule's flow twin: `key = [  # c` parses the comment as
+    // block-layer trailing on the sequence, and fmt emits it there — next to
+    // the key, not after the far-away `]`. A comment written on the `]` line
+    // migrates to the opener on the next fmt.
+    const stacked =
+        \\contents = [ # this is a contents comment
+        \\  crates/some_long_crate_name_one,
+        \\  crates/some_long_crate_name_two,
+        \\  crates/some_long_crate_name_three,
+        \\  crates/some_long_crate_name_four,
+        \\]
+        \\
+    ;
+    try expectPrint(stacked, stacked);
+    try expectPrint(
+        \\contents = [
+        \\  crates/some_long_crate_name_one,
+        \\  crates/some_long_crate_name_two,
+        \\  crates/some_long_crate_name_three,
+        \\  crates/some_long_crate_name_four,
+        \\] # this is a contents comment
+    , stacked);
+    try expectRoundTrip(stacked);
+}
+
+test "nested lists inside multi-line flow re-decide fits-or-breaks" {
+    // A nested list that overflows the width budget stacks recursively (two
+    // more columns per level, closer back at the opener's indent); a short
+    // nested sibling stays inline.
+    try expectPrint(
+        \\pairs = [[crates/some_long_crate_name_one, crates/some_long_crate_name_two, crates/some_long_crate_name_three], [a, b]]
+    ,
+        \\pairs = [
+        \\  [
+        \\    crates/some_long_crate_name_one,
+        \\    crates/some_long_crate_name_two,
+        \\    crates/some_long_crate_name_three,
+        \\  ],
+        \\  [a, b],
+        \\]
+        \\
+    );
+}
+
+test "multi-line flow packs tight between scalar assignments (frontmatter)" {
+    try expectPrint(
+        \\title = Adam's Archive
+        \\contents = [one_long_crate_name_here, two_long_crate_name_here, three_long_crate_name_here]
+        \\author = Adam Harris
+    ,
+        \\title = Adam's Archive
+        \\contents = [
+        \\  one_long_crate_name_here,
+        \\  two_long_crate_name_here,
+        \\  three_long_crate_name_here,
+        \\]
+        \\author = Adam Harris
+        \\
+    );
+}
+
+test "multi-line flow lists round-trip (bare links, nested lists, quoted edges)" {
+    try expectRoundTrip(
+        \\contents = [
+        \\  [Archived Documents](</Archive/Archived documents.md>),
+        \\  [Blog](/Blog/Blog.md),
+        \\  [Creative Writing](</Creative Writing/Creative Writing.md>),
+        \\  "a, b needs quotes",
+        \\  "[a-flow-looking-string]",
+        \\  plain,
+        \\]
+    );
+    // A list of nested lists stacks the outer level, keeps the inner ones inline.
+    try expectRoundTrip(
+        \\grid = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12], [13, 14, 15], [16, 17, 18], [19, 20, 21]]
     );
 }
 
@@ -1016,7 +1413,7 @@ test "round-trips through a second parse (and fmt is idempotent)" {
         \\> host = localhost
         \\> port = 5432
         \\servers
-        \\> -
+        \\> *
         \\>> host = a.com
         \\>> port = 1
     );
@@ -1024,8 +1421,8 @@ test "round-trips through a second parse (and fmt is idempotent)" {
         \\workspace
         \\> resolver = "2"
         \\> members
-        \\>>- crates/one_rather_long_member_path_aaaaaaaaaaaa
-        \\>>- crates/two_rather_long_member_path_bbbbbbbbbbbb
+        \\>>* crates/one_rather_long_member_path_aaaaaaaaaaaa
+        \\>>* crates/two_rather_long_member_path_bbbbbbbbbbbb
         \\> package
         \\>> version = 1.6.1
         \\>> license-file = LICENSE.md
@@ -1036,10 +1433,10 @@ test "round-trips through a second parse (and fmt is idempotent)" {
         \\>>> features-list = [serde, yaml, derive, indexmap, and, extra, entries, to, defeat, inlining, of, fig]
         \\> metadata
         \\>> replacements
-        \\>>> -
+        \\>>> *
         \\>>>> file = README.md
         \\>>>> search = a deliberately long pattern string so this element cannot fit in the inline flow budget
-        \\>>> -
+        \\>>> *
         \\>>>> file = CHANGELOG.md
         \\>>>> search = another deliberately long pattern string keeping the sequence out of the inline budget
         \\profile
@@ -1076,10 +1473,10 @@ test "hoisting groups flat-sibling runs under one header re-entry" {
         \\>>> tag-message = Release v{{version}}
         \\>>> pre-release-commit-message = chore: release v{{version}}
         \\>>> pre-release-replacements
-        \\>>>> -
+        \\>>>> *
         \\>>>>> file = README.md
         \\>>>>> search = a deliberately long pattern string so this element cannot fit in the inline flow budget
-        \\>>>> -
+        \\>>>> *
         \\>>>>> file = CHANGELOG.md
         \\>>>>> search = another deliberately long pattern string keeping the sequence out of the inline budget
     ,
@@ -1113,7 +1510,7 @@ test "a lone flat child between deep siblings stays a dotted assignment" {
         \\>>> features-list = [serde, yaml, derive, indexmap, extras, and-more]
         \\>> chrono
         \\>>> version = "0.4"
-        \\>>> features-list = [serde, std, clock, and, extra, padding, words, here]
+        \\>>> features-list = [serde, std, clock, alloc, extra, padding]
     ,
         \\workspace.resolver = "2"
         \\
@@ -1123,7 +1520,7 @@ test "a lone flat child between deep siblings stays a dotted assignment" {
         \\> > features-list = [serde, yaml, derive, indexmap, extras, and-more]
         \\> chrono
         \\> > version = "0.4"
-        \\> > features-list = [serde, std, clock, and, extra, padding, words, here]
+        \\> > features-list = [serde, std, clock, alloc, extra, padding]
         \\
     );
 }
@@ -1169,14 +1566,14 @@ test "a container holding a multi-line string breaks out of flow" {
 test "typed sequence elements keep their annotations" {
     try expectPrint(
         \\weights
-        \\>-: int = 1
-        \\>-: enum = heavy
-        \\>- and a long plain string element so the whole weights sequence stays out of the inline budget
+        \\>*: int = 1
+        \\>*: enum = heavy
+        \\>* and a long plain string element so the whole weights sequence stays out of the inline budget
     ,
         \\weights
-        \\>- 1
-        \\>-: enum = heavy
-        \\>- and a long plain string element so the whole weights sequence stays out of the inline budget
+        \\> * 1
+        \\> *: enum = heavy
+        \\> * and a long plain string element so the whole weights sequence stays out of the inline budget
         \\
     );
 }

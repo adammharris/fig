@@ -36,9 +36,9 @@ const tok = @import("tokenizer.zig");
 const Type = @import("fig.zig").Type;
 
 pub const Error = error{
-    /// A container ended up with children of both shapes (`key = v` AND `-`).
+    /// A container ended up with children of both shapes (`key = v` AND `*`).
     FigMixedContainerChildren,
-    /// A sequence mixed `[]`/`[i]` addressing with `-` elements.
+    /// A sequence mixed `[]`/`[i]` addressing with `*` elements.
     FigMixedSequenceAddressing,
     /// A dotted/index path stepped into an existing scalar key.
     FigKeyNotContainer,
@@ -50,7 +50,7 @@ pub const Error = error{
     FigEmptyAppendTarget,
     /// An assignment addressed an index that was already set.
     FigIndexAlreadySet,
-    /// A header/dash-opener container closed with zero children.
+    /// A header/element-opener container closed with zero children.
     FigEmptyContainer,
     /// A `>` marker with no open header above it.
     FigRootMarker,
@@ -64,8 +64,10 @@ pub const Error = error{
     FigForeignSyntaxColon,
     /// `[section]`/`[[x]]` (TOML habit) at line start.
     FigForeignSyntaxBracket,
-    /// `- key = value` — a dash element's RHS looked like an inline field.
-    FigDashInlineField,
+    /// A `-` element line (`- v`, `>-`, `> -`) — YAML habit; fig elements are `*`.
+    FigForeignSyntaxDash,
+    /// `* key = value` — an element's RHS looked like an inline field.
+    FigElementInlineField,
     /// An assignment/element had no value at all.
     FigInvalidValue,
     /// A typed value (`: int`, `: bool`, ...) didn't match its annotation.
@@ -105,7 +107,7 @@ last_append_steps: ?[]const Step = null,
 // ── Intermediate tree types ─────────────────────────────────────────────────
 
 /// A container whose shape (map vs. sequence) is frozen the moment its first
-/// child is added — root and every header/dash-opener target start here.
+/// child is added — root and every header/element-opener target start here.
 const PendingContainer = struct {
     kind: enum { undecided, mapping, sequence } = .undecided,
     /// Created by a flow value (`[…]`/`{…}`) — closed to later extension via
@@ -155,12 +157,12 @@ const MEntry = struct {
 
 const Sequence = struct {
     elements: std.ArrayList(*TNode) = .empty,
-    style: enum { undecided, dash, addressed } = .undecided,
+    style: enum { undecided, element, addressed } = .undecided,
 
-    fn markDash(self: *Sequence) Error!void {
+    fn markElement(self: *Sequence) Error!void {
         switch (self.style) {
-            .undecided => self.style = .dash,
-            .dash => {},
+            .undecided => self.style = .element,
+            .element => {},
             .addressed => return error.FigMixedSequenceAddressing,
         }
     }
@@ -169,7 +171,7 @@ const Sequence = struct {
         switch (self.style) {
             .undecided => self.style = .addressed,
             .addressed => {},
-            .dash => return error.FigMixedSequenceAddressing,
+            .element => return error.FigMixedSequenceAddressing,
         }
     }
 };
@@ -260,10 +262,10 @@ fn run(self: *Parser) Error!void {
     while (self.pos < self.source.len) {
         self.skipSpacesTabs(); // cosmetic indent — never load-bearing
         const m = try self.scanMarkers();
-        // A glued `>-` prefix already committed this to an element line (even a
-        // bare `>-` opener with no value, or one carrying only a trailing
+        // A `*` element marker already committed this to an element line (even
+        // a bare `*` opener with no value, or one carrying only a trailing
         // comment), so skip the blank/comment-only shortcuts below.
-        if (!m.dash) {
+        if (!m.star) {
             // A TRULY blank line (nothing at all, not even a comment) is skipped
             // outright. This must NOT reuse `atEndOfContent` (which also treats a
             // leading `#` as "content is over") — a comment-only line has to fall
@@ -284,7 +286,7 @@ fn run(self: *Parser) Error!void {
                 continue;
             }
         }
-        try self.processContentLine(m.depth, m.dash);
+        try self.processContentLine(m.depth, m.star);
     }
     try self.closeFramesAbove(0);
     for (self.pending_leading.items) |pc| {
@@ -293,7 +295,7 @@ fn run(self: *Parser) Error!void {
     self.pending_leading.clearRetainingCapacity();
 }
 
-fn processContentLine(self: *Parser, depth: u32, dash: bool) Error!void {
+fn processContentLine(self: *Parser, depth: u32, star: bool) Error!void {
     try self.closeFramesAbove(depth);
     const required: u32 = if (self.stack.items.len == 0) 0 else self.stack.items[self.stack.items.len - 1].child_depth;
     if (depth != required) return if (required == 0) error.FigRootMarker else error.FigSkippedLevel;
@@ -303,19 +305,17 @@ fn processContentLine(self: *Parser, depth: u32, dash: bool) Error!void {
     // it re-runs the most recent zero-marker `[]` append header. Any other
     // zero-marker structural line breaks the chain (comments, blanks, and
     // deeper body lines do not — they never reach this point at depth 0).
-    const is_plus = !dash and self.peek() == '+' and self.isPlusLine();
+    const is_plus = !star and self.peek() == '+' and self.isPlusLine();
     if (depth == 0 and !is_plus) self.last_append_steps = null;
     if (is_plus) return self.parseContinuationLine(depth);
 
-    // `dash` = a glued `>-` prefix already consumed the element marker. The
-    // spaced `> -` form is still accepted: the marker run left `pos` on the
-    // `-`, which the dispatch below consumes.
-    if (dash) return self.parseElementLine(target, depth);
+    // `star` = the prefix carried a `*` element marker (scanMarkers consumed
+    // it, along with the separator).
+    if (star) return self.parseElementLine(target, depth);
     switch (self.peek().?) {
-        '-' => {
-            self.advance(); // '-'
-            try self.parseElementLine(target, depth);
-        },
+        // A `-` element line is the YAML habit (and fig's own pre-`*`
+        // spelling) — hard error naming the `*` form.
+        '-' => return error.FigForeignSyntaxDash,
         '[' => return error.FigForeignSyntaxBracket,
         else => try self.parseKeyLine(target, depth),
     }
@@ -389,50 +389,57 @@ fn appendComments(self: *Parser, dst: *std.ArrayList(AST.Comment), src: std.Arra
 
 const Markers = struct {
     depth: u32,
-    /// A `-` element marker was consumed as part of the prefix — either glued to
-    /// the run (`>-`, the normalized form) or, at root, a bare leading `-` (a
-    /// zero-marker sequence element). The spaced `> -` form is NOT flagged here;
-    /// its `-` sits in body position and the dispatcher consumes it.
-    dash: bool,
+    /// A `*` element marker ended the prefix — spaced (`> *`, the normalized
+    /// form), glued (`>*`), or, at root, a bare leading `*` (a zero-marker
+    /// sequence element). scanMarkers consumed it and its separator.
+    star: bool,
 };
 
 /// Count a run of `>` markers (spaced runs like `> > >` count the same as
-/// `>>>`), consume an optional glued `-` element marker (`>>-`), then require
-/// exactly one whitespace separator before the body — unless the rest of the
-/// line is empty/a comment (a marker/dash-only line: `>>` is blank, `>-` is a
-/// map-element opener).
+/// `>>>`), consume an optional `*` element marker ending the run (`> *`, `>*`,
+/// or a bare `*` at root), then require exactly one whitespace separator
+/// before the body — unless the rest of the line is empty/a comment (a
+/// marker-only line: `>>` is blank, `*` is a map-element opener). The `*` is a
+/// role suffix, not a counted mark: depth is the `>` count alone. A `-` where
+/// the element marker would sit is the YAML habit — a hard error naming `*`.
 fn scanMarkers(self: *Parser) Error!Markers {
     var count: u32 = 0;
-    while (self.peek() == '>') {
+    scan: while (self.peek() == '>') {
         count += 1;
         self.advance();
         while (self.peek() == ' ' or self.peek() == '\t') {
             const save = self.pos;
             self.skipSpacesTabs();
+            if (self.peek() == '*') break :scan; // spaced `> *` ends the run
             if (self.peek() != '>') {
                 self.pos = save;
                 break;
             }
         }
     }
-    if (count > 0) {
-        // A `-` immediately after the run (no separating space) is the element
-        // role glued to the depth prefix (`>>-`). One `-` only; a second must
-        // sit after the separator space (it is then the element's value).
-        const dash = self.peek() == '-';
-        if (dash) self.advance();
+    // `>-` glued to the run — the old dash element spelling.
+    if (count > 0 and self.peek() == '-') return error.FigForeignSyntaxDash;
+    if (self.peek() == '*') {
+        self.advance();
         if (self.peek() == ' ' or self.peek() == '\t') {
             self.skipSpacesTabs();
-        } else if (dash and self.peek() == ':') {
-            // Typed element `>-: type = v`: the `:` binds to the positional-key
-            // `-` (mirrors `key: type`), so no separator space is required —
+        } else if (self.peek() == ':') {
+            // Typed element `*: type = v`: the `:` binds to the positional-key
+            // `*` (mirrors `key: type`), so no separator space is required —
             // leave `pos` on the `:` for `parseElementLine`.
         } else if (!self.atEndOfContent()) {
             return error.FigBadMarkerSeparator;
         }
-        return .{ .depth = count, .dash = dash };
+        return .{ .depth = count, .star = true };
     }
-    return .{ .depth = count, .dash = false };
+    if (count > 0) {
+        if (self.peek() == ' ' or self.peek() == '\t') {
+            self.skipSpacesTabs();
+        } else if (!self.atEndOfContent()) {
+            return error.FigBadMarkerSeparator;
+        }
+    }
+    return .{ .depth = count, .star = false };
 }
 
 // ── Header / assignment lines ────────────────────────────────────────────────
@@ -520,13 +527,13 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
 
 // ── Element (`-`) lines ──────────────────────────────────────────────────────
 
-/// The element `-` marker has already been consumed (glued `>-` by `scanMarkers`,
-/// or spaced `> -` by the dispatcher); `pos` sits just past it.
+/// The element `*` marker (and its separator) has already been consumed by
+/// `scanMarkers`; `pos` sits on the element body (or a typing `:`).
 fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!void {
     self.skipSpacesTabs();
     const leading = try self.drainPendingLeading();
     const seq = try target.asSequence();
-    try seq.markDash();
+    try seq.markElement();
 
     if (self.atEndOfContent()) {
         const child = try self.allocator.create(PendingContainer);
@@ -567,12 +574,12 @@ fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!
         return;
     }
 
-    // Bare value: the "no inline field on a dash" guardrail runs BEFORE
+    // Bare value: the "no inline field on an element" guardrail runs BEFORE
     // sniffing, on the raw (untrimmed) rest of the line.
     const start = self.pos;
     var k = start;
     while (k < self.source.len and self.source[k] != '\n') k += 1;
-    if (std.mem.indexOf(u8, self.source[start..k], " = ") != null) return error.FigDashInlineField;
+    if (std.mem.indexOf(u8, self.source[start..k], " = ") != null) return error.FigElementInlineField;
 
     var node = try self.parseUntypedValue(false);
     self.consumeLineEnd();
@@ -808,8 +815,23 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             }
             // `.flow` (terminal close) and `.unclosed` (multi-line / truncation)
             // both commit: the flow parser succeeds or raises a hard error.
+            //
+            // A `# …` after the opening `[`/`{`, with nothing else on the line,
+            // is a block-layer trailing comment on the flow value — the
+            // multiline-string opener rule's flow twin (DESIGN.md "Multiline
+            // strings"): the opener line is still block-layer; flow content
+            // begins at the next newline. Captured here, then skipped by the
+            // flow parser's `skipFlowWs` as interior trivia. An opener comment
+            // wins over a close-line one, mirroring the `'''` rule.
+            const opener_comment = self.scanFlowOpenerComment();
             var node = try self.parseFlowValue();
-            if (try self.scanTrailingCommentOnly()) |t| node.trailing = .{ .text = t };
+            const trailing = try self.scanTrailingCommentOnly();
+            node.trailing = if (opener_comment) |oc|
+                .{ .text = oc }
+            else if (trailing) |t|
+                .{ .text = t }
+            else
+                null;
             return node;
         },
         else => {
@@ -955,6 +977,20 @@ fn scanTrailingCommentOnly(self: *Parser) Error!?[]const u8 {
 
 // ── Flow mode (recursive descent; fig-inline ∪ JSON5) ────────────────────────
 
+/// Peek (without consuming) a `# …` comment that is the only thing after the
+/// opening `[`/`{` on its line. Called with `self.pos` on the opening bracket.
+/// Returns the trimmed comment text, or null when the line carries flow
+/// content instead. Not consumed on purpose: `skipFlowWs` discards the same
+/// span during the flow parse, so capture and parse stay independent.
+fn scanFlowOpenerComment(self: *const Parser) ?[]const u8 {
+    var i = self.pos + 1; // past the opening bracket
+    while (i < self.source.len and (self.source[i] == ' ' or self.source[i] == '\t')) i += 1;
+    if (i >= self.source.len or self.source[i] != '#') return null;
+    var j = i + 1;
+    while (j < self.source.len and self.source[j] != '\n') j += 1;
+    return std.mem.trim(u8, self.source[i + 1 .. j], " \t\r");
+}
+
 fn parseFlowValue(self: *Parser) Error!TNode {
     return switch (self.peek().?) {
         '[' => self.parseFlowArray(),
@@ -1098,7 +1134,19 @@ fn isFlowKeyStop(c: u8) bool {
 fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
     self.skipFlowWs();
     const c = self.peek() orelse return error.FigUnclosedFlow;
-    if (c == '[' or c == '{') return self.parseFlowValue();
+    if (c == '[' or c == '{') {
+        // A balanced bracket group with trailing content — a markdown link, a
+        // glob, a regex — is a bare-string element, not a nested collection:
+        // the flow twin of the block layer's balanced-then-trailing rule. This
+        // is what lets `[Blog](/Blog.md)` sit unquoted in a flow list.
+        if (tok.classifyFlowBracket(self.source, self.pos) == .bare_trailing) {
+            const text = self.scanFlowBareBracket();
+            if (text.len == 0) return error.FigInvalidValue;
+            // Opened with a delimiter → sniffing is off; it is a string.
+            return .{ .value = .{ .string = text } };
+        }
+        return self.parseFlowValue();
+    }
     if (c == '"') {
         const r = try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
         self.pos = r.end;
@@ -1129,6 +1177,32 @@ fn scanFlowBareValue(self: *Parser) []const u8 {
         switch (ch) {
             ',', ']', '}', '\n' => break,
             '#' => if (prev_space) break,
+            else => {},
+        }
+        prev_space = (ch == ' ' or ch == '\t');
+    }
+    return std.mem.trim(u8, self.source[start..self.pos], " \t\r");
+}
+
+/// Bracket-aware bare flow value for a balanced-then-trailing element (one whose
+/// first char is `[`/`{`, e.g. a markdown link). `[`/`{` raise a nesting depth
+/// and `]`/`}` lower it, so an interior `]` (the `]` of `[text]`) does NOT
+/// terminate the value — only a `,`/`]`/`}` at depth 0, a newline, or a `#`
+/// after whitespace does. Trailing whitespace is trimmed.
+fn scanFlowBareBracket(self: *Parser) []const u8 {
+    const start = self.pos;
+    var depth: usize = 0;
+    var prev_space = false;
+    while (self.pos < self.source.len) : (self.pos += 1) {
+        const ch = self.source[self.pos];
+        switch (ch) {
+            '[', '{' => depth += 1,
+            ']', '}' => {
+                if (depth == 0) break;
+                depth -= 1;
+            },
+            ',', '\n' => if (depth == 0) break,
+            '#' => if (prev_space and depth == 0) break,
             else => {},
         }
         prev_space = (ch == ' ' or ch == '\t');
@@ -1280,12 +1354,12 @@ test "dotted key flattener" {
     try testing.expectEqualStrings("127.0.0.1", (try ast.getValByPath(&.{ .{ .key = "cache" }, .{ .key = "redis" }, .{ .key = "host" } })).kind.string);
 }
 
-test "sequence via dash elements" {
+test "sequence via star elements" {
     var ast = try parseAbstract(testing.allocator,
         \\servers
-        \\> -
+        \\> *
         \\>> host = a.com
-        \\> -
+        \\> *
         \\>> host = b.com
     , .Fig);
     defer ast.deinit();
@@ -1296,8 +1370,8 @@ test "sequence via dash elements" {
 test "scalar sequence" {
     var ast = try parseAbstract(testing.allocator,
         \\ports
-        \\> - 1
-        \\> - 2
+        \\> * 1
+        \\> * 2
     , .Fig);
     defer ast.deinit();
     try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "ports" }, .{ .index = 1 } })).kind.number.raw);
@@ -1395,8 +1469,8 @@ test "terminal bracket still commits to flow (with a trailing comment)" {
 test "markdown links are bare strings as sequence elements too" {
     var ast = try parseAbstract(testing.allocator,
         \\links
-        \\> - [Blog](/Blog/Blog.md)
-        \\> - [Resume](/Resume.md)
+        \\> * [Blog](/Blog/Blog.md)
+        \\> * [Resume](/Resume.md)
     , .Fig);
     defer ast.deinit();
     try testing.expectEqualStrings("[Blog](/Blog/Blog.md)", (try ast.getValByPath(&.{ .{ .key = "links" }, .{ .index = 0 } })).kind.string);
@@ -1482,15 +1556,15 @@ test "flow: JSONC-style trailing commas and # comments" {
     try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "obj" }, .{ .key = "b" } })).kind.number.raw);
 }
 
-test "glued >- element markers parse (scalars and maps)" {
+test "glued >* element markers parse (scalars and maps)" {
     var ast = try parseAbstract(testing.allocator,
         \\ports
-        \\>- 25565
-        \\>- 25566
+        \\>* 25565
+        \\>* 25566
         \\servers
-        \\>-
+        \\>*
         \\>> host = a.com
-        \\>-
+        \\>*
         \\>> host = b.com
     , .Fig);
     defer ast.deinit();
@@ -1499,16 +1573,30 @@ test "glued >- element markers parse (scalars and maps)" {
     try testing.expectEqualStrings("b.com", (try ast.getValByPath(&.{ .{ .key = "servers" }, .{ .index = 1 }, .{ .key = "host" } })).kind.string);
 }
 
-test "spaced > - is still accepted and equals glued >-" {
-    var glued = try parseAbstract(testing.allocator, "xs\n>- 1\n>- 2\n", .Fig);
+test "spaced > * is accepted and equals glued >*" {
+    var glued = try parseAbstract(testing.allocator, "xs\n>* 1\n>* 2\n", .Fig);
     defer glued.deinit();
-    var spaced = try parseAbstract(testing.allocator, "xs\n> - 1\n> - 2\n", .Fig);
+    var spaced = try parseAbstract(testing.allocator, "xs\n> * 1\n> * 2\n", .Fig);
     defer spaced.deinit();
     try testing.expect(glued.eql(spaced));
 }
 
-test "glued >- requires the separator space before a value" {
-    try testing.expectError(error.FigBadMarkerSeparator, parseAbstract(testing.allocator, "xs\n>-1\n", .Fig));
+test "root sequence elements are bare stars" {
+    var ast = try parseAbstract(testing.allocator, "* first\n* second\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings("second", (try ast.getValByPath(&.{.{ .index = 1 }})).kind.string);
+}
+
+test "dash element lines are a foreign-syntax error (YAML habit)" {
+    try testing.expectError(error.FigForeignSyntaxDash, parseAbstract(testing.allocator, "- 25565\n", .Fig));
+    try testing.expectError(error.FigForeignSyntaxDash, parseAbstract(testing.allocator, "xs\n>- 1\n", .Fig));
+    try testing.expectError(error.FigForeignSyntaxDash, parseAbstract(testing.allocator, "xs\n> - 1\n", .Fig));
+    try testing.expectError(error.FigForeignSyntaxDash, parseAbstract(testing.allocator, "xs\n> - host = a\n", .Fig));
+}
+
+test "a star glued to its value is a bad separator" {
+    try testing.expectError(error.FigBadMarkerSeparator, parseAbstract(testing.allocator, "xs\n>*1\n", .Fig));
+    try testing.expectError(error.FigBadMarkerSeparator, parseAbstract(testing.allocator, "*1\n", .Fig));
 }
 
 test "multiline strings: raw and dedented" {
@@ -1527,8 +1615,8 @@ test "multiline strings: raw and dedented" {
     try testing.expectEqualStrings("hi\nthere", (try ast.getValByPath(&.{.{ .key = "banner" }})).kind.string);
 }
 
-test "dash element with inline field is a hard error" {
-    try testing.expectError(error.FigDashInlineField, parseAbstract(testing.allocator, "xs\n> - host = a.com\n", .Fig));
+test "element with inline field is a hard error" {
+    try testing.expectError(error.FigElementInlineField, parseAbstract(testing.allocator, "xs\n> * host = a.com\n", .Fig));
 }
 
 test "skipped level errors" {
@@ -1543,7 +1631,7 @@ test "mixed container children errors" {
     try testing.expectError(error.FigMixedContainerChildren, parseAbstract(testing.allocator,
         \\a
         \\> x = 1
-        \\> -
+        \\> *
     , .Fig));
 }
 

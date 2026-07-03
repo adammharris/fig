@@ -72,30 +72,30 @@ links
   > api = https://example.com/v1#stable  # #stable has no leading space -> kept
 
 
-# === Sequences — form A2 (`-` is an anonymous positional key) ===
-# The element `-` glues to the marker run: `>-` (normalized). The spaced `> -`
-# form still parses — both appear below on purpose.
+# === Sequences — form A2 (`*` is an anonymous positional key) ===
+# The element `*` sits in key position after the run: `> *` (normalized), `>*`
+# (glued) — both appear below on purpose. YAML's `-` is a hard error.
 servers
-  >-                            # first element (a map): fields one level deeper
+  > *                           # first element (a map): fields one level deeper
     >> host = a.com
     >> port = 25565
     >> backends                 # nested list field
-      >>> -                     # spaced form still accepted
+      >>> *                     # spaced form (normalized)
         >>>> url = x
         >>>> weight = 1
-      >>>-
+      >>>*
         >>>> url = y
-  >-                            # second element
+  > *                           # second element
     >> host = b.com
 
 ports                           # scalar elements
-  >- 25565
-  >- 25566
-  >- 25567
+  >* 25565
+  >* 25566
+  >* 25567
 
-weights                         # typing composes with `-`
-  >-: int = 1
-  >-: int = 2
+weights                         # typing composes with `*`
+  >*: int = 1
+  >*: int = 2
 
 
 # === Dotted section header — re-anchors baseline (like TOML [a.b.c]) ===
