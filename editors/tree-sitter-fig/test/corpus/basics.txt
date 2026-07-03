@@ -251,3 +251,54 @@ level = info                # trailing comment
         (bare_key)))
     value: (bare_string)
     (comment)))
+
+==================
+balanced-then-trailing bare strings (markdown links, globs)
+==================
+
+workspace_config = [Config](/Meta/Config.md)
+glob = [a-z]*.md
+links = [[Blog](/Blog/Blog.md), [Resume](/Resume.md)]
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bracket_led_bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bracket_led_bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array
+        (flow_bracket_led_bare)
+        (flow_bracket_led_bare)))))
+
+==================
+multi-line (stacked) flow for long lists
+==================
+
+contents = [
+  a,
+  b,
+]
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array
+        (flow_bare)
+        (flow_bare)))))

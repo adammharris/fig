@@ -26,6 +26,10 @@
             "named": true
           },
           {
+            "type": "bracket_led_bare_string",
+            "named": true
+          },
+          {
             "type": "datetime",
             "named": true
           },
@@ -128,6 +132,10 @@
             "named": true
           },
           {
+            "type": "bracket_led_bare_string",
+            "named": true
+          },
+          {
             "type": "datetime",
             "named": true
           },
@@ -213,6 +221,10 @@
           "named": true
         },
         {
+          "type": "comment",
+          "named": true
+        },
+        {
           "type": "datetime",
           "named": true
         },
@@ -222,6 +234,10 @@
         },
         {
           "type": "flow_bare",
+          "named": true
+        },
+        {
+          "type": "flow_bracket_led_bare",
           "named": true
         },
         {
@@ -286,6 +302,10 @@
             "named": true
           },
           {
+            "type": "flow_bracket_led_bare",
+            "named": true
+          },
+          {
             "type": "null",
             "named": true
           },
@@ -303,6 +323,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -459,6 +489,10 @@
     "named": true
   },
   {
+    "type": "bracket_led_bare_string",
+    "named": true
+  },
+  {
     "type": "comment",
     "named": true
   },
@@ -488,6 +522,10 @@
   },
   {
     "type": "flow_bare",
+    "named": true
+  },
+  {
+    "type": "flow_bracket_led_bare",
     "named": true
   },
   {

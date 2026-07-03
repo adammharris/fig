@@ -39,3 +39,7 @@
 (multiline_double) @string
 (bare_string) @string
 (flow_bare) @string
+; balanced-then-trailing bare strings: markdown links, globs, BBCode
+; (`[Blog](/x)`, `[a-z]*.md`, `[b]x[/b]`) — see grammar.js and src/scanner.c.
+(bracket_led_bare_string) @string
+(flow_bracket_led_bare) @string

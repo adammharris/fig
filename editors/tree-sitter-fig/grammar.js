@@ -15,14 +15,26 @@
  *     and the Zig parser ever disagree, the only consequence is a cosmetic
  *     mis-color, never wrong behavior.
  *
- * Known intentional approximations (all cosmetic; fixable later with an external
- * scanner if ever worth it):
+ * Known intentional approximations (all cosmetic):
  *   - a `#` with no leading space inside a bare value (e.g. `url = x#frag`) is
- *     treated as a comment, though fig keeps it in the value.
- *   - a bare string value that STARTS with `[` or `{` (markdown link, glob) is
- *     not recognized (those bytes always open flow here).
+ *     treated as a comment, though fig keeps it in the value. This applies
+ *     equally to the tail of a `bracket_led_bare_string`/`flow_bracket_led_bare`
+ *     (see `src/scanner.c`).
  *   - a trailing comment on a `'''`/`"""` opener line is absorbed into the
  *     string body.
+ *
+ * Balanced-then-trailing bare strings (DESIGN.md "Committed values"): a value
+ * starting with `[`/`{` is normally flow, but when the balanced bracket group
+ * is followed by MORE content on the line — a markdown link `[Blog](/x)`, a
+ * glob `[a-z]*.md`, BBCode `[b]x[/b]` — it was never flow, it's a bare string.
+ * Telling those two shapes apart needs unbounded lookahead (find the matching
+ * close, then check what follows), which isn't expressible as a plain token
+ * regex — so `bracket_led_bare_string` (block RHS) and `flow_bracket_led_bare`
+ * (flow element) are `externals`, resolved by `src/scanner.c` using the same
+ * shape as the Zig parser's `classifyBracketCommit`/`classifyFlowBracket`. The
+ * scanner only ever *declines* (never partially consumes then fails) — when it
+ * declines, the ordinary `[`/`{` token takes over and `flow` parses normally,
+ * so this can't regress plain arrays/objects into runaway bare strings.
  */
 
 module.exports = grammar({
@@ -30,6 +42,11 @@ module.exports = grammar({
 
   // Indentation and inline spacing carry no meaning for highlighting.
   extras: $ => [/[ \t]/],
+
+  externals: $ => [
+    $.bracket_led_bare_string,
+    $.flow_bracket_led_bare,
+  ],
 
   rules: {
     document: $ => repeat($._line),
@@ -104,24 +121,57 @@ module.exports = grammar({
       $.multiline_single,
       $.multiline_double,
       $.flow,
+      $.bracket_led_bare_string,
       $.bare_string,
     ),
 
     // ─── flow mode: [ … ] arrays and { … } objects (fig-inline OR JSON) ───
+    // Interior whitespace MAY include newlines/comments (DESIGN.md "Multi-line
+    // flow for long lists") — the frontmatter surface: `key = [` … one element
+    // per line … `]`. `_flow_gap` is the only place raw newlines are allowed to
+    // be insignificant; everywhere else in this line-oriented grammar a
+    // newline ends the `_line`.
     flow: $ => choice($.flow_array, $.flow_object),
+    // NOTE: `_flow_gap` slots are placed so no two are ever directly adjacent
+    // (always separated by a mandatory `,` or the leading `_fvalue`/`_fpair`) —
+    // two adjacent optional repeats of the same content is ambiguous (however
+    // many ways to split one whitespace/comment run across the two slots). The
+    // "no elements" body is its own branch for the same reason: an empty body
+    // between a leading and a trailing optional gap would itself be two
+    // directly-adjacent gap slots.
     flow_array: $ => seq(
       '[',
-      optional(seq($._fvalue, repeat(seq(',', $._fvalue)), optional(','))),
+      optional(choice(
+        $._flow_gap,
+        seq(
+          optional($._flow_gap),
+          $._fvalue,
+          repeat(seq(optional($._flow_gap), ',', optional($._flow_gap), $._fvalue)),
+          optional(seq(optional($._flow_gap), ',')),
+          optional($._flow_gap),
+        ),
+      )),
       ']',
     ),
     flow_object: $ => seq(
       '{',
-      optional(seq($._fpair, repeat(seq(',', $._fpair)), optional(','))),
+      optional(choice(
+        $._flow_gap,
+        seq(
+          optional($._flow_gap),
+          $._fpair,
+          repeat(seq(optional($._flow_gap), ',', optional($._flow_gap), $._fpair)),
+          optional(seq(optional($._flow_gap), ',')),
+          optional($._flow_gap),
+        ),
+      )),
       '}',
     ),
     _fpair: $ => seq(
       field('key', choice($.bare_key, $.string_single, $.string_double)),
+      optional($._flow_gap),
       choice('=', ':'),
+      optional($._flow_gap),
       field('value', $._fvalue),
     ),
     _fvalue: $ => choice(
@@ -132,8 +182,13 @@ module.exports = grammar({
       $.string_single,
       $.string_double,
       $.flow,
+      $.flow_bracket_led_bare,
       $.flow_bare,
     ),
+
+    // Blank lines and `#`-comments between flow elements once a `[`/`{` has
+    // opened a (possibly stacked) flow region.
+    _flow_gap: $ => repeat1(choice(/[ \t\r\n]+/, $.comment)),
 
     // ─── terminals ───
     // NOTE on precedence: in Tree-sitter, token PRECEDENCE dominates match
@@ -181,6 +236,10 @@ module.exports = grammar({
     flow_bare: _ => token(
       /[^\s,\[\]{}#"'][^,\[\]{}\n#]*[^\s,\[\]{}#]|[^\s,\[\]{}#"']/,
     ),
+
+    // `bracket_led_bare_string` / `flow_bracket_led_bare`: see the file-level
+    // comment and `src/scanner.c`. Declared above in `externals`; both are
+    // plain (childless) leaf tokens, same shape as `bare_string`/`flow_bare`.
 
     // Bare key: identifier-ish; anything needing . : = [ ] or space must be quoted.
     bare_key: _ => token(/[A-Za-z_][A-Za-z0-9_\-]*/),
