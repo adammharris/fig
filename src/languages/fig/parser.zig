@@ -199,8 +199,14 @@ fn renderReport(w: *std.Io.Writer, loc: Location, file: []const u8, label: []con
 /// threading a location through every error site.
 pub const Diagnostic = struct {
     code: Error,
-    /// Byte offset into the source where parsing stopped.
+    /// Byte offset into the source where parsing stopped — the caret anchor.
     offset: usize,
+    /// Byte offset just past the offending token, when the parser knows its
+    /// exact extent (e.g. a `: type` value that failed its annotation). Lets an
+    /// editor squiggle precisely that token instead of the whole rest of the
+    /// line (which would swallow a trailing comment); null means "no known end,
+    /// fall back to end-of-line". Always on `offset`'s line — never spans one.
+    end: ?usize = null,
 
     /// 1-based line/column of `offset`, plus the full offending line.
     pub fn locate(self: Diagnostic, source: []const u8) Parser.Location {
@@ -271,6 +277,14 @@ pub const Warning = struct {
 /// allocated with the allocator passed to `parseWithReport`; the caller owns it.
 pub const Report = struct {
     diag: ?Diagnostic = null,
+    /// Every parse error, in source order — populated ONLY by the recovering
+    /// entry point (`parseCollecting`), which skips past each failure to the
+    /// next line and keeps going, so a language server can squiggle a whole
+    /// file's mistakes at once (and `check` can list them in one pass). The
+    /// single-shot `parse`/`parseWithReport` stop at the first error and leave
+    /// this empty, setting `diag` alone. When non-empty, `diag` mirrors
+    /// `errors[0]`. Allocated with the caller's allocator; the caller owns it.
+    errors: []const Diagnostic = &.{},
     warnings: []const Warning = &.{},
 };
 
@@ -291,6 +305,10 @@ last_append_steps: ?[]const Step = null,
 /// the cursor has already moved past the token that actually offends (set via
 /// `failAt`). `pos` is the right answer everywhere else.
 fail_offset: ?usize = null,
+/// The offending token's end offset, paired with `fail_offset` (set via
+/// `failSpan`) — populates `Diagnostic.end` so an editor can squiggle exactly
+/// that token. Null for the point-only error sites (caret alone).
+fail_end: ?usize = null,
 /// Byte offset of the start of the line currently being processed (set once
 /// per iteration of the main loop in `run`). The fallback span anchor for a
 /// container whose opener carries no more precise position of its own (a
@@ -301,6 +319,16 @@ cur_line_start: usize = 0,
 /// Authoring-time lints collected during the pass (arena-backed; duped out to
 /// the caller by `parseWithReport`). Empty unless a warn site fired.
 warnings: std.ArrayList(Warning) = .empty,
+/// Error-recovery mode: when set, `run` catches each per-line failure into
+/// `diagnostics` and resyncs to the next line instead of returning the first
+/// error. Off by default — `parse`/`parseWithReport` keep their single-shot
+/// contract; `parseCollecting` turns it on. `error.OutOfMemory` is never
+/// recovered (it is not a document defect).
+recover: bool = false,
+/// Recoverable parse errors, in source order (arena-backed; duped out to the
+/// caller's `Report.errors` by `parseImpl`). Populated only in `recover` mode;
+/// empty otherwise.
+diagnostics: std.ArrayList(Diagnostic) = .empty,
 /// `PendingContainer.reentries` resolved to built node ids during AST
 /// assembly (arena-backed; duped out to `Document.reentry_headers`). Empty
 /// unless some header re-opened an existing container.
@@ -462,7 +490,7 @@ pub fn parseAbstract(allocator: Allocator, input: []const u8, format: Type) !AST
 }
 
 pub fn parse(allocator: Allocator, input: []const u8, format: Type) Error!Document {
-    return parseImpl(allocator, input, format, null);
+    return parseImpl(allocator, input, format, null, false);
 }
 
 /// `parse`, but also fills `out`: `diag` on failure (error code + byte offset,
@@ -470,15 +498,25 @@ pub fn parse(allocator: Allocator, input: []const u8, format: Type) Error!Docume
 /// lints, allocated with `allocator` — the caller owns/frees them). The hook
 /// the CLI (and eventually the C ABI) renders reports from.
 pub fn parseWithReport(allocator: Allocator, input: []const u8, format: Type, out: *Report) Error!Document {
-    return parseImpl(allocator, input, format, out);
+    return parseImpl(allocator, input, format, out, false);
 }
 
-fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Report) Error!Document {
+/// `parseWithReport`, but recovers past each error to collect the WHOLE file's
+/// diagnostics in one pass (`out.errors`, source order) rather than stopping at
+/// the first — the entry a language server wants, so every mistake squiggles at
+/// once. On any error the return value is still the first error code and the
+/// tree is NOT built (both consumers discard it); a clean parse returns the
+/// Document exactly as `parseWithReport` would. `out.diag` mirrors `errors[0]`.
+pub fn parseCollecting(allocator: Allocator, input: []const u8, format: Type, out: *Report) Error!Document {
+    return parseImpl(allocator, input, format, out, true);
+}
+
+fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Report, recover: bool) Error!Document {
     _ = format;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
 
-    var self: Parser = .{ .allocator = arena_state.allocator(), .source = input };
+    var self: Parser = .{ .allocator = arena_state.allocator(), .source = input, .recover = recover };
     // Warnings are duped out on every exit path (they are valid alongside a
     // failure too). Best-effort under OOM — the tree, not the lint list, is
     // the load-bearing result. Runs before the arena defer (LIFO), while
@@ -487,9 +525,23 @@ fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Repor
         o.warnings = allocator.dupe(Warning, self.warnings.items) catch &.{};
     };
     self.run() catch |err| {
-        if (out) |o| o.diag = .{ .code = err, .offset = self.fail_offset orelse self.pos };
+        // Non-recover mode (or an unrecoverable OOM in recover mode): the first
+        // error is the whole story — report it and stop.
+        if (out) |o| o.diag = .{ .code = err, .offset = self.fail_offset orelse self.pos, .end = self.fail_end };
         return err;
     };
+
+    // Recover mode collected its errors into `self.diagnostics` instead of
+    // returning them. If any fired, the tree may be malformed, so skip building
+    // it: surface every diagnostic (source order) and return the first code, so
+    // callers that branch on "did it parse?" behave exactly as before.
+    if (self.diagnostics.items.len > 0) {
+        if (out) |o| {
+            o.diag = self.diagnostics.items[0];
+            o.errors = allocator.dupe(Diagnostic, self.diagnostics.items) catch &.{};
+        }
+        return self.diagnostics.items[0].code;
+    }
 
     var b = AST.Builder.init(allocator);
     // `finish` only moves `nodes`/`owned_strings` out; the comment side-table's
@@ -515,6 +567,15 @@ fn failAt(self: *Parser, offset: usize, err: Error) Error {
     return err;
 }
 
+/// Like `failAt`, but also pins the offending token's end (`start..end`) so the
+/// diagnostic carries a tight range — an editor squiggles exactly that token
+/// instead of running to end-of-line and swallowing a trailing comment.
+fn failSpan(self: *Parser, start: usize, end: usize, err: Error) Error {
+    self.fail_offset = start;
+    self.fail_end = end;
+    return err;
+}
+
 /// Record an authoring-time lint anchored at `offset` (see `Warning`).
 fn warn(self: *Parser, code: Warning.Code, offset: usize) Error!void {
     try self.warnings.append(self.allocator, .{ .code = code, .offset = offset });
@@ -526,56 +587,118 @@ fn run(self: *Parser) Error!void {
     while (self.pos < self.source.len) {
         const line_start = self.pos;
         self.cur_line_start = line_start;
-        self.skipSpacesTabs(); // cosmetic indent — never load-bearing (linted below)
-        const indent = self.source[line_start..self.pos];
-        const m = try self.scanMarkers();
-        // A TRULY blank line (nothing at all, not even a comment) is skipped
-        // outright — before the indent lint (trailing whitespace on an empty
-        // line is not a depth signal). This must NOT reuse `atEndOfContent`
-        // (which also treats a leading `#` as "content is over") — a
-        // comment-only line has to fall through to the `#` handling below, or
-        // it would never be consumed and the main loop would spin forever at
-        // the same position.
-        if (!m.star and self.atTrueLineEnd()) {
-            self.skipToNextLine();
-            continue;
-        }
-        // Indent/count lint (DESIGN.md "Depth diagnostics"): meaning lives in
-        // the `>` count alone, but indentation — when present — is the
-        // redundant second signal, and this is the only check that can catch a
-        // deeper-by-one / same-depth miscount. Convention: `2 × depth` spaces,
-        // no tabs. Bare and spaced-marker files (zero indent) stay lint-clean.
-        // Comment lines are linted too: their depth is load-bearing for
-        // attachment.
-        if (indent.len > 0) {
-            const tabbed = std.mem.indexOfScalar(u8, indent, '\t') != null;
-            // Anchored at the first char AFTER the indent (the marker run /
-            // key), not at the line start: a line-start offset sits right past
-            // the previous newline, which `locateOffset` would step back over.
-            if (tabbed or indent.len != 2 * m.depth) try self.warn(.indent_marker_mismatch, line_start + indent.len);
-        }
-        // A `*` element marker already committed this to an element line (even
-        // a bare `*` opener with no value, or one carrying only a trailing
-        // comment), so skip the comment-only shortcut below.
-        if (!m.star) {
-            if (self.peek() == '#') {
-                self.advance();
-                var j = self.pos;
-                while (j < self.source.len and self.source[j] != '\n') j += 1;
-                const text = std.mem.trim(u8, self.source[self.pos..j], " \t\r");
-                try self.pending_leading.append(self.allocator, .{ .comment = .{ .text = text, .style = .line }, .depth = m.depth });
-                self.pos = j;
-                self.skipToNextLine();
-                continue;
-            }
-        }
-        try self.processContentLine(m.depth, m.star);
+        self.processLine(line_start) catch |err| {
+            // In recover mode, a per-line failure is recorded and the scanner
+            // resyncs to the next line so the rest of the file still reports.
+            // OOM is never a document defect — always propagate it. Outside
+            // recover mode nothing changes: the first error stops the parse.
+            if (!self.recover or err == error.OutOfMemory) return err;
+            try self.recordRecoverable(err, line_start);
+        };
     }
+    // Container-close and comment-drain that trail the last line. A failure
+    // here (e.g. an empty container at EOF) recovers the same way, but with no
+    // line left to resync to — recording it is enough, and `parseImpl` will
+    // bail before building the (now-known-malformed) tree.
+    self.finishRun() catch |err| {
+        if (!self.recover or err == error.OutOfMemory) return err;
+        try self.recordRecoverable(err, self.source.len);
+    };
+}
+
+/// One physical line: indent lint, blank/comment shortcuts, then the content
+/// dispatch. Factored out of `run` so the loop can wrap exactly one line in the
+/// recovery catch (the blank/comment "skip this line" paths just `return`).
+fn processLine(self: *Parser, line_start: usize) Error!void {
+    self.skipSpacesTabs(); // cosmetic indent — never load-bearing (linted below)
+    const indent = self.source[line_start..self.pos];
+    const m = try self.scanMarkers();
+    // A TRULY blank line (nothing at all, not even a comment) is skipped
+    // outright — before the indent lint (trailing whitespace on an empty
+    // line is not a depth signal). This must NOT reuse `atEndOfContent`
+    // (which also treats a leading `#` as "content is over") — a
+    // comment-only line has to fall through to the `#` handling below, or
+    // it would never be consumed and the main loop would spin forever at
+    // the same position.
+    if (!m.star and self.atTrueLineEnd()) {
+        self.skipToNextLine();
+        return;
+    }
+    // Indent/count lint (DESIGN.md "Depth diagnostics"): meaning lives in
+    // the `>` count alone, but indentation — when present — is the
+    // redundant second signal, and this is the only check that can catch a
+    // deeper-by-one / same-depth miscount. Convention: `2 × depth` spaces,
+    // no tabs. Bare and spaced-marker files (zero indent) stay lint-clean.
+    // Comment lines are linted too: their depth is load-bearing for
+    // attachment.
+    if (indent.len > 0) {
+        const tabbed = std.mem.indexOfScalar(u8, indent, '\t') != null;
+        // Anchored at the first char AFTER the indent (the marker run /
+        // key), not at the line start: a line-start offset sits right past
+        // the previous newline, which `locateOffset` would step back over.
+        if (tabbed or indent.len != 2 * m.depth) try self.warn(.indent_marker_mismatch, line_start + indent.len);
+    }
+    // A `*` element marker already committed this to an element line (even
+    // a bare `*` opener with no value, or one carrying only a trailing
+    // comment), so skip the comment-only shortcut below.
+    if (!m.star) {
+        if (self.peek() == '#') {
+            self.advance();
+            var j = self.pos;
+            while (j < self.source.len and self.source[j] != '\n') j += 1;
+            const text = std.mem.trim(u8, self.source[self.pos..j], " \t\r");
+            try self.pending_leading.append(self.allocator, .{ .comment = .{ .text = text, .style = .line }, .depth = m.depth });
+            self.pos = j;
+            self.skipToNextLine();
+            return;
+        }
+    }
+    try self.processContentLine(m.depth, m.star);
+}
+
+/// Trailing work after the last line is consumed: close every still-open frame
+/// back to root, and flush any dangling comments to the root.
+fn finishRun(self: *Parser) Error!void {
     try self.closeFramesAbove(0);
     for (self.pending_leading.items) |pc| {
         try self.root_dangling.append(self.allocator, pc.comment);
     }
     self.pending_leading.clearRetainingCapacity();
+}
+
+/// Record a recoverable error at its diagnostic offset, then resync the scanner
+/// past the offending line so the loop keeps making progress.
+fn recordRecoverable(self: *Parser, err: Error, line_start: usize) Error!void {
+    try self.diagnostics.append(self.allocator, .{ .code = err, .offset = self.fail_offset orelse self.pos, .end = self.fail_end });
+    // Consumed — do not leak this failure's anchors into the next line's report.
+    self.fail_offset = null;
+    self.fail_end = null;
+    self.recoverToNextLine(line_start);
+}
+
+/// Resync to the start of the line after the one the failure began on, so the
+/// loop keeps reporting. `line_start` (the current line's true start) anchors
+/// this — NOT the raw cursor, which for a late-detected error (a duplicate key
+/// noticed only after its line's newline was consumed) already sits at the next
+/// line's start; scanning from there would swallow that still-unread line.
+fn recoverToNextLine(self: *Parser, line_start: usize) void {
+    // End (then start-of-next) of the line the failure began on.
+    var eol = line_start;
+    while (eol < self.source.len and self.source[eol] != '\n') eol += 1;
+    const next = if (eol < self.source.len) eol + 1 else eol;
+    if (self.pos <= next) {
+        // A single-line failure — the cursor is still on this line, or resting
+        // exactly at the next line's start (the late-detection case above).
+        // Resume at `next`: the failed line is skipped, the following one kept.
+        self.pos = next;
+    } else {
+        // The failing construct (a `'''` string / `[`…`]` flow) already
+        // consumed past this line — resume after wherever it stopped, so its
+        // body isn't re-scanned as if each physical line were a fresh entry.
+        var at = self.pos;
+        while (at < self.source.len and self.source[at] != '\n') at += 1;
+        self.pos = if (at < self.source.len) at + 1 else at;
+    }
 }
 
 fn processContentLine(self: *Parser, depth: u32, star: bool) Error!void {
@@ -1087,8 +1210,13 @@ fn parseAssignedValue(self: *Parser, type_name: ?[]const u8) Error!TNode {
         if (std.mem.eql(u8, t, "string")) return self.parseUntypedValue(true);
         const res = self.scanBareRestOfLine();
         if (res.text.len == 0) return error.FigInvalidValue;
-        var node = try self.applyKnownType(t, res.text);
-        node.span = self.spanOf(res.text);
+        // `scanBareRestOfLine` has parked `pos` at end-of-line (past any trailing
+        // comment), so a raw `pos` anchor would point the caret INTO the comment.
+        // Pin the diagnostic to the value's own span instead — that is what
+        // failed its annotation, and what an editor should squiggle.
+        const vspan = self.spanOf(res.text);
+        var node = self.applyKnownType(t, res.text) catch |err| return self.failSpan(vspan.start, vspan.end, err);
+        node.span = vspan;
         if (res.comment) |cm| node.trailing = .{ .text = cm };
         return node;
     }
@@ -1104,7 +1232,15 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
         '\'' => return self.parseQuotedOrTriple('\'', force_string_bare),
         '"' => return self.parseQuotedOrTriple('"', force_string_bare),
         '[', '{' => {
-            if (force_string_bare) return error.FigTypeMismatch;
+            if (force_string_bare) {
+                // A `: string` annotation rejects a collection RHS. Scan the
+                // bare value (up to the `#`-after-space comment rule) so the
+                // diagnostic squiggles exactly `[…]`/`{…}`, not the comment.
+                const vstart = self.pos;
+                const res = self.scanBareRestOfLine();
+                const vspan = if (res.text.len > 0) self.spanOf(res.text) else Span.init(vstart, vstart);
+                return self.failSpan(vspan.start, vspan.end, error.FigTypeMismatch);
+            }
             // Commitment is decided by the shape of the WHOLE RHS, not just the
             // first char (DESIGN.md "Committed values"): a balanced `[…]`/`{…}`
             // with trailing content — a markdown link, glob, regex — was never
@@ -1899,6 +2035,77 @@ test "explicit typing" {
 
 test "explicit typing rejects a mismatch" {
     try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "port: int = hello\n", .Fig));
+}
+
+test "type-mismatch diagnostic anchors on the value span, not the trailing comment" {
+    // Both a scalar-annotation failure (via `applyKnownType`, which runs AFTER
+    // the line — incl. its comment — was scanned) and a `: string` rejecting a
+    // collection must point at the VALUE, with a tight end before the `#`.
+    const cases = [_]struct { src: []const u8, value: []const u8 }{
+        .{ .src = "x: float = 1. # note\n", .value = "1." },
+        .{ .src = "y: string = [ 1 + 2 ] # note\n", .value = "[ 1 + 2 ]" },
+    };
+    for (cases) |c| {
+        var report: Report = .{};
+        try testing.expectError(error.FigTypeMismatch, parseWithReport(testing.allocator, c.src, .Fig, &report));
+        defer testing.allocator.free(report.warnings);
+        const d = report.diag.?;
+        // Caret sits at the value start, and the end stops at the value end —
+        // never inside the ` # note` comment.
+        const vstart = std.mem.indexOf(u8, c.src, c.value).?;
+        try testing.expectEqual(vstart, d.offset);
+        try testing.expect(d.end != null);
+        try testing.expectEqual(vstart + c.value.len, d.end.?);
+        try testing.expect(d.end.? < std.mem.indexOfScalar(u8, c.src, '#').?);
+    }
+}
+
+test "parseCollecting recovers past each error and reports them all" {
+    // Five distinct failures on five lines, with a clean line between two of
+    // them — a language server wants every squiggle, not just the first. The
+    // scanner must resync to the next line after each and keep going.
+    const src =
+        \\good = 1
+        \\bad1: int = hello
+        \\key: value
+        \\fine = ok
+        \\dup = 1
+        \\dup = 2
+        \\> orphan = 3
+    ;
+    var report: Report = .{};
+    try testing.expectError(error.FigTypeMismatch, parseCollecting(testing.allocator, src, .Fig, &report));
+    defer testing.allocator.free(report.errors);
+    defer testing.allocator.free(report.warnings);
+    // FigTypeMismatch (l2), FigForeignSyntaxColon (l3), FigDuplicateKey (l6),
+    // FigRootMarker (l7) — the clean lines 1/4/5 do not add entries.
+    try testing.expectEqual(@as(usize, 4), report.errors.len);
+    try testing.expectEqual(Error.FigTypeMismatch, report.errors[0].code);
+    try testing.expectEqual(Error.FigForeignSyntaxColon, report.errors[1].code);
+    try testing.expectEqual(Error.FigDuplicateKey, report.errors[2].code);
+    try testing.expectEqual(Error.FigRootMarker, report.errors[3].code);
+    // `diag` mirrors the first error for single-error consumers.
+    try testing.expectEqual(Error.FigTypeMismatch, report.errors[0].code);
+    try testing.expect(report.diag != null);
+    try testing.expectEqual(Error.FigTypeMismatch, report.diag.?.code);
+    // Source order: each diagnostic sits on a later line than the last.
+    var prev: usize = 0;
+    for (report.errors) |d| {
+        const loc = d.locate(src);
+        try testing.expect(loc.line > prev);
+        prev = loc.line;
+    }
+}
+
+test "parseCollecting on a clean file returns the tree with no errors" {
+    var report: Report = .{};
+    const doc = try parseCollecting(testing.allocator, "a = 1\nb = two\n", .Fig, &report);
+    defer doc.deinit(testing.allocator);
+    defer testing.allocator.free(report.errors);
+    defer testing.allocator.free(report.warnings);
+    try testing.expectEqual(@as(usize, 0), report.errors.len);
+    try testing.expect(report.diag == null);
+    try testing.expectEqualStrings("1", (try doc.ast.getValByPath(&.{.{ .key = "a" }})).kind.number.raw);
 }
 
 test "committed values error rather than falling back to string" {

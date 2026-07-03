@@ -207,14 +207,23 @@ const Server = struct {
         try writeJsonString(b, uri);
         try b.writeAll(",\"diagnostics\":[");
         var first = true;
-        if (report.diag) |d| {
-            try writeDiagnostic(b, text, d.offset, 1, @errorName(d.code), Parser.describe(d.code));
+        // `parseCollecting` fills `errors` with every failure (source order);
+        // publish each as its own Error squiggle. `diag` is the fallback for a
+        // non-recovering report (mirrors `errors[0]` when both are present).
+        if (report.errors.len > 0) {
+            for (report.errors) |d| {
+                if (!first) try b.writeAll(",");
+                first = false;
+                try writeDiagnostic(b, text, d.offset, d.end, 1, @errorName(d.code), Parser.describe(d.code));
+            }
+        } else if (report.diag) |d| {
+            try writeDiagnostic(b, text, d.offset, d.end, 1, @errorName(d.code), Parser.describe(d.code));
             first = false;
         }
         for (report.warnings) |wn| {
             if (!first) try b.writeAll(",");
             first = false;
-            try writeDiagnostic(b, text, wn.offset, 2, @tagName(wn.code), Parser.Warning.describeWarning(wn.code));
+            try writeDiagnostic(b, text, wn.offset, null, 2, @tagName(wn.code), Parser.Warning.describeWarning(wn.code));
         }
         try b.writeAll("]}}");
         try self.send(buf.written());
@@ -244,7 +253,9 @@ const Server = struct {
 /// warning list — lands in the caller's per-message arena `a`.
 fn diagnose(a: std.mem.Allocator, text: []const u8) Parser.Report {
     var report: Parser.Report = .{};
-    _ = Parser.parseWithReport(a, text, fig.Language.FIG.default_type, &report) catch {};
+    // Recover past each error so the server squiggles the WHOLE file at once,
+    // not just the first mistake (`report.errors`, source order).
+    _ = Parser.parseCollecting(a, text, fig.Language.FIG.default_type, &report) catch {};
     return report;
 }
 
@@ -286,15 +297,19 @@ fn positionAt(source: []const u8, at: usize) Position {
     return .{ .line = line, .character = utf16Len(source[line_start..at]) };
 }
 
-/// A range covering the offending token: from the failure offset to end-of-line.
+/// A range covering the offending token. When the diagnostic carries an exact
+/// end (`end_off`, e.g. a `: type` value's span) the squiggle stops there — so
+/// a trailing comment stays un-squiggled; otherwise it runs to end-of-line.
 /// Mirrors `Diagnostic.locate`'s "resting past a newline means the previous
 /// line" backtrack so the squiggle lands on the line the author sees.
-fn errorRange(source: []const u8, offset: usize) Range {
+fn errorRange(source: []const u8, offset: usize, end_off: ?usize) Range {
     var at = @min(offset, source.len);
     if (at > 0 and source[at - 1] == '\n') at -= 1;
     const line_end = std.mem.indexOfScalarPos(u8, source, at, '\n') orelse source.len;
+    // Clamp a known token-end to this line and never before the caret.
+    const stop = if (end_off) |e| @max(at, @min(e, line_end)) else line_end;
     var start = positionAt(source, at);
-    const end = positionAt(source, line_end);
+    const end = positionAt(source, stop);
     // Guarantee a non-empty range so every client renders something.
     if (start.line == end.line and start.character == end.character) {
         if (start.character > 0) start.character -= 1;
@@ -306,9 +321,9 @@ fn errorRange(source: []const u8, offset: usize) Range {
 
 /// One LSP Diagnostic object: range (via `errorRange`), severity (1 Error /
 /// 2 Warning), code, and the parser's teaching message.
-fn writeDiagnostic(w: *Io.Writer, source: []const u8, offset: usize, severity: u8, code: []const u8, message: []const u8) !void {
+fn writeDiagnostic(w: *Io.Writer, source: []const u8, offset: usize, end_off: ?usize, severity: u8, code: []const u8, message: []const u8) !void {
     try w.writeAll("{\"range\":");
-    try writeRange(w, errorRange(source, offset));
+    try writeRange(w, errorRange(source, offset, end_off));
     try w.print(",\"severity\":{d},\"source\":\"fig\",\"code\":", .{severity});
     try writeJsonString(w, code);
     try w.writeAll(",\"message\":");
