@@ -1,0 +1,15 @@
+[package]
+name = "zed-fig"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Zed compiles this crate to wasm when the extension is installed. If Zed rejects
+# the extension with an API-version error, bump this to match your Zed version's
+# expected zed_extension_api (see the extension docs).
+zed_extension_api = "0.1.0"

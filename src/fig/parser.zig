@@ -13,8 +13,12 @@
 //! parsers build directly into.
 //!
 //! Scope cuts (documented, not silent):
-//!   * Authoring-time WARN diagnostics (indent/marker-count disagreement,
-//!     coercion warnings) are not implemented — only DESIGN.md's hard errors.
+//!   * Of DESIGN.md's WARN diagnostics, the comment-depth-mismatch lint is not
+//!     implemented (needs offsets threaded through `PendingComment`), and the
+//!     inline-`#`-truncation warn is deliberately skipped (indistinguishable
+//!     from an ordinary trailing comment). The rest — the coercion warns, the
+//!     indent/marker-count lint, flow-like strings, missing flow commas — are
+//!     collected into `Report.warnings` (see `Warning`).
 //!   * Comment attachment honors a comment line's own marker depth when
 //!     containers close: a comment at (or below) a closing container's child
 //!     depth becomes its dangling run; a shallower one stays pending and binds
@@ -130,6 +134,55 @@ pub fn describe(code: Error) []const u8 {
     };
 }
 
+/// 1-based line/column plus the full offending line — shared by `Diagnostic`
+/// (errors) and `Warning` (lints) so both render the same report shape.
+pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
+
+/// Locate `offset` in `source`. A cursor resting exactly past a newline means
+/// the problem was detected while finishing the previous line (duplicate key,
+/// unclosed flow at EOF, …) — report end-of-that-line, not column 1 of an
+/// empty next one.
+pub fn locateOffset(source: []const u8, offset: usize) Location {
+    var at = @min(offset, source.len);
+    if (at > 0 and source[at - 1] == '\n') at -= 1;
+    var line: usize = 1;
+    var line_start: usize = 0;
+    for (source[0..at], 0..) |c, i| {
+        if (c == '\n') {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+    const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
+    return .{ .line = line, .column = at - line_start + 1, .line_text = source[line_start..line_end] };
+}
+
+/// The compiler-style report both severities share: `file:line:col: <label>:
+/// <message>`, then the offending source line and a caret marking the column.
+/// Caller owns the returned bytes.
+fn renderReportAlloc(allocator: Allocator, source: []const u8, offset: usize, file: []const u8, label: []const u8, message: []const u8) Allocator.Error![]u8 {
+    const loc = locateOffset(source, offset);
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    renderReport(&aw.writer, loc, file, label, message) catch return error.OutOfMemory;
+    return aw.toOwnedSlice();
+}
+
+fn renderReport(w: *std.Io.Writer, loc: Location, file: []const u8, label: []const u8, message: []const u8) std.Io.Writer.Error!void {
+    try w.print("{s}:{d}:{d}: {s}: {s}\n", .{ file, loc.line, loc.column, label, message });
+    // The offending line, capped so a pathological line can't flood the
+    // terminal. The caret line mirrors tabs so it stays aligned under them.
+    const max_shown = 160;
+    const shown = loc.line_text[0..@min(loc.line_text.len, max_shown)];
+    if (shown.len == 0) return; // EOF/blank line: nothing to point into
+    try w.print("    {s}{s}\n", .{ shown, if (shown.len < loc.line_text.len) "…" else "" });
+    if (loc.column - 1 <= shown.len) {
+        try w.writeAll("    ");
+        for (shown[0 .. loc.column - 1]) |c| try w.writeByte(if (c == '\t') '\t' else ' ');
+        try w.writeAll("^\n");
+    }
+}
+
 /// A parse failure plus the byte position where the parser stopped. The parser
 /// is single-pass, so when an error is returned its cursor sits on (or just
 /// after) the offending token — precise enough for `file:line:col` without
@@ -139,52 +192,76 @@ pub const Diagnostic = struct {
     /// Byte offset into the source where parsing stopped.
     offset: usize,
 
-    pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
-
     /// 1-based line/column of `offset`, plus the full offending line.
-    pub fn locate(self: Diagnostic, source: []const u8) Location {
-        var at = @min(self.offset, source.len);
-        // A cursor resting exactly past a newline means the error was detected
-        // while finishing the previous line (duplicate key, unclosed flow at
-        // EOF, …) — report end-of-that-line, not column 1 of an empty next one.
-        if (at > 0 and source[at - 1] == '\n') at -= 1;
-        var line: usize = 1;
-        var line_start: usize = 0;
-        for (source[0..at], 0..) |c, i| {
-            if (c == '\n') {
-                line += 1;
-                line_start = i + 1;
-            }
-        }
-        const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
-        return .{ .line = line, .column = at - line_start + 1, .line_text = source[line_start..line_end] };
+    pub fn locate(self: Diagnostic, source: []const u8) Parser.Location {
+        return locateOffset(source, self.offset);
     }
 
-    /// Render the compiler-style report: `file:line:col: error: <message>`,
-    /// then the offending source line and a caret marking the column. Caller
-    /// owns the returned bytes.
+    /// Render `file:line:col: error: <message>` + source line + caret.
     pub fn renderAlloc(self: Diagnostic, allocator: Allocator, source: []const u8, file: []const u8) Allocator.Error![]u8 {
-        const loc = self.locate(source);
-        var aw = std.Io.Writer.Allocating.init(allocator);
-        defer aw.deinit();
-        render(self, &aw.writer, loc, file) catch return error.OutOfMemory;
-        return aw.toOwnedSlice();
+        return renderReportAlloc(allocator, source, self.offset, file, "error", describe(self.code));
+    }
+};
+
+/// An authoring-time lint (DESIGN.md "Authoring-time diagnostics", warn
+/// severity): the tree is well-defined, but the line is a likely mistake.
+/// Collected during the parse and returned via `Report` — the caller decides
+/// presentation (`--quiet` silences, `--strict` promotes to failure).
+pub const Warning = struct {
+    code: Code,
+    /// Byte offset of the surprising token (see `locateOffset`).
+    offset: usize,
+
+    pub const Code = enum {
+        /// A bare token spelling a bool/null from another config language
+        /// (`Yes`, `ON`, `TRUE`, `Null`) fell to a plain string — the Norway
+        /// class, surfaced instead of silently coerced either way.
+        string_looks_like_literal,
+        /// A digit-only token with a leading zero (`007`) kept its padding as
+        /// a string (the TOML leading-zero rule).
+        string_leading_zero,
+        /// A bare date/time with no `T`+zone (`2026-07-01`) sniffed to a
+        /// datetime value; a full RFC-3339 timestamp never warns.
+        ambiguous_datetime,
+        /// A balanced, well-formed `[…]`/`{…}` separated from trailing content
+        /// by whitespace (`[80, 443] x`) fell to a bare string. Glued shapes
+        /// (`[Blog](/x)`, `[a-z]*.md`) are the intended bare strings and never
+        /// warn.
+        flow_like_string,
+        /// A bare flow value contains ` = ` (`{x = 1 y = 2}` → `x = "1 y =
+        /// 2"`) — almost always a missing comma between pairs.
+        flow_missing_comma,
+        /// A line's visual indentation disagrees with its `>` marker count
+        /// (convention: 2 spaces per level, no tabs). Meaning follows the
+        /// count; the indent is the redundant cross-check that just failed.
+        indent_marker_mismatch,
+    };
+
+    /// The teaching message — same name-the-fix contract as `describe`.
+    pub fn describeWarning(code: Code) []const u8 {
+        return switch (code) {
+            .string_looks_like_literal => "this spells a boolean/null in other config languages, but fig literals are lowercase-only, so it stays the string it spells; quote it to make the string explicit, or lowercase it for the literal",
+            .string_leading_zero => "a leading zero is not a number in fig, so the padding was kept as a string; quote it to make that explicit, or drop the zero for a number",
+            .ambiguous_datetime => "a bare date/time becomes a datetime value, not text; quote it if you meant a string",
+            .flow_like_string => "this looks like a `[…]`/`{…}` flow value with trailing content, so the whole line was read as one bare string; remove the trailing content for a collection, or quote the value to affirm the string",
+            .flow_missing_comma => "a bare flow value containing ` = ` usually means a missing comma between pairs; add the comma, or quote the value if it really is text",
+            .indent_marker_mismatch => "indentation disagrees with the `>` marker count (convention: 2 spaces per level); meaning follows the count — fix whichever signal is wrong",
+        };
     }
 
-    fn render(self: Diagnostic, w: *std.Io.Writer, loc: Location, file: []const u8) std.Io.Writer.Error!void {
-        try w.print("{s}:{d}:{d}: error: {s}\n", .{ file, loc.line, loc.column, describe(self.code) });
-        // The offending line, capped so a pathological line can't flood the
-        // terminal. The caret line mirrors tabs so it stays aligned under them.
-        const max_shown = 160;
-        const shown = loc.line_text[0..@min(loc.line_text.len, max_shown)];
-        if (shown.len == 0) return; // EOF/blank line: nothing to point into
-        try w.print("    {s}{s}\n", .{ shown, if (shown.len < loc.line_text.len) "…" else "" });
-        if (loc.column - 1 <= shown.len) {
-            try w.writeAll("    ");
-            for (shown[0 .. loc.column - 1]) |c| try w.writeByte(if (c == '\t') '\t' else ' ');
-            try w.writeAll("^\n");
-        }
+    /// Render `file:line:col: warning: <message>` + source line + caret.
+    pub fn renderAlloc(self: Warning, allocator: Allocator, source: []const u8, file: []const u8) Allocator.Error![]u8 {
+        return renderReportAlloc(allocator, source, self.offset, file, "warning", describeWarning(self.code));
     }
+};
+
+/// Everything a parse reports besides the tree: the failure diagnostic (set
+/// only on error) and the authoring-time warnings (valid on success AND on
+/// failure — warns collected before the error still stand). `warnings` is
+/// allocated with the allocator passed to `parseWithReport`; the caller owns it.
+pub const Report = struct {
+    diag: ?Diagnostic = null,
+    warnings: []const Warning = &.{},
 };
 
 /// Arena for the whole intermediate tree — freed in one shot after the final
@@ -204,6 +281,9 @@ last_append_steps: ?[]const Step = null,
 /// the cursor has already moved past the token that actually offends (set via
 /// `failAt`). `pos` is the right answer everywhere else.
 fail_offset: ?usize = null,
+/// Authoring-time lints collected during the pass (arena-backed; duped out to
+/// the caller by `parseWithReport`). Empty unless a warn site fired.
+warnings: std.ArrayList(Warning) = .empty,
 
 // ── Intermediate tree types ─────────────────────────────────────────────────
 
@@ -334,21 +414,32 @@ pub fn parseAbstract(allocator: Allocator, input: []const u8, format: Type) !AST
 }
 
 pub fn parse(allocator: Allocator, input: []const u8, format: Type) Error!Document {
-    var diag: ?Diagnostic = null;
-    return parseWithDiagnostic(allocator, input, format, &diag);
+    return parseImpl(allocator, input, format, null);
 }
 
-/// `parse`, but on failure also fills `out_diag` with the error code and the
-/// byte offset where parsing stopped — the hook the CLI (and eventually the C
-/// ABI) uses to render `file:line:col` teaching messages. Untouched on success.
-pub fn parseWithDiagnostic(allocator: Allocator, input: []const u8, format: Type, out_diag: *?Diagnostic) Error!Document {
+/// `parse`, but also fills `out`: `diag` on failure (error code + byte offset,
+/// for `file:line:col` teaching messages), `warnings` always (authoring-time
+/// lints, allocated with `allocator` — the caller owns/frees them). The hook
+/// the CLI (and eventually the C ABI) renders reports from.
+pub fn parseWithReport(allocator: Allocator, input: []const u8, format: Type, out: *Report) Error!Document {
+    return parseImpl(allocator, input, format, out);
+}
+
+fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Report) Error!Document {
     _ = format;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
 
     var self: Parser = .{ .allocator = arena_state.allocator(), .source = input };
+    // Warnings are duped out on every exit path (they are valid alongside a
+    // failure too). Best-effort under OOM — the tree, not the lint list, is
+    // the load-bearing result. Runs before the arena defer (LIFO), while
+    // `self.warnings` is still alive.
+    defer if (out) |o| {
+        o.warnings = allocator.dupe(Warning, self.warnings.items) catch &.{};
+    };
     self.run() catch |err| {
-        out_diag.* = .{ .code = err, .offset = self.fail_offset orelse self.pos };
+        if (out) |o| o.diag = .{ .code = err, .offset = self.fail_offset orelse self.pos };
         return err;
     };
 
@@ -376,25 +467,48 @@ fn failAt(self: *Parser, offset: usize, err: Error) Error {
     return err;
 }
 
+/// Record an authoring-time lint anchored at `offset` (see `Warning`).
+fn warn(self: *Parser, code: Warning.Code, offset: usize) Error!void {
+    try self.warnings.append(self.allocator, .{ .code = code, .offset = offset });
+}
+
 // ── Main line loop ──────────────────────────────────────────────────────────
 
 fn run(self: *Parser) Error!void {
     while (self.pos < self.source.len) {
-        self.skipSpacesTabs(); // cosmetic indent — never load-bearing
+        const line_start = self.pos;
+        self.skipSpacesTabs(); // cosmetic indent — never load-bearing (linted below)
+        const indent = self.source[line_start..self.pos];
         const m = try self.scanMarkers();
+        // A TRULY blank line (nothing at all, not even a comment) is skipped
+        // outright — before the indent lint (trailing whitespace on an empty
+        // line is not a depth signal). This must NOT reuse `atEndOfContent`
+        // (which also treats a leading `#` as "content is over") — a
+        // comment-only line has to fall through to the `#` handling below, or
+        // it would never be consumed and the main loop would spin forever at
+        // the same position.
+        if (!m.star and self.atTrueLineEnd()) {
+            self.skipToNextLine();
+            continue;
+        }
+        // Indent/count lint (DESIGN.md "Depth diagnostics"): meaning lives in
+        // the `>` count alone, but indentation — when present — is the
+        // redundant second signal, and this is the only check that can catch a
+        // deeper-by-one / same-depth miscount. Convention: `2 × depth` spaces,
+        // no tabs. Bare and spaced-marker files (zero indent) stay lint-clean.
+        // Comment lines are linted too: their depth is load-bearing for
+        // attachment.
+        if (indent.len > 0) {
+            const tabbed = std.mem.indexOfScalar(u8, indent, '\t') != null;
+            // Anchored at the first char AFTER the indent (the marker run /
+            // key), not at the line start: a line-start offset sits right past
+            // the previous newline, which `locateOffset` would step back over.
+            if (tabbed or indent.len != 2 * m.depth) try self.warn(.indent_marker_mismatch, line_start + indent.len);
+        }
         // A `*` element marker already committed this to an element line (even
         // a bare `*` opener with no value, or one carrying only a trailing
-        // comment), so skip the blank/comment-only shortcuts below.
+        // comment), so skip the comment-only shortcut below.
         if (!m.star) {
-            // A TRULY blank line (nothing at all, not even a comment) is skipped
-            // outright. This must NOT reuse `atEndOfContent` (which also treats a
-            // leading `#` as "content is over") — a comment-only line has to fall
-            // through to the `#` handling below, or it would never be consumed
-            // and the main loop would spin forever at the same position.
-            if (self.atTrueLineEnd()) {
-                self.skipToNextLine();
-                continue;
-            }
             if (self.peek() == '#') {
                 self.advance();
                 var j = self.pos;
@@ -931,6 +1045,8 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             // with trailing content — a markdown link, glob, regex — was never
             // flow, so it is a bare string, left unquoted.
             if (tok.classifyBracketCommit(self.source, self.pos) == .bare_trailing) {
+                const vstart = self.pos;
+                if (try self.flowLikePrefix(vstart)) try self.warn(.flow_like_string, vstart);
                 const res = self.scanBareRestOfLine();
                 if (res.text.len == 0) return error.FigInvalidValue;
                 // Opened with a delimiter → sniffing is off; it is a string.
@@ -960,12 +1076,13 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             return node;
         },
         else => {
+            const vstart = self.pos;
             const res = self.scanBareRestOfLine();
             if (res.text.len == 0) return error.FigInvalidValue;
             var node: TNode = if (force_string_bare)
                 .{ .value = .{ .string = res.text } }
             else
-                self.sniffToNode(res.text);
+                try self.sniffToNodeWarned(res.text, vstart);
             if (res.comment) |cm| node.trailing = .{ .text = cm };
             return node;
         },
@@ -1004,6 +1121,80 @@ fn sniffToNode(self: *Parser, text: []const u8) TNode {
         .datetime => |d| .{ .value = .{ .extended = .{ .kind = d.kind, .text = d.raw } } },
         .string => .{ .value = .{ .string = text } },
     };
+}
+
+/// `sniffToNode` plus the coercion warns (DESIGN.md "Coercion diagnostics") —
+/// the sniffing cost surfaced rather than removed. `offset` anchors the warn
+/// at the value's first byte. Both bare-value positions (block RHS, flow
+/// element) route through here; explicitly typed values never do (the
+/// annotation is the author saying "I know").
+fn sniffToNodeWarned(self: *Parser, text: []const u8, offset: usize) Error!TNode {
+    const node = self.sniffToNode(text);
+    switch (node.value) {
+        .string => {
+            if (looksLikeLiteral(text)) {
+                try self.warn(.string_looks_like_literal, offset);
+            } else if (looksLikeLeadingZero(text)) {
+                try self.warn(.string_leading_zero, offset);
+            }
+        },
+        // Quietly, and only when ambiguous: a bare date or clock time reads
+        // as prose to some authors. A `T`-carrying timestamp is unambiguous
+        // (nobody types `T` mid-sentence) and stays silent — warn-fatigue is
+        // the failure mode this rule is calibrated against.
+        .extended => |e| switch (e.kind) {
+            .local_date, .local_time => try self.warn(.ambiguous_datetime, offset),
+            else => {},
+        },
+        else => {},
+    }
+    return node;
+}
+
+/// Case-variant bool/null spellings from other config languages (`Yes`, `ON`,
+/// `TRUE`, `Null`) — never literals in fig (the Norway fix), but surprising
+/// enough as silent strings to earn a warn. Exact lowercase `true`/`false`/
+/// `null` never reach here (they sniff to literals first).
+fn looksLikeLiteral(text: []const u8) bool {
+    const words = [_][]const u8{ "yes", "no", "on", "off", "true", "false", "null" };
+    for (words) |w| {
+        if (std.ascii.eqlIgnoreCase(text, w)) return true;
+    }
+    return false;
+}
+
+/// Does a `bare_trailing` value at `start` *look* like it wanted to be flow?
+/// True iff the balanced bracket prefix (a) detaches from the trailing content
+/// by whitespace and (b) is itself well-formed flow — `[80, 443] x`, not
+/// `[Blog](/x)` / `[a-z]*.md` / `[b]x[/b]` (glued: the intended bare-string
+/// shapes, DESIGN.md's warn-fatigue guard) and not `[80,, 443] x` (prefix
+/// malformed: never parsed as flow in the first place). Well-formedness is
+/// decided by a speculative sub-parse of the prefix alone; its containers land
+/// in the shared arena and its warnings are discarded with the sub-parser.
+fn flowLikePrefix(self: *Parser, start: usize) Error!bool {
+    const close = tok.bracketCloseIndex(self.source, start) orelse return false;
+    if (close + 1 >= self.source.len) return false;
+    const sep = self.source[close + 1];
+    if (sep != ' ' and sep != '\t') return false; // glued trailing → intended string
+    const prefix = self.source[start .. close + 1];
+    var sub: Parser = .{ .allocator = self.allocator, .source = prefix };
+    _ = sub.parseFlowValue() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return false,
+    };
+    return sub.pos == prefix.len;
+}
+
+/// `007`-style: digit-only (after an optional sign) with a leading zero — a
+/// number lookalike the TOML leading-zero rule keeps as a string.
+fn looksLikeLeadingZero(text: []const u8) bool {
+    var s = text;
+    if (s.len > 0 and (s[0] == '+' or s[0] == '-')) s = s[1..];
+    if (s.len < 2 or s[0] != '0' or !std.ascii.isDigit(s[1])) return false;
+    for (s[1..]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
 }
 
 /// Explicit typing (`key: type = value`): the annotation is checked and
@@ -1266,6 +1457,8 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
         // the flow twin of the block layer's balanced-then-trailing rule. This
         // is what lets `[Blog](/Blog.md)` sit unquoted in a flow list.
         if (tok.classifyFlowBracket(self.source, self.pos) == .bare_trailing) {
+            const vstart = self.pos;
+            if (try self.flowLikePrefix(vstart)) try self.warn(.flow_like_string, vstart);
             const text = self.scanFlowBareBracket();
             if (text.len == 0) return error.FigInvalidValue;
             // Opened with a delimiter → sniffing is off; it is a string.
@@ -1283,11 +1476,17 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
         self.pos = r.end;
         return .{ .value = .{ .string = r.text } };
     }
+    const vstart = self.pos;
     const text = self.scanFlowBareValue();
     if (text.len == 0) return error.FigInvalidValue;
+    // The missing-comma smell: a bare flow value swallowing a ` = ` almost
+    // always means `{x = 1 y = 2}` — the pair separator of a *next* pair read
+    // as value text. The scariest silent behavior bare flow values allow, so
+    // it warns (quote the value to affirm genuine ` = ` text).
+    if (std.mem.indexOf(u8, text, " = ")) |i| try self.warn(.flow_missing_comma, vstart + i + 1);
     // `Infinity`/`NaN` are NOT recognized here (JSON5 is dropped): they sniff to
     // plain strings, exactly as bare `inf`/`nan` do in the block layer.
-    return self.sniffToNode(text);
+    return try self.sniffToNodeWarned(text, vstart);
 }
 
 /// A bare flow value runs to the next `,`/`]`/`}`/newline — spaces included, so
@@ -1854,13 +2053,14 @@ test "full kitchen-sink file parses" {
 }
 
 test "diagnostic captures the failing position" {
-    // Line 3 (`level: info`) is the YAML-habit error; the cursor stops after
-    // the would-be type name, still on line 3.
+    // Line 3 (`level: info`) is the YAML-habit error; the caret pins to the
+    // `:` (failAt), not where the cursor stopped after the would-be type name.
     const src = "logging\n> format = json\n> level: info\n";
-    var diag: ?Diagnostic = null;
-    const result = parseWithDiagnostic(testing.allocator, src, .Fig, &diag);
+    var report: Report = .{};
+    defer testing.allocator.free(report.warnings);
+    const result = parseWithReport(testing.allocator, src, .Fig, &report);
     try testing.expectError(error.FigForeignSyntaxColon, result);
-    const d = diag.?;
+    const d = report.diag.?;
     try testing.expectEqual(@as(Error!void, error.FigForeignSyntaxColon), @as(Error!void, d.code));
     const loc = d.locate(src);
     try testing.expectEqual(@as(usize, 3), loc.line);
@@ -1869,9 +2069,10 @@ test "diagnostic captures the failing position" {
 
 test "diagnostic renders file:line:col, the source line, and a caret" {
     const src = "key: value\n";
-    var diag: ?Diagnostic = null;
-    _ = parseWithDiagnostic(testing.allocator, src, .Fig, &diag) catch {};
-    const rendered = try diag.?.renderAlloc(testing.allocator, src, "app.fig");
+    var report: Report = .{};
+    defer testing.allocator.free(report.warnings);
+    _ = parseWithReport(testing.allocator, src, .Fig, &report) catch {};
+    const rendered = try report.diag.?.renderAlloc(testing.allocator, src, "app.fig");
     defer testing.allocator.free(rendered);
     try testing.expect(std.mem.startsWith(u8, rendered, "app.fig:1:"));
     try testing.expect(std.mem.indexOf(u8, rendered, "error: `:` introduces a type, not a value") != null);
@@ -1879,9 +2080,79 @@ test "diagnostic renders file:line:col, the source line, and a caret" {
     try testing.expect(std.mem.indexOf(u8, rendered, "^\n") != null);
 }
 
-test "diagnostic is untouched on success" {
-    var diag: ?Diagnostic = null;
-    var parsed = try parseWithDiagnostic(testing.allocator, "a = 1\n", .Fig, &diag);
+test "report is empty on a clean parse" {
+    var report: Report = .{};
+    defer testing.allocator.free(report.warnings);
+    var parsed = try parseWithReport(testing.allocator, "a = 1\n", .Fig, &report);
     defer parsed.deinit(testing.allocator);
-    try testing.expect(diag == null);
+    try testing.expect(report.diag == null);
+    try testing.expectEqual(@as(usize, 0), report.warnings.len);
+}
+
+/// Parse `input`, expecting success, and return the warning codes in order
+/// (testing-allocator-backed; caller frees).
+fn collectWarnCodes(input: []const u8) ![]Warning.Code {
+    var report: Report = .{};
+    defer testing.allocator.free(report.warnings);
+    var parsed = try parseWithReport(testing.allocator, input, .Fig, &report);
+    defer parsed.deinit(testing.allocator);
+    const codes = try testing.allocator.alloc(Warning.Code, report.warnings.len);
+    for (report.warnings, 0..) |w, i| codes[i] = w.code;
+    return codes;
+}
+
+fn expectWarnCodes(input: []const u8, expected: []const Warning.Code) !void {
+    const codes = try collectWarnCodes(input);
+    defer testing.allocator.free(codes);
+    try testing.expectEqualSlices(Warning.Code, expected, codes);
+}
+
+test "coercion warns: literal lookalikes and leading zeros" {
+    try expectWarnCodes("norway = Yes\n", &.{.string_looks_like_literal});
+    try expectWarnCodes("switch = ON\n", &.{.string_looks_like_literal});
+    try expectWarnCodes("shout = TRUE\n", &.{.string_looks_like_literal});
+    try expectWarnCodes("nothing = Null\n", &.{.string_looks_like_literal});
+    try expectWarnCodes("zip = 007\n", &.{.string_leading_zero});
+    // The real literals, prose, quotes, and annotations never warn.
+    try expectWarnCodes("ok = true\nn = null\nx = 0\nhex = 0xFF\n", &.{});
+    try expectWarnCodes("movie = 12 monkeys\ntitle = Yes Prime Minister\n", &.{});
+    try expectWarnCodes("flag = \"true\"\n", &.{});
+    try expectWarnCodes("norway: string = Yes\n", &.{});
+}
+
+test "coercion warns: ambiguous datetime only" {
+    try expectWarnCodes("day = 2026-07-01\n", &.{.ambiguous_datetime});
+    // A full timestamp is unambiguous; prose containing a time never sniffs.
+    try expectWarnCodes("when = 2026-07-01T12:00:00Z\n", &.{});
+    try expectWarnCodes("note = call mom at 3:30\n", &.{});
+}
+
+test "flow-like string warns; markdown links and globs stay silent" {
+    try expectWarnCodes("oops = [80, 443] x\n", &.{.flow_like_string});
+    try expectWarnCodes("link = [Blog](/Blog.md)\n", &.{});
+    try expectWarnCodes("glob = [a-z]*.md\n", &.{});
+    try expectWarnCodes("bb = [b]x[/b]\n", &.{});
+    // A malformed prefix never parsed as flow, so it doesn't warn either.
+    try expectWarnCodes("odd = [80,, 443] x\n", &.{});
+    // Flow-element position gets the same treatment.
+    try expectWarnCodes("xs = [[80, 443] x, y]\n", &.{.flow_like_string});
+    try expectWarnCodes("links = [[Blog](/Blog.md), [Resume](/Resume.md)]\n", &.{});
+}
+
+test "missing-comma flow object warns" {
+    try expectWarnCodes("p = { x = 1 y = 2 }\n", &.{.flow_missing_comma});
+    try expectWarnCodes("p = { x = 1, y = 2 }\n", &.{});
+}
+
+test "indent/count lint" {
+    // Correct 2×depth indentation and unindented spaced markers: clean.
+    try expectWarnCodes("a\n  > b = 1\n", &.{});
+    try expectWarnCodes("a\n> b\n> > c = 1\n", &.{});
+    // Wrong width, indented root line, tab indent: each warns.
+    try expectWarnCodes("a\n > b = 1\n", &.{.indent_marker_mismatch});
+    try expectWarnCodes("  a = 1\n", &.{.indent_marker_mismatch});
+    try expectWarnCodes("a\n\t> b = 1\n", &.{.indent_marker_mismatch});
+    // Comment lines participate (their depth is load-bearing for attachment).
+    try expectWarnCodes("a\n  # note\n> b = 1\n", &.{.indent_marker_mismatch});
+    try expectWarnCodes("a\n  > # note\n  > b = 1\n", &.{});
 }

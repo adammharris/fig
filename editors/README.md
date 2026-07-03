@@ -20,8 +20,9 @@ is a **cosmetic mis-color**, never wrong behavior. That is what lets the grammar
 be approximate (and therefore cheap to maintain). Known intentional
 approximations are listed at the top of `tree-sitter-fig/grammar.js`.
 
-For real diagnostics / formatting / hover, the future path is an **LSP server**
-that wraps the Zig parser — a separate track from highlighting.
+For real diagnostics / formatting / hover, there is an **LSP server** that wraps
+the Zig parser — a separate track from highlighting. It is implemented and wired
+into the Zed extension (see "The language server" below).
 
 ## Working on the grammar
 
@@ -63,3 +64,70 @@ Zed builds grammars from git — there is no "live local grammar" mode — so:
 Iterating on the grammar afterward = re-commit, bump `rev`, re-run
 `zed: install dev extension`. The `highlights.scm` query under
 `zed-fig/languages/fig/` can be tweaked without rebuilding the grammar.
+
+## The language server
+
+`fig-lsp` (built from `src/lsp/main.zig`) speaks LSP over stdio. Right now it
+does one thing: re-parse on every open/change and publish the fig parser's
+teaching diagnostics (`src/fig/parser.zig` → `Diagnostic`/`describe`) as editor
+squiggles. It is a thin shell — the Zig parser stays the source of truth.
+
+Build it (part of a normal build):
+
+```sh
+zig build            # produces zig-out/bin/fig-lsp
+zig build run-lsp    # run it standalone on stdio (for manual testing)
+```
+
+The Zed extension launches it via the Rust shim in `zed-fig/src/lib.rs`
+(`language_server_command`), which finds `fig-lsp` on your `PATH`
+(`worktree.which`) and otherwise falls back to `zig-out/bin/fig-lsp`. To use the
+`PATH` route, symlink it once:
+
+```sh
+ln -sf "$PWD/zig-out/bin/fig-lsp" ~/.local/bin/fig-lsp   # or anywhere on PATH
+```
+
+The `[language_servers.fig-lsp]` table is already in `zed-fig/extension.toml`.
+When you `zed: install dev extension`, Zed compiles `zed-fig/src/lib.rs` to wasm
+(needs Rust + the wasm target; Zed adds it) and starts `fig-lsp` for `.fig`
+files. Open a file with a mistake — e.g. `host: localhost` (should be `=`) — and
+you should see the teaching diagnostic inline.
+
+Manual smoke test without Zed (drives the server over stdio):
+
+```sh
+python3 - <<'PY'
+import subprocess, json
+p = subprocess.Popen(["zig-out/bin/fig-lsp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+def send(m):
+    d = json.dumps(m).encode()
+    p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(d) + d); p.stdin.flush()
+def read():
+    h = {}
+    while (l := p.stdout.readline().rstrip(b"\r\n")):
+        k, _, v = l.partition(b":"); h[k.strip().lower()] = v.strip()
+    return json.loads(p.stdout.read(int(h[b"content-length"])))
+send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}); read()
+send({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":
+    {"uri":"file:///t.fig","languageId":"fig","version":1,"text":"a\n  > host: localhost\n"}}})
+print(json.dumps(read(), indent=2))   # expect one FigForeignSyntaxColon diagnostic
+PY
+```
+
+### Scope / next steps
+
+Implemented: `initialize`, `didOpen`/`didChange`/`didClose`, `shutdown`/`exit`,
+full-document sync, and diagnostics with UTF-16 ranges from the parser's
+`Report` — the hard parse error (severity 1) **and** the authoring-time warnings
+(severity 2: Norway-class strings, leading zeros, ambiguous datetimes,
+indent/marker mismatch), published together (warnings collected before a failure
+still show). Deliberately not yet done, in rough priority order:
+
+- **Formatting** (`textDocument/formatting`) → call the fig printer
+  (`src/fig/printer.zig`) and return a whole-document edit; this is the natural
+  next feature and reuses existing code.
+- **Multiple diagnostics** — the parser stops at the first error today; surfacing
+  more needs parser support for error recovery.
+- **Hover / completion** — would need the AST + span table (`Document.span`),
+  which the parser already produces.

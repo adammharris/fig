@@ -98,6 +98,27 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
+    // fig-lsp: a Language Server (LSP over stdio) that wraps the fig parser to
+    // publish its teaching diagnostics to editors. Thin shell over `mod`.
+    const lsp_exe = b.addExecutable(.{
+        .name = "fig-lsp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lsp/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .imports = &.{
+                .{ .name = "fig", .module = mod },
+            },
+        }),
+    });
+    lsp_exe.root_module.addImport("build_options", options_mod);
+    b.installArtifact(lsp_exe);
+
+    const lsp_run = b.addRunArtifact(lsp_exe);
+    const lsp_run_step = b.step("run-lsp", "Run the fig language server (LSP over stdio)");
+    lsp_run_step.dependOn(&lsp_run.step);
+
     const c_lib = b.addLibrary(.{
         .linkage = .static,
         .name = "fig",

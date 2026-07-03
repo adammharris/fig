@@ -132,12 +132,21 @@ pub const BracketCommit = enum {
 /// single-line). Quoted spans are skipped so brackets inside strings don't count
 /// toward matching (`['[Blog](x)']` closes at its final `]`, not the inner one).
 pub fn classifyBracketCommit(source: []const u8, start: usize) BracketCommit {
+    const close = bracketCloseIndex(source, start) orelse return .unclosed;
+    return if (restIsCommentOnly(source, close + 1)) .flow else .bare_trailing;
+}
+
+/// Index of the matching close bracket for the `[`/`{` at `start`, scanning at
+/// most to the first newline and skipping quoted spans — the balanced-prefix
+/// span the block-layer commit rule (and its coercion warn) reasons about.
+/// Null when the bracket doesn't close on the line.
+pub fn bracketCloseIndex(source: []const u8, start: usize) ?usize {
     std.debug.assert(source[start] == '[' or source[start] == '{');
     var depth: usize = 0;
     var i = start;
     while (i < source.len and source[i] != '\n') {
         switch (source[i]) {
-            '\'', '"' => i = skipQuotedSpan(source, i) orelse return .unclosed,
+            '\'', '"' => i = skipQuotedSpan(source, i) orelse return null,
             '[', '{' => {
                 depth += 1;
                 i += 1;
@@ -145,13 +154,12 @@ pub fn classifyBracketCommit(source: []const u8, start: usize) BracketCommit {
             ']', '}' => {
                 depth -= 1;
                 i += 1;
-                if (depth == 0)
-                    return if (restIsCommentOnly(source, i)) .flow else .bare_trailing;
+                if (depth == 0) return i - 1;
             },
             else => i += 1,
         }
     }
-    return .unclosed;
+    return null;
 }
 
 /// Skip a single-line quoted span starting at the opening quote `source[start]`.
