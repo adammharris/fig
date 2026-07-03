@@ -15,11 +15,17 @@ const Delimiter = struct {
     match: enum { whole_line, prefix },
 };
 
+/// The format an archetype's content is written in — `---`/`;;;` fences imply
+/// YAML/JSON by convention; the fenced ```fig``` block implies fig. Named (not
+/// an inline anon enum) so callers outside this file can name it too — see
+/// `innerFormat`.
+pub const InnerFormat = enum { yaml, json, fig };
+
 const Archetype = struct {
     open: Delimiter,
     close: Delimiter,
     location: enum { start, end, middle },
-    inner: enum { yaml, json },
+    inner: InnerFormat,
 };
 
 fn archetypeOf(t: Type) Archetype {
@@ -42,6 +48,12 @@ fn archetypeOf(t: Type) Archetype {
             .location = .end,
             .inner = .yaml,
         },
+        .FrontmatterFig => .{
+            .open = .{ .tokens = &.{"```fig"}, .match = .whole_line },
+            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
+            .location = .start,
+            .inner = .fig,
+        },
     };
 }
 
@@ -56,6 +68,12 @@ pub const Type = enum {
     FrontmatterJson,
     /// For Stephen Deken. YAML in an ending codeblock.
     EndmatterYaml,
+    /// A "fig" fenced code block … a bare "```" close, at the top of a
+    /// markdown file — a fenced code block rather than a bare `---`/`;;;`
+    /// delimiter, so it renders as a labeled code block (with fig syntax
+    /// highlighting) on any markdown viewer instead of looking like a
+    /// broken/empty rule.
+    FrontmatterFig,
 };
 
 /// A located region, in *outer-source* byte coordinates. The fence spans are
@@ -151,6 +169,14 @@ pub fn bodyIsBefore(t: Type) bool {
     return archetypeOf(t).location == .end;
 }
 
+/// The format `t`'s content is written in. Lets a caller resolve the parser/
+/// printer to use for an embed's content — e.g. a `get`-style command that
+/// picked an archetype via `--embed` and needs to know what format that
+/// implies, rather than trusting a possibly-unrelated file-extension guess.
+pub fn innerFormat(t: Type) InnerFormat {
+    return archetypeOf(t).inner;
+}
+
 /// Built host for a source that has no region of type `t` — the create half of
 /// "open or create".
 pub const Initialized = struct { host: []u8, region: Region };
@@ -163,6 +189,14 @@ pub const Initialized = struct { host: []u8, region: Region };
 /// empty object for JSON) so a subsequent insert/set lands the first key. No
 /// blank line is inserted between fence and body, so the output matches the
 /// hand-rolled `---\n…\n---\n{body}` shape. The returned `host` is caller-owned.
+///
+/// Fails with `error.FigCannotSeedEmptyDocument` for a fig-inner archetype
+/// (`FrontmatterFig`): unlike YAML/JSON, fig has no syntax for an empty
+/// document — a fig mapping must have at least one entry, full stop
+/// (`error.FigEmptyContainer` in the parser, everywhere, not just here) — so
+/// there is no seed this function could write that is both empty and valid.
+/// A fig-inner block can't be conjured from nothing; it must already contain
+/// its first key before further edits can target it.
 pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialized {
     const a = archetypeOf(t);
     const open_tok = a.open.tokens[0];
@@ -174,6 +208,7 @@ pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialize
     const seed: []const u8 = switch (a.inner) {
         .yaml => "",
         .json => "{}\n",
+        .fig => return error.FigCannotSeedEmptyDocument,
     };
 
     var host: std.ArrayList(u8) = .empty;
@@ -231,6 +266,10 @@ pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Typ
         .json => if (comptime build_options.lang_json) blk: {
             var parser = Language.JSON.Parser{ .allocator = allocator };
             break :blk Language.JSON.parse(&parser, slice, Language.JSON.default_type);
+        } else error.FormatDisabled,
+        .fig => if (comptime build_options.lang_fig) blk: {
+            var parser = Language.FIG.Parser{ .allocator = allocator };
+            break :blk Language.FIG.parse(&parser, slice, Language.FIG.default_type);
         } else error.FormatDisabled,
     };
 }
@@ -468,6 +507,74 @@ test "extract: YAML frontmatter comments survive into the parsed AST" {
     const kv = ast.nodes[ast.nodes[ast.root].kind.mapping.?].kind.keyvalue;
     try testing.expectEqualStrings("the title", ast.comments(kv.key).leading[0].text);
     try testing.expectEqualStrings("inline", ast.comments(kv.value).trailing.?.text);
+}
+
+test "extract: fig frontmatter (```fig fenced block) locates and parses" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src =
+        \\```fig
+        \\# the title
+        \\title = hi # inline
+        \\tags = [a, b]
+        \\```
+        \\# body
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .FrontmatterFig);
+    defer embedded.deinit(testing.allocator);
+    // Fences excluded from content; body is everything after the close fence.
+    try testing.expectEqualStrings("```fig\n", src[embedded.region.open_fence.start..embedded.region.open_fence.end]);
+    try testing.expectEqualStrings("```\n", src[embedded.region.close_fence.start..embedded.region.close_fence.end]);
+    try testing.expectEqualStrings("# body\n", src[embedded.region.body.start..embedded.region.body.end]);
+
+    const ast = embedded.document.ast;
+    try testing.expect(ast.node_comments.len > 0);
+    const kv = ast.nodes[ast.nodes[ast.root].kind.mapping.?].kind.keyvalue;
+    try testing.expectEqualStrings("the title", ast.comments(kv.key).leading[0].text);
+    try testing.expectEqualStrings("inline", ast.comments(kv.value).trailing.?.text);
+    try testing.expectEqualSlices(u8, "hi", (try embedded.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "extract: a generic ```something fence is not mistaken for ```fig" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    // The open token match is whole-line-exact (`.whole_line`), not a prefix
+    // match, so a same-family fenced code block with a different/longer info
+    // string (an ordinary markdown code fence, not this archetype) must not
+    // be located as fig frontmatter.
+    const src =
+        \\```figure
+        \\not fig frontmatter
+        \\```
+        \\
+    ;
+    try testing.expectError(Error.NotFound, locateRegion(src, .FrontmatterFig));
+}
+
+test "innerFormat reports each archetype's content format" {
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.FrontmatterYaml));
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.EndmatterYaml));
+    try testing.expectEqual(InnerFormat.json, innerFormat(.FrontmatterJson));
+    try testing.expectEqual(InnerFormat.fig, innerFormat(.FrontmatterFig));
+}
+
+test "initRegion: a fig-inner archetype cannot seed an empty document" {
+    // Unlike YAML/JSON, fig has no syntax for an empty document (a fig mapping
+    // must have at least one entry), so a brand-new ```fig``` block can't be
+    // conjured from nothing — it must already contain its first key.
+    try testing.expectError(error.FigCannotSeedEmptyDocument, initRegion(testing.allocator, "body text\n", .FrontmatterFig));
+}
+
+test "extract: fig frontmatter with no host body" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src =
+        \\```fig
+        \\title = hi
+        \\```
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .FrontmatterFig);
+    defer embedded.deinit(testing.allocator);
+    try testing.expectEqualStrings("", src[embedded.region.body.start..embedded.region.body.end]);
 }
 
 test "extractStream: two explicit documents in a stream (JHB9)" {

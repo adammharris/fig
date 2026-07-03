@@ -288,9 +288,12 @@ const Help = struct {
             \\    only dropped ones removed; result order matches the arguments).
             \\  --embed <archetype>: target an embedded region of a host file —
             \\    `frontmatter` (---/YAML, the .md default), `frontmatter-json`
-            \\    (;;;/JSON), or `endmatter` (trailing ```endmatter block). When the
-            \\    host has no such block, it is CREATED (frontmatter at the top,
-            \\    endmatter at the bottom) and seeded with <path>: <value>.
+            \\    (;;;/JSON), `frontmatter-fig` (```fig fenced block), or
+            \\    `endmatter` (trailing ```endmatter block). When the host has no
+            \\    such block, it is CREATED (frontmatter at the top, endmatter at
+            \\    the bottom) and seeded with <path>: <value> — except
+            \\    `frontmatter-fig`, which cannot be created from nothing (fig has
+            \\    no empty-document syntax) and must already exist in the file.
             \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON
             \\    is quoted as a string, as with `edit`). A created key is rendered
             \\    in the target syntax too, so new keys work for strict JSON.
@@ -396,7 +399,8 @@ const Help = struct {
             \\    in a flow value, indent/marker-count disagreement, ...).
             \\  --strict: treat any warning as an error (exit non-zero).
             \\  --embed <archetype>: read an embedded region of a host file —
-            \\    `frontmatter` (the .md default), `frontmatter-json`, or `endmatter`.
+            \\    `frontmatter` (the .md default), `frontmatter-json`,
+            \\    `frontmatter-fig`, or `endmatter`.
             \\  --body: print the host prose OUTSIDE the fences (the body span) instead
             \\    of the embed content; the whole file when there is no such region.
             \\  path format: dot syntax for keys, bracket syntax for indices
@@ -1313,6 +1317,10 @@ fn getCommentFromEmbed(
             try getComment(fig.Language.JSON, allocator, inner, path, inline_comment, .JSON)
         else
             return error.FormatDisabled,
+        .FrontmatterFig => if (comptime build_options.lang_fig)
+            try getComment(fig.Language.FIG, allocator, inner, path, inline_comment, fig.Language.FIG.default_type)
+        else
+            return error.FormatDisabled,
     };
 }
 
@@ -1366,6 +1374,10 @@ fn applyToEmbed(
             const j = try jsonifyEdit(allocator, op, text);
             break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, j.text, j.op, .JSON);
         } else return error.FormatDisabled,
+        .FrontmatterFig => if (comptime build_options.lang_fig)
+            try applyEdit(fig.Language.FIG, allocator, inner, path, text, op, fig.Language.FIG.default_type)
+        else
+            return error.FormatDisabled,
     };
 
     var out: std.ArrayList(u8) = .empty;
@@ -1576,9 +1588,25 @@ fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
     if (std.mem.eql(u8, name, "frontmatter") or std.mem.eql(u8, name, "frontmatter-yaml"))
         return .FrontmatterYaml;
     if (std.mem.eql(u8, name, "frontmatter-json")) return .FrontmatterJson;
+    if (std.mem.eql(u8, name, "frontmatter-fig")) return .FrontmatterFig;
     if (std.mem.eql(u8, name, "endmatter") or std.mem.eql(u8, name, "endmatter-yaml"))
         return .EndmatterYaml;
     return null;
+}
+
+/// The CLI `Format` an embed archetype's content is written in — the `get`
+/// action's `--input`/`--output` twin of `Embed.innerFormat`. Lets an explicit
+/// `--embed <archetype>` pick the right parser/printer on its own, without
+/// also requiring a redundant `--input`/`--output` (or, worse, silently
+/// keeping a same-named-extension guess that doesn't match the archetype —
+/// e.g. `--embed frontmatter-fig` on a `.md` file, whose extension alone
+/// defaults to YAML).
+fn embedFormat(t: fig.Embed.Type) Format {
+    return switch (fig.Embed.innerFormat(t)) {
+        .yaml => .yaml,
+        .json => .json,
+        .fig => .fig,
+    };
 }
 
 const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
@@ -1992,13 +2020,19 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             detectLanguageFromFileEnding(file_path)
         else
             null;
-        // No `--input` and an unrecognized extension ⇒ sniff the contents in the
-        // handler. `.json` here is a placeholder `from`/`to`, overwritten once the
-        // real format is known.
-        const needs_detect = !requested_help and input_override == null and detected_input == null;
-        const input_format = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
         // An explicit `--embed` archetype wins over the extension-inferred one.
         const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+        // No `--input` and an unrecognized extension ⇒ sniff the contents in the
+        // handler. `.json` here is a placeholder `from`/`to`, overwritten once the
+        // real format is known. An explicit `--embed` is never sniffed: its
+        // archetype fixes the inner format outright (`embedFormat`), and that
+        // wins over a same-named extension guess — e.g. `--embed frontmatter-fig`
+        // on a `.md` file (whose extension alone would default to YAML) must
+        // read/render the embed as fig, not YAML.
+        const needs_detect = !requested_help and input_override == null and embed_override == null and detected_input == null;
+        const input_format = input_override orelse
+            (if (embed_override) |et| embedFormat(et) else null) orelse
+            (if (detected_input) |d| d.format else null) orelse .json;
 
         var gron_projection: gron.Projection = .gron;
         if (gron_root) |r| gron_projection.root_name = r;
@@ -2243,6 +2277,7 @@ test "embedTypeFromName maps archetype names" {
     try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter"));
     try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter-yaml"));
     try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterJson), embedTypeFromName("frontmatter-json"));
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), embedTypeFromName("frontmatter-fig"));
     try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), embedTypeFromName("endmatter"));
     try t.expectEqual(@as(?fig.Embed.Type, null), embedTypeFromName("bogus"));
 }
@@ -2273,6 +2308,11 @@ test "parseConfig routes set, --seq, and --embed" {
     var em = TestArgs{ .items = &.{ "fig", "set", "--embed", "endmatter", "post.md", "k", "v" } };
     const emc = try parseConfig(a, &em);
     try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), emc.options.set.embed);
+
+    // --embed frontmatter-fig routes to the fig-fenced archetype.
+    var fm = TestArgs{ .items = &.{ "fig", "set", "--embed", "frontmatter-fig", "post.md", "k", "v" } };
+    const fmc = try parseConfig(a, &fm);
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), fmc.options.set.embed);
 }
 
 test "resolveSpec maps YAML version strings" {

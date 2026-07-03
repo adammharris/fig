@@ -1251,6 +1251,10 @@ pub const FigEmbedType = enum(c_int) {
     frontmatter_yaml = 0,
     frontmatter_json = 1,
     endmatter_yaml = 2,
+    /// Locate/extract-only (`fig_embed_extract`): fig is not yet an editable
+    /// language in this C ABI (see `embedInnerSupported`), so `fig_embed_open`
+    /// and `fig_embed_open_or_init` report `unsupported_format` for it.
+    frontmatter_fig = 3,
 };
 
 fn embedTypeOf(t: c_int) ?Embed.Type {
@@ -1258,6 +1262,7 @@ fn embedTypeOf(t: c_int) ?Embed.Type {
         @intFromEnum(FigEmbedType.frontmatter_yaml) => .FrontmatterYaml,
         @intFromEnum(FigEmbedType.frontmatter_json) => .FrontmatterJson,
         @intFromEnum(FigEmbedType.endmatter_yaml) => .EndmatterYaml,
+        @intFromEnum(FigEmbedType.frontmatter_fig) => .FrontmatterFig,
         else => null,
     };
 }
@@ -1340,28 +1345,26 @@ fn embedFrom(em: ?*FigEmbed) ?*EmbedHandle {
     return @ptrCast(@alignCast(p));
 }
 
-/// The inner editor language an embed archetype carries (`---` ⇒ YAML, `;;;` ⇒
-/// JSON), mirroring `Embed`'s archetype table.
-fn embedInner(t: Embed.Type) enum { yaml, json } {
-    return switch (t) {
-        .FrontmatterYaml, .EndmatterYaml => .yaml,
-        .FrontmatterJson => .json,
-    };
-}
-
 /// Whether this build can edit `t`'s inner format (YAML frontmatter needs YAML,
-/// JSON frontmatter needs JSON). Gated formats are compiled out.
+/// JSON frontmatter needs JSON). Gated formats are compiled out. Fig is always
+/// unsupported here regardless of build options: `EditorUnion` (below) has no
+/// fig variant, so there is no combined editor to hand back — `fig_embed_open`/
+/// `fig_embed_open_or_init` report `unsupported_format`, while `fig_embed_extract`
+/// (locate-only, no editor) still works.
 fn embedInnerSupported(t: Embed.Type) bool {
-    return switch (embedInner(t)) {
+    return switch (Embed.innerFormat(t)) {
         .yaml => build_options.lang_yaml,
         .json => build_options.lang_json,
+        .fig => false,
     };
 }
 
 /// Build an `EmbedHandle` over an already-owned `host` with a known `region`,
 /// initializing the inner editor over the region's content. Takes ownership of
 /// `host` (frees it on any failure). Shared by `fig_embed_open` and
-/// `fig_embed_open_or_init`; the caller has already validated the format.
+/// `fig_embed_open_or_init`; the caller has already validated the format —
+/// specifically, both callers check `embedInnerSupported(t)` first, so `t`
+/// never carries `.fig` here (`embedInnerSupported` always rejects it).
 fn embedHandleFromHost(
     allocator: std.mem.Allocator,
     host: []u8,
@@ -1378,9 +1381,10 @@ fn embedHandleFromHost(
         .host = host,
         .region = region,
         .body_before = Embed.bodyIsBefore(t),
-        .editor = switch (embedInner(t)) {
+        .editor = switch (Embed.innerFormat(t)) {
             .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
             .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
+            .fig => unreachable,
         },
     };
     const content = host[region.content.start..region.content.end];
@@ -2993,6 +2997,26 @@ test "embed c abi locates region with content and body spans" {
     try std.testing.expectEqualStrings("k: v\n", md[region.content.start..region.content.end]);
     // The body is the suffix after the close fence.
     try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
+}
+
+test "embed c abi locates a ```fig fenced frontmatter block (extract-only)" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const md = "```fig\nk = v\n```\nbody\n";
+    var region: FigRegion = .{ .size = @sizeOf(FigRegion), .open_fence = undefined, .content = undefined, .close_fence = undefined, .body = undefined };
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &region));
+    try std.testing.expectEqualStrings("k = v\n", md[region.content.start..region.content.end]);
+    try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
+}
+
+test "embed c abi fig_embed_open reports unsupported_format for frontmatter_fig" {
+    // Locate-only (`fig_embed_extract`, above) works for fig, but the combined
+    // editor doesn't yet: fig isn't in `EditorUnion`, so `fig_embed_open`/
+    // `fig_embed_open_or_init` must fail cleanly rather than construct a
+    // handle with no real editor behind it.
+    const md = "```fig\nk = v\n```\nbody\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.unsupported_format, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &out_fm));
+    try std.testing.expectEqual(@as(?*FigEmbed, null), out_fm);
 }
 
 test "embed c abi region size-gate leaves uncovered fields untouched" {
