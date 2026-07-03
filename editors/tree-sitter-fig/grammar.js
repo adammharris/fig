@@ -43,6 +43,12 @@ module.exports = grammar({
   // Indentation and inline spacing carry no meaning for highlighting.
   extras: $ => [/[ \t]/],
 
+  // Keyword-extraction token: lets the literal type keywords (`int`, `string`,
+  // …) win cleanly over the `bare_key` identifier when a `: type` annotation
+  // is split by category (see `assignment`) — without it, `: int` is ambiguous
+  // between the numeric-annotation branch and the open-type-set `bare_key`.
+  word: $ => $.bare_key,
+
   externals: $ => [
     $.bracket_led_bare_string,
     $.flow_bracket_led_bare,
@@ -69,14 +75,13 @@ module.exports = grammar({
     // ─── sequence element line: `> *`, `>* 25565`, `>*: int = 1` ───
     element: $ => seq(
       $.star,
-      optional($._elem_tail),
+      optional(choice(
+        $._typed_body,              // `: type = v` / `= v` (annotation-aware)
+        field('value', $._value),   // bare scalar element, no `=`
+      )),
       optional($.comment),
     ),
     star: _ => '*',
-    _elem_tail: $ => choice(
-      seq(optional($.type_annotation), '=', field('value', $._value)),
-      field('value', $._value),
-    ),
 
     // `+` continuation line (re-runs the last `[]` append header).
     continuation: _ => '+',
@@ -86,9 +91,7 @@ module.exports = grammar({
 
     assignment: $ => seq(
       field('key', $.keypath),
-      optional($.type_annotation),
-      '=',
-      field('value', $._value),
+      $._typed_body,
       optional($.comment),
     ),
 
@@ -97,12 +100,34 @@ module.exports = grammar({
       optional($.comment),
     ),
 
+    // ─── typed value tail (shared by assignment + element) ───
+    // The `: type` annotation is a LEXICALLY EXPLICIT signal (not literal-else-
+    // string sniffing), so honoring it in the value grammar is still purely
+    // lexical: `: string` makes the RHS a verbatim string even when it looks
+    // like flow (`x: string = [ 1 + 2 ]` is ONE string, not a sequence), and
+    // `: int` / `: float` colour a leading-zero (`09`) or trailing-dot (`1.`)
+    // token as a number — where BARE, those correctly stay strings. Other and
+    // untyped values keep the normal value grammar. Mirrors the Zig parser's
+    // coercion; a disagreement is only a cosmetic mis-colour (see file header).
+    _typed_body: $ => choice(
+      seq(alias($._string_ann, $.type_annotation), '=', field('value', $._string_rhs)),
+      seq(alias($._number_ann, $.type_annotation), '=', field('value', $._number_rhs)),
+      seq(optional($.type_annotation), '=', field('value', $._value)),
+    ),
+
+    // The plain/other + untyped path. `int`/`float`/`string` are intentionally
+    // NOT in `type` — they route to the dedicated branches above (which is why
+    // `word` keyword-extraction is needed: `: int` must select the numeric
+    // branch, never a `bare_key` custom type). All three annotation forms alias
+    // to a `type_annotation` node wrapping a `type` node, so the highlight query
+    // (`(type) @type`) and the tree shape are the same across branches.
     type_annotation: $ => seq(':', $.type),
     type: $ => choice(
-      'int', 'float', 'bool', 'string', 'enum',
-      'datetime', 'date', 'time',
+      'bool', 'enum', 'datetime', 'date', 'time',
       $.bare_key, // open type set
     ),
+    _string_ann: $ => seq(':', alias('string', $.type)),
+    _number_ann: $ => seq(':', alias(choice('int', 'float'), $.type)),
 
     // ─── key paths: dotted segments, each optionally indexed ───
     keypath: $ => seq($._keyseg, repeat(seq('.', $._keyseg))),
@@ -122,6 +147,27 @@ module.exports = grammar({
       $.multiline_double,
       $.flow,
       $.bracket_led_bare_string,
+      $.bare_string,
+    ),
+
+    // A `: string` RHS is a verbatim string (the Zig parser's total sink): a
+    // quoted/multiline form, or a bracket-inclusive bare run to end-of-line.
+    _string_rhs: $ => choice(
+      $.string_single,
+      $.string_double,
+      $.multiline_single,
+      $.multiline_double,
+      $.string_sink,
+    ),
+    // A `: int`/`: float` RHS: a real number, a coerced lookalike (`09`, `1.`,
+    // `inf`), a quoted string (`: int = "09"` stays a string), else a bare
+    // string fallback (`: int = hello`, which the Zig parser rejects — a
+    // cosmetic mis-colour, never a wrong tree).
+    _number_rhs: $ => choice(
+      $.number,
+      $.coerced_number,
+      $.string_single,
+      $.string_double,
       $.bare_string,
     ),
 
@@ -216,6 +262,12 @@ module.exports = grammar({
       /(0|[1-9][0-9]*)/,
     )),
 
+    // `: int`/`: float` coercion lookalike that `number` rejects: a leading-zero
+    // int (`09`), a trailing-dot float (`1.`), or `inf`/`nan`. Reachable ONLY in
+    // a numeric-typed value slot (`_number_rhs`); coloured @number. Bare, these
+    // stay strings — the leading-zero/trailing-dot rules are value-side.
+    coerced_number: _ => token(/[+-]?(inf|nan|[0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?/),
+
     integer: _ => token(/[0-9]+/), // only used inside `[i]` index addressing
 
     string_single: _ => token(/'[^'\n]*'/),           // raw, single-line
@@ -231,6 +283,13 @@ module.exports = grammar({
     bare_string: _ => token(
       /[^\s#\[\]{}"':=][^\n#]*[^\s#]|[^\s#\[\]{}"':=]/,
     ),
+
+    // `: string` sink value: verbatim to end-of-line (or ` #`), with the opener
+    // bytes (`[ { " ' : =`) allowed as the FIRST char — so `x: string =
+    // [ 1 + 2 ]` captures the whole `[ 1 + 2 ]` as one string instead of flow.
+    // Only reachable in `_string_rhs`; the quoted forms precede it in that
+    // choice (and in definition order), so `: string = "x"` still wins a quote.
+    string_sink: _ => token(/[^\s#][^\n#]*[^\s#]|[^\s#]/),
 
     // Bare flow value: runs to the next , ] } (spaces kept, trimmed).
     flow_bare: _ => token(

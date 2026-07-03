@@ -144,6 +144,53 @@ digit-leading keys are one bare_key, not a number
     value: (bare_string)))
 
 ==================
+type annotation directs value coloring (string sink, number coercion)
+==================
+
+string_errors: string = [ 1 + 2 ]
+sequence = [ 1 + 2 ]
+leading_zero_error: int = 09
+leading_zero_string = 09
+sig: float = 1.
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (string_sink))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array
+        (flow_bare))))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (coerced_number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (coerced_number)))
+
+==================
 elements, index, headers
 ==================
 

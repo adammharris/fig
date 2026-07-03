@@ -30,6 +30,10 @@
             "named": true
           },
           {
+            "type": "coerced_number",
+            "named": true
+          },
+          {
             "type": "datetime",
             "named": true
           },
@@ -59,6 +63,10 @@
           },
           {
             "type": "string_single",
+            "named": true
+          },
+          {
+            "type": "string_sink",
             "named": true
           }
         ]
@@ -136,6 +144,10 @@
             "named": true
           },
           {
+            "type": "coerced_number",
+            "named": true
+          },
+          {
             "type": "datetime",
             "named": true
           },
@@ -165,6 +177,10 @@
           },
           {
             "type": "string_single",
+            "named": true
+          },
+          {
+            "type": "string_sink",
             "named": true
           }
         ]
@@ -493,6 +509,10 @@
     "named": true
   },
   {
+    "type": "coerced_number",
+    "named": true
+  },
+  {
     "type": "comment",
     "named": true
   },
@@ -517,20 +537,12 @@
     "named": false
   },
   {
-    "type": "float",
-    "named": false
-  },
-  {
     "type": "flow_bare",
     "named": true
   },
   {
     "type": "flow_bracket_led_bare",
     "named": true
-  },
-  {
-    "type": "int",
-    "named": false
   },
   {
     "type": "integer",
@@ -561,15 +573,15 @@
     "named": true
   },
   {
-    "type": "string",
-    "named": false
-  },
-  {
     "type": "string_double",
     "named": true
   },
   {
     "type": "string_single",
+    "named": true
+  },
+  {
+    "type": "string_sink",
     "named": true
   },
   {
