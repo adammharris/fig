@@ -144,6 +144,44 @@ pub fn describe(code: Error) []const u8 {
     };
 }
 
+/// A short (few-word) noun phrase for `code` — distinct from `describe`'s full
+/// teaching sentence. Meant to sit next to a caret (`^ duplicate key`), the
+/// way rustc annotates a span, so a report scanned at a glance still names the
+/// problem even with the longer message above it collapsed/scrolled past.
+pub fn shortLabel(code: Error) []const u8 {
+    return switch (code) {
+        error.FigForeignSyntaxColon => "not a value assignment",
+        error.FigFlowBareKeyColon => "bare key needs `=`",
+        error.FigForeignSyntaxDash => "not a fig element marker",
+        error.FigForeignSyntaxBracket => "not a fig header",
+        error.FigElementInlineField => "field on element line",
+        error.FigRootMarker => "stray `>` marker",
+        error.FigSkippedLevel => "skipped nesting level",
+        error.FigBadMarkerSeparator => "missing space after marker",
+        error.FigBadKey => "invalid key",
+        error.FigDuplicateKey => "duplicate key",
+        error.FigMixedContainerChildren => "mixed container children",
+        error.FigMixedSequenceAddressing => "mixed sequence addressing",
+        error.FigKeyNotContainer => "not a container",
+        error.FigIndexSkipped => "skipped index",
+        error.FigIndexAlreadySet => "index already set",
+        error.FigEmptyAppendTarget => "append target is empty",
+        error.FigEmptyContainer => "empty container",
+        error.FigInvalidValue => "missing value",
+        error.FigTypeMismatch => "type mismatch",
+        error.FigUnknownType => "unknown type",
+        error.FigTrailingContent => "trailing content",
+        error.FigQuotedTrailingContent => "trailing content after quote",
+        error.FigDanglingContinuation => "dangling continuation",
+        error.FigClosedFlowValue => "value is closed",
+        error.FigUnclosedFlow => "unclosed flow",
+        error.FigMixedFlowSeparators => "mixed `=`/`:` separators",
+        error.FigUnclosedString => "unclosed string",
+        error.FigBadEscape => "invalid escape",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
 /// 1-based line/column plus the full offending line — shared by `Diagnostic`
 /// (errors) and `Warning` (lints) so both render the same report shape.
 pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
@@ -275,6 +313,22 @@ pub const Warning = struct {
             .flow_like_string => "this looks like a `[…]`/`{…}` flow value with trailing content, so the whole line was read as one bare string; remove the trailing content for a collection, or quote the value to affirm the string",
             .flow_missing_comma => "a bare flow value containing ` = ` usually means a missing comma between pairs; add the comma, or quote the value if it really is text",
             .indent_marker_mismatch => "indentation disagrees with the `>` marker count (convention: 2 spaces per level); meaning follows the count — fix whichever signal is wrong",
+        };
+    }
+
+    /// A short (few-word) noun phrase for `code` — distinct from
+    /// `describeWarning`'s full teaching sentence. See the top-level
+    /// `shortLabel` (for `Diagnostic`'s `Error` codes) for why this exists
+    /// alongside it: a caret annotation, rustc-style.
+    pub fn shortLabel(code: Code) []const u8 {
+        return switch (code) {
+            .string_looks_like_literal => "looks like a boolean/null",
+            .string_leading_zero => "leading zero",
+            .string_looks_like_number => "trailing dot",
+            .ambiguous_datetime => "ambiguous datetime",
+            .flow_like_string => "looks like a flow value",
+            .flow_missing_comma => "missing comma",
+            .indent_marker_mismatch => "indent/marker mismatch",
         };
     }
 

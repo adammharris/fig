@@ -733,8 +733,7 @@ pub fn main(init: std.process.Init) !void {
                     // message (DESIGN.md: every diagnostic names the fix) and
                     // exits cleanly — no error-return trace for a user typo.
                     if (fig_report.diag) |d| {
-                        const report = try d.renderAlloc(init.arena.allocator(), content, opts.file);
-                        try stderr_terminal.writer.writeAll(report);
+                        try printFigDiag(&stderr_terminal, content, opts.file, d.offset, d.end, "error", .red, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
                         try stderr_terminal.writer.flush();
                         std.process.exit(2);
                     }
@@ -746,8 +745,7 @@ pub fn main(init: std.process.Init) !void {
                 if (fig_report.warnings.len > 0) {
                     if (!opts.quiet) {
                         for (fig_report.warnings) |w| {
-                            const report = try w.renderAlloc(init.arena.allocator(), content, opts.file);
-                            try stderr_terminal.writer.writeAll(report);
+                            try printFigDiag(&stderr_terminal, content, opts.file, w.offset, w.end, "warning", .yellow, fig.Language.FIG.Parser.Warning.describeWarning(w.code), fig.Language.FIG.Parser.Warning.shortLabel(w.code));
                         }
                         try stderr_terminal.writer.flush();
                     }
@@ -870,7 +868,7 @@ pub fn main(init: std.process.Init) !void {
                     if (w.cause != .format_limitation) continue;
                     surfaced += 1;
                     if (!opts.quiet) {
-                        try stderr_terminal.setColor(.red);
+                        try stderr_terminal.setColor(.yellow);
                         try stderr_terminal.writer.writeAll("warning: ");
                         try stderr_terminal.setColor(.reset);
                         try w.render(stderr_terminal.writer, target);
@@ -1010,9 +1008,10 @@ pub fn main(init: std.process.Init) !void {
             // bad file makes the whole run exit non-zero — the CI contract.
             var any_failed = false;
             for (opts.files) |file| {
-                var fig_report: ?[]const u8 = null;
-                var fig_warnings: ?[]const u8 = null;
-                if (checkOne(a, io, file, opts.format, opts.spec, &fig_report, &fig_warnings)) |fmt| {
+                var fig_source: ?[]const u8 = null;
+                var fig_errors: ?[]const fig.Language.FIG.Parser.Diagnostic = null;
+                var fig_warnings: ?[]const fig.Language.FIG.Parser.Warning = null;
+                if (checkOne(a, io, file, opts.format, opts.spec, &fig_source, &fig_errors, &fig_warnings)) |fmt| {
                     if (!opts.quiet) {
                         try stdout_terminal.setColor(.green);
                         try stdout_terminal.writer.writeAll("ok");
@@ -1024,21 +1023,23 @@ pub fn main(init: std.process.Init) !void {
                         else
                             try stdout_terminal.writer.print(": {s} ({s})\n", .{ file, @tagName(fmt) });
                         // fig authoring lints: the file is valid (still `ok`),
-                        // but likely-mistake lines print right below it.
-                        // Flushed immediately so the buffered report can't
-                        // interleave with the next file's unbuffered logging.
-                        if (fig_warnings) |w| {
-                            try stderr_terminal.writer.writeAll(w);
+                        // but likely-mistake lines print right below it. Rendered
+                        // live against the real terminal (not buffered into a
+                        // string — see `printFigDiag`), then flushed immediately
+                        // so it can't interleave with the next file's logging.
+                        if (fig_warnings) |ws| {
+                            for (ws) |w| try printFigDiag(&stderr_terminal, fig_source.?, file, w.offset, w.end, "warning", .yellow, fig.Language.FIG.Parser.Warning.describeWarning(w.code), fig.Language.FIG.Parser.Warning.shortLabel(w.code));
                             try stderr_terminal.writer.flush();
                         }
                     }
                 } else |err| {
                     any_failed = true;
-                    // A fig failure was already rendered as a full
-                    // `file:line:col: error: …` teaching report; print it
-                    // verbatim instead of the generic `file: ErrorName` line.
-                    if (fig_report) |report| {
-                        try stderr_terminal.writer.writeAll(report);
+                    // A fig failure renders as a full `file:line:col: error: …`
+                    // teaching report per error (recovery collects every error in
+                    // the file, not just the first) instead of the generic
+                    // `file: ErrorName` line.
+                    if (fig_errors) |errs| {
+                        for (errs) |d| try printFigDiag(&stderr_terminal, fig_source.?, file, d.offset, d.end, "error", .red, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
                         try stderr_terminal.writer.flush();
                         continue;
                     }
@@ -1063,6 +1064,87 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
+/// Print a fig teaching report straight to `term`, cargo/rustc-style:
+///   <label>: <message>
+///   --> <file>:<line>:<col>
+///    |
+///   7 | <source line>
+///    |          ~~~~ <short_label>
+/// highlighting the reported `[offset, end)` span (a `~~~~` underline, or a
+/// single `^` when `end` is null or the span is one byte), coloring the label
+/// word and the highlight+`short_label` in `color`, and the `-->` pointer plus
+/// the `N |` gutter in blue. This is a CLI-only sibling of
+/// `Parser.Diagnostic.renderAlloc`/`Parser.Warning.renderAlloc` (see
+/// `languages/fig/parser.zig`'s private `renderReport`, which still produces
+/// its own plain `file:line:col: <label>: <message>` shape) — not a
+/// replacement: the library's `renderAlloc` stays a plain, colorless string for
+/// every other caller (the LSP reads the structured `code`/`offset` fields
+/// directly and never calls it; the C ABI's `FigWarning`/`FigError` are plain
+/// data too), so nothing outside this binary is affected by adding color or
+/// reshaping the layout here.
+///
+/// Deliberately never buffered into an intermediate string: under
+/// `Io.Terminal.Mode.windows_api`, `setColor` sets the real console's text
+/// attributes via a direct syscall rather than writing escape bytes into the
+/// stream, so it only works called live against the real terminal — see
+/// `std.Io.Terminal.setColor`.
+fn printFigDiag(term: *Io.Terminal, source: []const u8, file: []const u8, offset: usize, end: ?usize, label: []const u8, color: Io.Terminal.Color, message: []const u8, short_label: []const u8) !void {
+    const loc = fig.Language.FIG.Parser.locateOffset(source, offset);
+    try term.setColor(color);
+    try term.writer.writeAll(label);
+    try term.setColor(.reset);
+    try term.writer.print(": {s}\n", .{message});
+    try term.setColor(.blue);
+    try term.writer.writeAll("--> ");
+    try term.setColor(.reset);
+    try term.writer.print("{s}:{d}:{d}\n", .{ file, loc.line, loc.column });
+
+    // Mirrors `renderReport`'s source-line + caret, but in the cargo/rustc
+    // gutter shape: a blank `|` line, the numbered source line, then a
+    // highlight line under the offending span carrying `short_label`. Capped
+    // so a pathological line can't flood the terminal; the highlight mirrors
+    // tabs in the source to stay aligned under them. The gutter's width
+    // tracks the line number's digit count so the blank/highlight `|` lines
+    // up under the source line's `|`.
+    const max_shown = 160;
+    const shown = loc.line_text[0..@min(loc.line_text.len, max_shown)];
+    if (shown.len == 0) return; // EOF/blank line: nothing to point into
+
+    var line_num_buf: [20]u8 = undefined;
+    const line_num = std.fmt.bufPrint(&line_num_buf, "{d}", .{loc.line}) catch unreachable;
+
+    try term.setColor(.blue);
+    try term.writer.splatByteAll(' ', line_num.len);
+    try term.writer.writeAll(" |\n");
+    try term.writer.print("{s} | ", .{line_num});
+    try term.setColor(.reset);
+    try term.writer.print("{s}{s}\n", .{ shown, if (shown.len < loc.line_text.len) "…" else "" });
+
+    if (loc.column - 1 <= shown.len) {
+        try term.setColor(.blue);
+        try term.writer.splatByteAll(' ', line_num.len);
+        try term.writer.writeAll(" | ");
+        try term.setColor(.reset);
+        for (shown[0 .. loc.column - 1]) |c| try term.writer.writeByte(if (c == '\t') '\t' else ' ');
+        try term.setColor(color);
+        // Highlight the reported `[offset, end)` span rather than a single
+        // point: a `~~~~` underline when the parser gave a real multi-byte
+        // extent (`end`), a single `^` when it didn't (fall back to "just the
+        // start") or when the span is exactly one byte — matching how a `^`
+        // and a `~~~~` read identically for a one-character span anyway.
+        // Never runs past the portion of the line actually printed above.
+        const span_len = if (end) |e| (if (e > offset) e - offset else 1) else 1;
+        const draw_len = @max(1, @min(span_len, shown.len - (loc.column - 1)));
+        if (draw_len <= 1) {
+            try term.writer.writeAll("^");
+        } else {
+            try term.writer.splatByteAll('~', draw_len);
+        }
+        try term.writer.print(" {s}\n", .{short_label});
+        try term.setColor(.reset);
+    }
+}
+
 /// Validate that `file` parses cleanly, returning the resolved format on success.
 /// Format precedence mirrors `get`: an explicit `--input` `override`, else the
 /// file extension, else sniffing the contents. `spec_str` (from `--spec`) pins
@@ -1070,11 +1152,13 @@ pub fn main(init: std.process.Init) !void {
 /// known — an unknown/inapplicable version is reported like a parse error. When
 /// the extension implies an embedded region (e.g. markdown frontmatter) the
 /// inner document is extracted and parsed. Any IO/parse/spec error propagates to
-/// the caller, which reports it — except fig: a parse failure fills `fig_report`
-/// with a rendered `file:line:col` teaching message, and a clean parse may fill
-/// `fig_warnings` with rendered authoring lints (both built here, where the
-/// source bytes are still in scope) for the caller to print verbatim.
-fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8, fig_report: *?[]const u8, fig_warnings: *?[]const u8) !Format {
+/// the caller, which reports it — except fig: a parse failure fills `fig_errors`
+/// with the raw `Diagnostic`s, and a clean parse may fill `fig_warnings` with
+/// the raw `Warning`s (both borrow `fig_source`, which is set alongside them).
+/// The caller renders these live against the real terminal via `printFigDiag`
+/// rather than a pre-rendered string, so it can color the label — see
+/// `printFigDiag`'s doc comment for why that can't happen in here instead.
+fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8, fig_source: *?[]const u8, fig_errors: *?[]const fig.Language.FIG.Parser.Diagnostic, fig_warnings: *?[]const fig.Language.FIG.Parser.Warning) !Format {
     const input = try getInput(io, file, .read_only);
     defer if (!std.mem.eql(u8, file, "-")) input.close(io);
     const content = try readAll(allocator, io, input);
@@ -1103,34 +1187,22 @@ fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?F
     if (embed) |embed_type| {
         _ = try fig.Embed.extract(allocator, content, embed_type);
     } else {
+        fig_source.* = content;
         var report: fig.Language.FIG.Parser.Report = .{};
         // `recover` so a fig file reports EVERY error in one pass (a language
         // server squiggles them all; `check` shouldn't hide errors 2..N behind
-        // the first). Each renders as its own `file:line:col` teaching block,
-        // concatenated in source order. Non-fig formats stop at their first
-        // error (`report.errors` stays empty) — fall back to the single `diag`.
+        // the first). Non-fig formats stop at their first error (`report.errors`
+        // stays empty) — fall back to the single `diag`.
         _ = parseSliceAs(format, spec, allocator, content, true, &report) catch |err| {
             if (report.errors.len > 0) {
-                var aw = std.Io.Writer.Allocating.init(allocator);
-                defer aw.deinit();
-                for (report.errors) |d| {
-                    const rendered = try d.renderAlloc(allocator, content, file);
-                    aw.writer.writeAll(rendered) catch return error.OutOfMemory;
-                }
-                fig_report.* = aw.toOwnedSlice() catch return error.OutOfMemory;
+                fig_errors.* = report.errors;
             } else if (report.diag) |d| {
-                fig_report.* = try d.renderAlloc(allocator, content, file);
+                fig_errors.* = try allocator.dupe(fig.Language.FIG.Parser.Diagnostic, &.{d});
             }
             return err;
         };
         if (report.warnings.len > 0) {
-            var aw = std.Io.Writer.Allocating.init(allocator);
-            defer aw.deinit();
-            for (report.warnings) |w| {
-                const rendered = try w.renderAlloc(allocator, content, file);
-                aw.writer.writeAll(rendered) catch return error.OutOfMemory;
-            }
-            fig_warnings.* = aw.toOwnedSlice() catch return error.OutOfMemory;
+            fig_warnings.* = report.warnings;
         }
     }
     return format;
