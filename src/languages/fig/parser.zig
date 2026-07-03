@@ -84,6 +84,11 @@ pub const Error = error{
     FigUnknownType,
     /// Non-comment content survived after a value/header on its line.
     FigTrailingContent,
+    /// A single-line quoted string closed at its matching quote, but more
+    /// non-comment content followed on the same line — the classic
+    /// wrapped-a-bare-string-in-unescaped-quotes slip (`k = "She said, "Hi""`).
+    /// A quote-specific `FigTrailingContent` that names the bare-string fix.
+    FigQuotedTrailingContent,
     /// A `+` continuation line with no `[]` append header (or `+`) as the most
     /// recent zero-marker structural line — nothing to re-run.
     FigDanglingContinuation,
@@ -128,6 +133,7 @@ pub fn describe(code: Error) []const u8 {
         error.FigTypeMismatch => "the value does not satisfy its `: type` annotation; fix the value, or drop/correct the annotation",
         error.FigUnknownType => "unknown type name; the built-in types are int, float, bool, string, enum, datetime, date, time",
         error.FigTrailingContent => "unexpected content after this line's value or header; quote the whole value if it is one string (a `#` comment needs a space before it)",
+        error.FigQuotedTrailingContent => "this string ends at its matching quote, and the rest of the line is stray content; fig bare strings need no outer quotes — write `key = She said, \"Hey there!\"`, or escape the inner quotes: `\"She said, \\\"Hey there!\\\"\"`",
         error.FigDanglingContinuation => "`+` has no `[]` append header to re-run; move it directly after its `a.b[]` group, or repeat the header",
         error.FigClosedFlowValue => "a value written inline as `[…]`/`{…}` is closed and cannot be extended later; write the block or header form if it needs to grow",
         error.FigUnclosedFlow => "this `[`/`{` value never finds its matching close; close it, or quote the whole value to make it a string",
@@ -1141,7 +1147,16 @@ fn parseQuotedOrTriple(self: *Parser, q: u8, force_string_bare: bool) Error!TNod
         try tok.scanDoubleQuoted(self.allocator, self.source, self.pos);
     self.pos = r.end;
     var node: TNode = .{ .value = .{ .string = r.text }, .span = Span.init(start, r.end) };
-    if (try self.scanTrailingCommentOnly()) |t| node.trailing = .{ .text = t };
+    // A single-line quote that closed early with more content on the line is
+    // almost always a bare string wrapped in unescaped quotes (`k = "a "b""`).
+    // Remap the generic trailing-content error to the quote-specific message
+    // that names the bare-string fix; `scanTrailingCommentOnly` has already
+    // parked `self.pos` on the stray content, so the caret lands there.
+    const t = self.scanTrailingCommentOnly() catch |err| switch (err) {
+        error.FigTrailingContent => return self.failAt(self.pos, error.FigQuotedTrailingContent),
+        else => |e| return e,
+    };
+    if (t) |c| node.trailing = .{ .text = c };
     return node;
 }
 
@@ -1828,6 +1843,18 @@ test "explicit typing rejects a mismatch" {
 
 test "committed values error rather than falling back to string" {
     try testing.expectError(error.FigUnclosedFlow, parseAbstract(testing.allocator, "ports = [80, 443\n", .Fig));
+}
+
+test "a single-line quote that closes early with trailing content is the quote-specific error" {
+    // The classic slip: a bare string wrapped in unescaped outer quotes. The
+    // quote committed, closed at its match, and left `Hey there!""` stray — a
+    // quote-specific `FigTrailingContent` that names the bare-string fix.
+    try testing.expectError(error.FigQuotedTrailingContent, parseAbstract(testing.allocator, "she = \"She said, \"Hey there!\"\"\n", .Fig));
+    try testing.expectError(error.FigQuotedTrailingContent, parseAbstract(testing.allocator, "x = 'a' b\n", .Fig));
+    // A clean quoted string with a genuine trailing comment is still fine.
+    var ok = try parseAbstract(testing.allocator, "x = \"hi\"  # note\n", .Fig);
+    defer ok.deinit();
+    try testing.expectEqualStrings("hi", (try ok.getValByPath(&.{.{ .key = "x" }})).kind.string);
 }
 
 test "balanced-then-trailing bracket RHS is a bare string, not committed flow" {
