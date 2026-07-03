@@ -39,6 +39,7 @@ pub fn materialize(arena: Allocator, ast: *const AST, mode: TagMode) Error!AST {
     // Comments ride along: `copy` carried each source node's comments onto its
     // new id, so the parallel table just hands off (only if any were present).
     if (m.any_comments) result.node_comments = try m.out_comments.toOwnedSlice(arena);
+    if (m.any_tags) result.node_tags = try m.out_tags.toOwnedSlice(arena);
     return result;
 }
 
@@ -51,6 +52,13 @@ const Materializer = struct {
     /// Default-empty per node; materialized only when `any_comments`.
     out_comments: std.ArrayList(AST.NodeComments) = .empty,
     any_comments: bool = false,
+    /// Parallel to `out`: the NORMALIZED type tag kept from an applied core `!!`
+    /// scalar tag. Applying the tag coerces the node's kind; keeping the identity
+    /// here (as a cross-format `.kind` tag) lets a tag-aware target re-surface it
+    /// — a fig `: int =`, a canonical `!!int` — while JSON/TOML/ZON ignore it (the
+    /// value is already concrete). Null per node; materialized only when `any_tags`.
+    out_tags: std.ArrayList(?AST.Tag) = .empty,
+    any_tags: bool = false,
     /// Anchor target ids currently being expanded, to catch structural cycles
     /// (`&a [*a]`) and self-merges (`&m { <<: *m }`).
     path: std.ArrayList(AST.Node.Id) = .empty,
@@ -59,6 +67,7 @@ const Materializer = struct {
         const id: AST.Node.Id = @intCast(self.out.items.len);
         try self.out.append(self.arena, .{ .id = id, .kind = kind, .next_sibling = null });
         try self.out_comments.append(self.arena, .{});
+        try self.out_tags.append(self.arena, null);
         return id;
     }
 
@@ -99,6 +108,7 @@ const Materializer = struct {
             .null_, .boolean, .number, .extended, .string => {
                 const id = try self.emit(try self.applyScalarTag(node));
                 try self.carry(node.id, id);
+                try self.carryScalarTag(node.id, id);
                 return id;
             },
             .sequence => |first| {
@@ -234,6 +244,23 @@ const Materializer = struct {
         _ = try self.customTag(node.id, node.kind); // strict-errors on unknown; lax no-op
     }
 
+    /// Keep an applied core SCALAR tag on the output node as a normalized `.kind`
+    /// type tag, so a tag-aware target re-surfaces it (fig `: int =`, canonical
+    /// `!!int`). A custom/collection tag is not carried — it was already applied
+    /// (collections) or errored/dropped (custom) by `applyScalarTag`.
+    fn carryScalarTag(self: *Materializer, src_id: AST.Node.Id, new_id: AST.Node.Id) Error!void {
+        const name = self.coreName(self.src.node_tags[src_id] orelse return) orelse return;
+        const kind: AST.Tag.KindTag =
+            if (std.mem.eql(u8, name, "str")) .string
+            else if (std.mem.eql(u8, name, "int")) .integer
+            else if (std.mem.eql(u8, name, "float")) .float
+            else if (std.mem.eql(u8, name, "bool")) .boolean
+            else if (std.mem.eql(u8, name, "null")) .null_
+            else return; // seq/map (collection) or unrecognized — nothing to carry
+        self.out_tags.items[new_id] = .{ .kind = kind };
+        self.any_tags = true;
+    }
+
     /// The core-schema type name (`str`, `int`, …) a `Tag` denotes, or null when
     /// it is a genuinely custom tag. A `.kind` tag names its type directly; a
     /// `.text` tag is decoded from its YAML spelling via `coreTagName`.
@@ -361,17 +388,26 @@ test "materialize: merge flattens with host and earlier-source precedence" {
     try testing.expectError(error.NotFound, mat.getValByPath(&.{ .{ .key = "d" }, .{ .key = "<<" } }));
 }
 
-test "materialize: core tags applied then dropped" {
-    const doc = try Parser.parse(testing.allocator, "a: !!str 123\nb: !!int \"42\"\nc: !!null x\n", .v1_2_2);
+test "materialize: core tags applied AND kept as normalized kind tags" {
+    const doc = try Parser.parse(testing.allocator, "a: !!str 123\nb: !!int \"42\"\nc: !!null x\nd: 7\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const mat = try materialize(arena.allocator(), &doc.ast, .strict);
 
-    try testing.expectEqualSlices(u8, "123", (try mat.getValByPath(&.{.{ .key = "a" }})).kind.string);
+    // The tag is applied to the node's kind …
+    const a = try mat.getValByPath(&.{.{ .key = "a" }});
+    try testing.expectEqualSlices(u8, "123", a.kind.string);
     const b = try mat.getValByPath(&.{.{ .key = "b" }});
     try testing.expect(b.kind == .number and b.kind.number.kind == .integer);
     try testing.expect((try mat.getValByPath(&.{.{ .key = "c" }})).kind == .null_);
+    // … and its type identity is KEPT as a normalized `.kind` tag, so a tag-aware
+    // target (fig `: type =`, canonical `!!type`) can re-surface it.
+    try testing.expect(mat.node_tags[a.id].?.kind == .string);
+    try testing.expect(mat.node_tags[b.id].?.kind == .integer);
+    // An untagged scalar carries no tag.
+    try testing.expect((try mat.getValByPath(&.{.{ .key = "d" }})).id >= mat.node_tags.len or
+        mat.node_tags[(try mat.getValByPath(&.{.{ .key = "d" }})).id] == null);
 }
 
 test "materialize: unknown tag strict errors, lax drops" {
