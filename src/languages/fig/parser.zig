@@ -227,6 +227,12 @@ pub const Warning = struct {
     code: Code,
     /// Byte offset of the surprising token (see `locateOffset`).
     offset: usize,
+    /// Byte offset just past the surprising token, when the extent is known
+    /// (almost always — a warn fires on a specific value/token). Mirrors
+    /// `Diagnostic.end`: lets an editor squiggle exactly that token instead of
+    /// running to end-of-line. Always on `offset`'s line; null means "no known
+    /// end, fall back to end-of-line".
+    end: ?usize = null,
 
     pub const Code = enum {
         /// A bare token spelling a bool/null from another config language
@@ -236,6 +242,12 @@ pub const Warning = struct {
         /// A digit-only token with a leading zero (`007`) kept its padding as
         /// a string (the TOML leading-zero rule).
         string_leading_zero,
+        /// A number-shaped token that no valid number spelling accepts — a
+        /// trailing-dot float (`1.`, `42.`) — fell to a string. Narrow by
+        /// design (only a clean integer + a single trailing `.`), so version
+        /// strings (`1.2.3`) and prose (`12 monkeys`) never warn. Coerce with
+        /// `: float =` for the number, or quote to affirm the string.
+        string_looks_like_number,
         /// A bare date/time with no `T`+zone (`2026-07-01`) sniffed to a
         /// datetime value; a full RFC-3339 timestamp never warns.
         ambiguous_datetime,
@@ -258,6 +270,7 @@ pub const Warning = struct {
         return switch (code) {
             .string_looks_like_literal => "this spells a boolean/null in other config languages, but fig literals are lowercase-only, so it stays the string it spells; quote it to make the string explicit, or lowercase it for the literal",
             .string_leading_zero => "a leading zero is not a number in fig, so the padding was kept as a string; quote it to make that explicit, or drop the zero for a number",
+            .string_looks_like_number => "a trailing dot is not a valid number in fig, so this was kept as a string; write `: float =` to coerce it to a number, or quote it to affirm the string",
             .ambiguous_datetime => "a bare date/time becomes a datetime value, not text; quote it if you meant a string",
             .flow_like_string => "this looks like a `[…]`/`{…}` flow value with trailing content, so the whole line was read as one bare string; remove the trailing content for a collection, or quote the value to affirm the string",
             .flow_missing_comma => "a bare flow value containing ` = ` usually means a missing comma between pairs; add the comma, or quote the value if it really is text",
@@ -576,9 +589,17 @@ fn failSpan(self: *Parser, start: usize, end: usize, err: Error) Error {
     return err;
 }
 
-/// Record an authoring-time lint anchored at `offset` (see `Warning`).
+/// Record an authoring-time lint anchored at `offset`, with no known token end
+/// (the squiggle falls back to end-of-line). Prefer `warnAt` when the offending
+/// token's extent is known — most warn sites know it.
 fn warn(self: *Parser, code: Warning.Code, offset: usize) Error!void {
     try self.warnings.append(self.allocator, .{ .code = code, .offset = offset });
+}
+
+/// Record an authoring-time lint spanning `[start, end)` — a precise token
+/// extent so an editor squiggles exactly that token instead of the whole line.
+fn warnAt(self: *Parser, code: Warning.Code, start: usize, end: usize) Error!void {
+    try self.warnings.append(self.allocator, .{ .code = code, .offset = start, .end = end });
 }
 
 // ── Main line loop ──────────────────────────────────────────────────────────
@@ -636,7 +657,10 @@ fn processLine(self: *Parser, line_start: usize) Error!void {
         // Anchored at the first char AFTER the indent (the marker run /
         // key), not at the line start: a line-start offset sits right past
         // the previous newline, which `locateOffset` would step back over.
-        if (tabbed or indent.len != 2 * m.depth) try self.warn(.indent_marker_mismatch, line_start + indent.len);
+        // Squiggle from the first post-indent char through the marker run
+        // (`self.pos` sits past it after `scanMarkers`) — the two signals that
+        // disagree — instead of running to end-of-line.
+        if (tabbed or indent.len != 2 * m.depth) try self.warnAt(.indent_marker_mismatch, line_start + indent.len, self.pos);
     }
     // A `*` element marker already committed this to an element line (even
     // a bare `*` opener with no value, or one carrying only a trailing
@@ -1233,13 +1257,17 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
         '"' => return self.parseQuotedOrTriple('"', force_string_bare),
         '[', '{' => {
             if (force_string_bare) {
-                // A `: string` annotation rejects a collection RHS. Scan the
-                // bare value (up to the `#`-after-space comment rule) so the
-                // diagnostic squiggles exactly `[…]`/`{…}`, not the comment.
-                const vstart = self.pos;
+                // A `: string` annotation is a TOTAL SINK: the annotation selects
+                // the raw-text sub-parser, turning off BOTH sniffing and flow
+                // commitment (DESIGN.md "annotation selects the sub-parser").
+                // So `x: string = [ 1 + 2 ]` is the string `[ 1 + 2 ]`, never a
+                // sequence — the quote-free escape hatch that needs no interior
+                // escaping. (`fig fmt` re-quotes it so the bare form round-trips.)
                 const res = self.scanBareRestOfLine();
-                const vspan = if (res.text.len > 0) self.spanOf(res.text) else Span.init(vstart, vstart);
-                return self.failSpan(vspan.start, vspan.end, error.FigTypeMismatch);
+                if (res.text.len == 0) return error.FigInvalidValue;
+                var node: TNode = .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) };
+                if (res.comment) |cm| node.trailing = .{ .text = cm };
+                return node;
             }
             // Commitment is decided by the shape of the WHOLE RHS, not just the
             // first char (DESIGN.md "Committed values"): a balanced `[…]`/`{…}`
@@ -1247,7 +1275,10 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             // flow, so it is a bare string, left unquoted.
             if (tok.classifyBracketCommit(self.source, self.pos) == .bare_trailing) {
                 const vstart = self.pos;
-                if (try self.flowLikePrefix(vstart)) try self.warn(.flow_like_string, vstart);
+                if (try self.flowLikePrefix(vstart)) {
+                const close = tok.bracketCloseIndex(self.source, vstart) orelse vstart;
+                try self.warnAt(.flow_like_string, vstart, close + 1);
+            }
                 const res = self.scanBareRestOfLine();
                 if (res.text.len == 0) return error.FigInvalidValue;
                 // Opened with a delimiter → sniffing is off; it is a string.
@@ -1341,12 +1372,15 @@ fn sniffToNode(self: *Parser, text: []const u8) TNode {
 /// annotation is the author saying "I know").
 fn sniffToNodeWarned(self: *Parser, text: []const u8, offset: usize) Error!TNode {
     const node = self.sniffToNode(text);
+    const end = offset + text.len; // the exact token extent, for a tight squiggle
     switch (node.value) {
         .string => {
             if (looksLikeLiteral(text)) {
-                try self.warn(.string_looks_like_literal, offset);
+                try self.warnAt(.string_looks_like_literal, offset, end);
             } else if (looksLikeLeadingZero(text)) {
-                try self.warn(.string_leading_zero, offset);
+                try self.warnAt(.string_leading_zero, offset, end);
+            } else if (looksLikeTrailingDotNumber(text)) {
+                try self.warnAt(.string_looks_like_number, offset, end);
             }
         },
         // Quietly, and only when ambiguous: a bare date or clock time reads
@@ -1354,7 +1388,7 @@ fn sniffToNodeWarned(self: *Parser, text: []const u8, offset: usize) Error!TNode
         // (nobody types `T` mid-sentence) and stays silent — warn-fatigue is
         // the failure mode this rule is calibrated against.
         .extended => |e| switch (e.kind) {
-            .local_date, .local_time => try self.warn(.ambiguous_datetime, offset),
+            .local_date, .local_time => try self.warnAt(.ambiguous_datetime, offset, end),
             else => {},
         },
         else => {},
@@ -1408,21 +1442,47 @@ fn looksLikeLeadingZero(text: []const u8) bool {
     return true;
 }
 
+/// `1.`-style: a clean integer followed by a single trailing dot (`1.`, `42.`,
+/// `-3.`) — a number that fell to a string because no fig float spelling has a
+/// bare trailing dot. Deliberately NARROW: the part before the dot must sniff
+/// as a *decimal integer*, so a version string (`1.2.3`), a leading-zero token
+/// (`09.`, already number-ish but not a clean int), and prose (`12 monkeys`)
+/// never warn — only the "sig fig" trailing-dot case the coerce-with-`: float`
+/// message addresses.
+fn looksLikeTrailingDotNumber(text: []const u8) bool {
+    if (text.len < 2 or text[text.len - 1] != '.') return false;
+    const head = text[0 .. text.len - 1];
+    const n = tok.sniffNumber(head) orelse return false;
+    return n.kind == .integer;
+}
+
 /// Explicit typing (`key: type = value`): the annotation is checked and
 /// coercing, never stored (DESIGN.md "Explicit typing").
 fn applyKnownType(self: *Parser, type_name: []const u8, text: []const u8) Error!TNode {
-    _ = self;
     if (std.mem.eql(u8, type_name, "int")) {
-        const n = tok.sniffNumber(text) orelse return error.FigTypeMismatch;
-        if (n.kind != .integer) return error.FigTypeMismatch;
-        return .{ .value = .{ .number = n } };
+        if (tok.sniffNumber(text)) |n| {
+            if (n.kind != .integer) return error.FigTypeMismatch;
+            return .{ .value = .{ .number = n } };
+        }
+        // Coercion opt-in: a leading-zero decimal (`09`, `007`) is a *string*
+        // when bare (the Leading-zero rule), but `: int` is the author
+        // overriding that default — strip the padding to a valid integer raw.
+        if (try self.normalizeDecimal(text)) |raw|
+            return .{ .value = .{ .number = .{ .raw = raw, .kind = .integer } } };
+        return error.FigTypeMismatch;
     }
     if (std.mem.eql(u8, type_name, "float")) {
         if (std.mem.eql(u8, text, "inf") or std.mem.eql(u8, text, "-inf") or std.mem.eql(u8, text, "nan")) {
             return .{ .value = .{ .extended = .{ .kind = .number_special, .text = text } } };
         }
-        const n = tok.sniffNumber(text) orelse return error.FigTypeMismatch;
-        return .{ .value = .{ .number = .{ .raw = n.raw, .kind = .float } } };
+        if (tok.sniffNumber(text)) |n|
+            return .{ .value = .{ .number = .{ .raw = n.raw, .kind = .float } } };
+        // Coercion opt-in: a trailing-dot (`1.`) or leading-zero (`09`) token is
+        // a string when bare, but `: float` overrides — normalize to a valid
+        // float raw (`1.` → `1.0`, `09` → `9.0`) so it round-trips everywhere.
+        if (try self.normalizeCoercedFloat(text)) |raw|
+            return .{ .value = .{ .number = .{ .raw = raw, .kind = .float } } };
+        return error.FigTypeMismatch;
     }
     if (std.mem.eql(u8, type_name, "bool")) {
         if (std.mem.eql(u8, text, "true")) return .{ .value = .{ .boolean = true } };
@@ -1451,6 +1511,40 @@ fn applyKnownType(self: *Parser, type_name: []const u8, text: []const u8) Error!
         return .{ .value = .{ .extended = .{ .kind = ext, .text = text } } };
     }
     return error.FigUnknownType;
+}
+
+/// Normalize a decimal-integer token that `sniffNumber` rejected only for its
+/// leading zero (`09`, `007`, `-00`) into a valid integer raw: sign preserved
+/// (`+` dropped), leading zeros stripped to at least one digit. Returns null if
+/// the post-sign body isn't purely decimal digits (so a genuine mismatch still
+/// errors). Arena-allocated; the builder dupes it into the AST's owned strings.
+fn normalizeDecimal(self: *Parser, text: []const u8) Error!?[]const u8 {
+    var i: usize = 0;
+    const negative = text.len > 0 and text[0] == '-';
+    if (text.len > 0 and (text[0] == '+' or text[0] == '-')) i = 1;
+    const body = text[i..];
+    if (body.len == 0) return null;
+    for (body) |ch| if (!std.ascii.isDigit(ch)) return null;
+    var start: usize = 0;
+    while (start + 1 < body.len and body[start] == '0') start += 1; // keep ≥1 digit
+    const digits = body[start..];
+    return try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ if (negative) "-" else "", digits });
+}
+
+/// Normalize a token `: float` accepts by coercion but `sniffNumber` rejects:
+/// a trailing-dot integer (`1.` → `1.0`) or a leading-zero decimal (`09` →
+/// `9.0`). Returns null when neither shape applies (a real mismatch → error).
+fn normalizeCoercedFloat(self: *Parser, text: []const u8) Error!?[]const u8 {
+    // Trailing dot: `1.` — the head must be a clean decimal integer body.
+    if (text.len >= 2 and text[text.len - 1] == '.') {
+        if (try self.normalizeDecimal(text[0 .. text.len - 1])) |digits|
+            return try std.fmt.allocPrint(self.allocator, "{s}.0", .{digits});
+        return null;
+    }
+    // Leading-zero decimal in float position: `09` → `9.0`.
+    if (try self.normalizeDecimal(text)) |digits|
+        return try std.fmt.allocPrint(self.allocator, "{s}.0", .{digits});
+    return null;
 }
 
 const BareScan = struct { text: []const u8, comment: ?[]const u8 };
@@ -1671,7 +1765,10 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
         // is what lets `[Blog](/Blog.md)` sit unquoted in a flow list.
         if (tok.classifyFlowBracket(self.source, self.pos) == .bare_trailing) {
             const vstart = self.pos;
-            if (try self.flowLikePrefix(vstart)) try self.warn(.flow_like_string, vstart);
+            if (try self.flowLikePrefix(vstart)) {
+                const close = tok.bracketCloseIndex(self.source, vstart) orelse vstart;
+                try self.warnAt(.flow_like_string, vstart, close + 1);
+            }
             const text = self.scanFlowBareBracket();
             if (text.len == 0) return error.FigInvalidValue;
             // Opened with a delimiter → sniffing is off; it is a string.
@@ -1698,7 +1795,7 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
     // always means `{x = 1 y = 2}` — the pair separator of a *next* pair read
     // as value text. The scariest silent behavior bare flow values allow, so
     // it warns (quote the value to affirm genuine ` = ` text).
-    if (std.mem.indexOf(u8, text, " = ")) |i| try self.warn(.flow_missing_comma, vstart + i + 1);
+    if (std.mem.indexOf(u8, text, " = ")) |i| try self.warnAt(.flow_missing_comma, vstart + i + 1, vstart + i + 2);
     // `Infinity`/`NaN` are NOT recognized here (JSON5 is dropped): they sniff to
     // plain strings, exactly as bare `inf`/`nan` do in the block layer.
     return try self.sniffToNodeWarned(text, vstart);
@@ -2037,13 +2134,34 @@ test "explicit typing rejects a mismatch" {
     try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "port: int = hello\n", .Fig));
 }
 
+test "explicit typing coerces number lookalikes that bare-sniffing rejects" {
+    var ast = try parseAbstract(testing.allocator,
+        \\a: float = 1.
+        \\b: int = 09
+        \\c: float = 09
+        \\d: int = -007
+        \\e: string = [ 1 + 2 ]
+    , .Fig);
+    defer ast.deinit();
+    // `1.` → the float `1.0`; the padding/trailing-dot is normalized so the raw
+    // round-trips through every target (invalid `1.`/`09` never reach the AST).
+    try testing.expectEqualStrings("1.0", (try ast.getValByPath(&.{.{ .key = "a" }})).kind.number.raw);
+    const b = try ast.getValByPath(&.{.{ .key = "b" }});
+    try testing.expect(b.kind.number.kind == .integer);
+    try testing.expectEqualStrings("9", b.kind.number.raw);
+    try testing.expectEqualStrings("9.0", (try ast.getValByPath(&.{.{ .key = "c" }})).kind.number.raw);
+    try testing.expectEqualStrings("-7", (try ast.getValByPath(&.{.{ .key = "d" }})).kind.number.raw);
+    // `: string` is a total sink: the bracketed RHS is verbatim text, not flow.
+    try testing.expectEqualStrings("[ 1 + 2 ]", (try ast.getValByPath(&.{.{ .key = "e" }})).kind.string);
+}
+
 test "type-mismatch diagnostic anchors on the value span, not the trailing comment" {
-    // Both a scalar-annotation failure (via `applyKnownType`, which runs AFTER
-    // the line — incl. its comment — was scanned) and a `: string` rejecting a
-    // collection must point at the VALUE, with a tight end before the `#`.
+    // A scalar-annotation failure (via `applyKnownType`, which runs AFTER the
+    // line — incl. its comment — was scanned) must point at the VALUE, with a
+    // tight end before the `#`.
     const cases = [_]struct { src: []const u8, value: []const u8 }{
-        .{ .src = "x: float = 1. # note\n", .value = "1." },
-        .{ .src = "y: string = [ 1 + 2 ] # note\n", .value = "[ 1 + 2 ]" },
+        .{ .src = "x: int = hello # note\n", .value = "hello" },
+        .{ .src = "y: bool = maybe # note\n", .value = "maybe" },
     };
     for (cases) |c| {
         var report: Report = .{};
@@ -2577,11 +2695,19 @@ test "coercion warns: literal lookalikes and leading zeros" {
     try expectWarnCodes("shout = TRUE\n", &.{.string_looks_like_literal});
     try expectWarnCodes("nothing = Null\n", &.{.string_looks_like_literal});
     try expectWarnCodes("zip = 007\n", &.{.string_leading_zero});
+    // A trailing-dot number lookalike (`1.`) falls to a string and warns —
+    // narrow, so version strings and prose stay silent.
+    try expectWarnCodes("sig = 1.\n", &.{.string_looks_like_number});
+    try expectWarnCodes("neg = -3.\n", &.{.string_looks_like_number});
+    try expectWarnCodes("ver = 1.2.3\n", &.{});
     // The real literals, prose, quotes, and annotations never warn.
     try expectWarnCodes("ok = true\nn = null\nx = 0\nhex = 0xFF\n", &.{});
+    try expectWarnCodes("real = 1.0\ndot = .5\n", &.{});
     try expectWarnCodes("movie = 12 monkeys\ntitle = Yes Prime Minister\n", &.{});
     try expectWarnCodes("flag = \"true\"\n", &.{});
     try expectWarnCodes("norway: string = Yes\n", &.{});
+    // A `: float` coercion silences the trailing-dot warn (the author opted in).
+    try expectWarnCodes("sig: float = 1.\n", &.{});
 }
 
 test "coercion warns: ambiguous datetime only" {

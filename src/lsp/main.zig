@@ -223,7 +223,7 @@ const Server = struct {
         for (report.warnings) |wn| {
             if (!first) try b.writeAll(",");
             first = false;
-            try writeDiagnostic(b, text, wn.offset, null, 2, @tagName(wn.code), Parser.Warning.describeWarning(wn.code));
+            try writeDiagnostic(b, text, wn.offset, wn.end, 2, @tagName(wn.code), Parser.Warning.describeWarning(wn.code));
         }
         try b.writeAll("]}}");
         try self.send(buf.written());
