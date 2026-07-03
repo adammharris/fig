@@ -241,7 +241,12 @@ module.exports = grammar({
     // comment and `src/scanner.c`. Declared above in `externals`; both are
     // plain (childless) leaf tokens, same shape as `bare_string`/`flow_bare`.
 
-    // Bare key: identifier-ish; anything needing . : = [ ] or space must be quoted.
-    bare_key: _ => token(/[A-Za-z_][A-Za-z0-9_\-]*/),
+    // Bare key: letters, digits, `_`, `-` (fig's `isBareKeyChar`). A digit is
+    // allowed as the FIRST char (`1_sig_fig`, `007zone`) — the leading-zero /
+    // number rules are value-side only, never key-side — but `-` is not (a key
+    // may not begin with `-`; DESIGN.md "Keys"). In value position `number`
+    // still wins for a pure numeral (`x = 42`): `bare_key` is not a `_value`
+    // alternative, so the two never compete outside key position.
+    bare_key: _ => token(/[A-Za-z0-9_][A-Za-z0-9_\-]*/),
   },
 });

@@ -115,6 +115,35 @@ mode: enum = creative
     value: (bare_string)))
 
 ==================
+digit-leading keys are one bare_key, not a number
+==================
+
+1_sig_fig = 1
+1_sig_fig_errors: float = 1.0
+007zone = ok
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string)))
+
+==================
 elements, index, headers
 ==================
 
