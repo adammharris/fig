@@ -15,10 +15,10 @@ const std = @import("std");
 const AST = @import("ast/ast.zig");
 const build_options = @import("build_options");
 
-const Json = @import("json/parser.zig");
-const Yaml = if (build_options.lang_yaml) @import("yaml/parser.zig") else void;
-const Toml = if (build_options.lang_toml) @import("toml/parser.zig") else void;
-const Zon = if (build_options.lang_zon) @import("zon/parser.zig") else void;
+const Json = @import("languages/json/parser.zig");
+const Yaml = if (build_options.lang_yaml) @import("languages/yaml/parser.zig") else void;
+const Toml = if (build_options.lang_toml) @import("languages/toml/parser.zig") else void;
+const Zon = if (build_options.lang_zon) @import("languages/zon/parser.zig") else void;
 
 /// The source format to parse before mapping onto `T`. A format that was
 /// compiled out is still a valid enum value, but parsing it yields

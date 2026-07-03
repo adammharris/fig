@@ -1,6 +1,6 @@
 //! The canonical-form printer: a total, 1:1 text encoding of the AST.
 //! (Formerly "native"; the human-facing `fig` authoring dialect is separate — see
-//! src/fig/DESIGN.md.)
+//! src/languages/fig/DESIGN.md.)
 //!
 //! Unlike the format printers (JSON/YAML/TOML/ZON), this one is a *bijection*
 //! with the AST — every `Node.Kind` arm and the YAML reference layer (anchors,

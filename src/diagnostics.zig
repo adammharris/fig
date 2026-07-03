@@ -239,7 +239,7 @@ fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
         .canonical => return null,
         // fig natively represents every kind EXCEPT a char literal — its
         // `codepoint` text degrades to a plain decoded string (see
-        // `src/fig/printer.zig`'s `writeExtended`). Enum atoms and non-finite
+        // `src/languages/fig/printer.zig`'s `writeExtended`). Enum atoms and non-finite
         // floats round-trip losslessly too, but only via an explicit `: enum`/
         // `: float` annotation, which is a syntax choice, not a value loss.
         .fig => switch (kind) {

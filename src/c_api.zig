@@ -14,26 +14,26 @@ const build_options = @import("build_options");
 // `build_options.lang_*` comptime guard so the parser/printer never compiles in.
 // JSON is gateable too — the editor union and the parse/capability switches all
 // guard their JSON-family arms.
-const JsonParser = if (build_options.lang_json) @import("json/parser.zig") else void;
-const JsonType = if (build_options.lang_json) @import("json/json.zig").Type else void;
-const JsonLang = if (build_options.lang_json) @import("json/json.zig").Language else void;
-const YamlParser = if (build_options.lang_yaml) @import("yaml/parser.zig") else void;
-const YamlType = if (build_options.lang_yaml) @import("yaml/yaml.zig").Type else void;
-const YamlLang = if (build_options.lang_yaml) @import("yaml/yaml.zig").Language else void;
-const TomlParser = if (build_options.lang_toml) @import("toml/parser.zig") else void;
-const TomlType = if (build_options.lang_toml) @import("toml/toml.zig").Type else void;
-const TomlLang = if (build_options.lang_toml) @import("toml/toml.zig").Language else void;
-const ZonParser = if (build_options.lang_zon) @import("zon/parser.zig") else void;
-const ZonType = if (build_options.lang_zon) @import("zon/zon.zig").Type else void;
-const XmlParser = if (build_options.lang_xml) @import("xml/parser.zig") else void;
-const XmlType = if (build_options.lang_xml) @import("xml/xml.zig").Type else void;
+const JsonParser = if (build_options.lang_json) @import("languages/json/parser.zig") else void;
+const JsonType = if (build_options.lang_json) @import("languages/json/json.zig").Type else void;
+const JsonLang = if (build_options.lang_json) @import("languages/json/json.zig").Language else void;
+const YamlParser = if (build_options.lang_yaml) @import("languages/yaml/parser.zig") else void;
+const YamlType = if (build_options.lang_yaml) @import("languages/yaml/yaml.zig").Type else void;
+const YamlLang = if (build_options.lang_yaml) @import("languages/yaml/yaml.zig").Language else void;
+const TomlParser = if (build_options.lang_toml) @import("languages/toml/parser.zig") else void;
+const TomlType = if (build_options.lang_toml) @import("languages/toml/toml.zig").Type else void;
+const TomlLang = if (build_options.lang_toml) @import("languages/toml/toml.zig").Language else void;
+const ZonParser = if (build_options.lang_zon) @import("languages/zon/parser.zig") else void;
+const ZonType = if (build_options.lang_zon) @import("languages/zon/zon.zig").Type else void;
+const XmlParser = if (build_options.lang_xml) @import("languages/xml/parser.zig") else void;
+const XmlType = if (build_options.lang_xml) @import("languages/xml/xml.zig").Type else void;
 // Cross-format conversion helpers used by `fig_document_serialize`. `Lossless` is
 // format-agnostic (always compiled in); `materialize` is YAML-only, so it follows
 // the gated-import pattern above (collapses to `void` when YAML is off, and every
 // reference to it sits behind the matching comptime guard).
 const Lossless = @import("lossless.zig");
 const Diagnostics = @import("diagnostics.zig");
-const YamlMaterialize = if (build_options.lang_yaml) @import("yaml/materialize.zig") else void;
+const YamlMaterialize = if (build_options.lang_yaml) @import("languages/yaml/materialize.zig") else void;
 
 /// Logging for the C ABI build (this file is the static-lib root, so its
 /// `std_options` wins). The default `std.log` handler writes to stderr via

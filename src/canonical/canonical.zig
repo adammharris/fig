@@ -2,7 +2,7 @@
 //!
 //! (Formerly "native". This is the AST's own oracle serialization, NOT the
 //! human-facing `fig` authoring dialect — that is a separate, ergonomic surface
-//! over the same AST, specified in DESIGN.md living under `src/fig/`.)
+//! over the same AST, specified in DESIGN.md living under `src/languages/fig/`.)
 //!
 //! It is a bijection with `ast.zig`'s `Node.Kind` plus the YAML reference layer,
 //! so any document round-trips through it unchanged. Two roles:

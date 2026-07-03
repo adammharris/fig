@@ -1,6 +1,6 @@
 //! The canonical-form parser: text → AST, the exact inverse of
 //! `canonical/printer.zig`. (This "canonical form" was formerly called "native";
-//! the human-facing `fig` authoring dialect is a separate surface — see src/fig/DESIGN.md.)
+//! the human-facing `fig` authoring dialect is a separate surface — see src/languages/fig/DESIGN.md.)
 //!
 //! Recursive-descent over the byte stream (the grammar is small enough that the
 //! token framework the format parsers share would be overkill). It reconstructs

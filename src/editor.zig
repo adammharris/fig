@@ -6,7 +6,7 @@ const build_options = @import("build_options");
 const AST = @import("ast/ast.zig");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
-const json = @import("json/json.zig");
+const json = @import("languages/json/json.zig");
 const json_string = @import("util/json_string.zig");
 const log = std.log.scoped(.editor);
 
@@ -16,18 +16,18 @@ const log = std.log.scoped(.editor);
 // marker-prefix-copying block/flow insert + append/prepend. See each module's
 // header for the split rationale. These modules also hold that language's editor
 // tests, so editor-test code lives next to the concern it exercises.
-const toml_edit = @import("toml/editor_helper.zig");
-const yaml_edit = @import("yaml/editor_helper.zig");
-const fig_edit = @import("fig/editor_helper.zig");
+const toml_edit = @import("languages/toml/editor_helper.zig");
+const yaml_edit = @import("languages/yaml/editor_helper.zig");
+const fig_edit = @import("languages/fig/editor_helper.zig");
 // Language tags used by the comptime branches above.
-const Toml = @import("toml/toml.zig").Language;
-const Yaml = @import("yaml/yaml.zig").Language;
-const Fig = @import("fig/fig.zig").Language;
+const Toml = @import("languages/toml/toml.zig").Language;
+const Yaml = @import("languages/yaml/yaml.zig").Language;
+const Fig = @import("languages/fig/fig.zig").Language;
 // Used only for the comptime comment-marker choice (ZON uses `//`, like Zig).
-const Zon = @import("zon/zon.zig").Language;
+const Zon = @import("languages/zon/zon.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
-    @import("language.zig").validate(Language);
+    @import("languages/language.zig").validate(Language);
     return struct {
         const Self = @This();
 
@@ -988,6 +988,34 @@ pub fn Editor(comptime Language: type) type {
         pub fn reorderTables(self: *Self, order: []const []const u8) !void {
             if (Language != Toml) @compileError("reorderTables is TOML-only");
             return toml_edit.reorderTables(self, order);
+        }
+
+        // --- fig whole-container structural editing (fig-only) ---
+        //
+        // The implementations live in `fig/editor_helper.zig`, next to the
+        // region-gather helpers they build on — the fig generalization of the
+        // TOML wrappers just above. `renameTable`'s fig twin doesn't exist: the
+        // generic `replaceKeyAtPath` already splices a header's key in place.
+        // See the helper module for the per-op contract and its scope.
+
+        /// Delete the whole block mapping/sequence named by `path`.
+        pub fn deleteContainer(self: *Self, path: []const AST.PathSegment) !void {
+            if (Language != Fig) @compileError("deleteContainer is fig-only");
+            return fig_edit.deleteContainer(self, path);
+        }
+
+        /// Move the block container at `src_path` before `dest_path` (or to EOF
+        /// if null).
+        pub fn moveContainer(self: *Self, src_path: []const AST.PathSegment, dest_path: ?[]const AST.PathSegment) !void {
+            if (Language != Fig) @compileError("moveContainer is fig-only");
+            return fig_edit.moveContainer(self, src_path, dest_path);
+        }
+
+        /// Reorder top-level block containers to the order given by `order`
+        /// (their keys).
+        pub fn reorderContainers(self: *Self, order: []const []const u8) !void {
+            if (Language != Fig) @compileError("reorderContainers is fig-only");
+            return fig_edit.reorderContainers(self, order);
         }
 
         /// Append `: value` for a mapping entry whose key is already written at

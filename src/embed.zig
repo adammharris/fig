@@ -3,7 +3,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const Language = @import("language.zig");
+const Language = @import("languages/language.zig");
 const Document = @import("document.zig");
 const Span = @import("util/span.zig");
 const build_options = @import("build_options");

@@ -1,6 +1,6 @@
 //! Dev tool: STRUCTURAL conformance check against the yaml-test-suite `tree:`.
 //!
-//! The conformance scoreboard (src/yaml/conformance.zig) is pass/fail only: a
+//! The conformance scoreboard (src/languages/yaml/conformance.zig) is pass/fail only: a
 //! fixture fig *accepts* but parses to the WRONG SHAPE still counts as a pass.
 //! This tool closes that blind spot by comparing the *structure* of fig's parse
 //! against the suite's canonical event tree (`tree:`) for every in-scope accept

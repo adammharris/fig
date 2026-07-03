@@ -30,9 +30,11 @@ const max_size = Io.Limit.limited(10 * 1024 * 1024);
 // the human-facing authoring dialect: it owns `.fig`, has a reader + `fig fmt`
 // printer (see `get`), and `Editor(fig.Language.FIG)` wires `edit`/`set`/
 // `insert`/`delete`/`comment` through the same span-splice engine as
-// TOML/YAML/ZON (see `fig/editor_helper.zig`; whole-container structural ops —
-// rename/move/reorder a header, like TOML's `renameTable`/`moveTable` — are
-// not implemented yet). `gron` is a CLI-only echo format with no
+// TOML/YAML/ZON (see `fig/editor_helper.zig`, which also carries the
+// whole-container structural ops — `deleteContainer`/`moveContainer`/
+// `reorderContainers`, fig's twins of TOML's `deleteTable`/`moveTable`/
+// `reorderTables` — library-level only, same as TOML's). `gron` is a CLI-only
+// echo format with no
 // `AST.SerializeFormat` counterpart.
 const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, canonical, fig, gron };
 

@@ -420,15 +420,15 @@ fn link(out: *std.ArrayList(AST.Node), container: Id, last: *?Id, child: Id, com
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 const testing = std.testing;
-const JsonParser = @import("json/parser.zig");
-const JsonPrinter = @import("json/printer.zig");
+const JsonParser = @import("languages/json/parser.zig");
+const JsonPrinter = @import("languages/json/printer.zig");
 // The canonical parser is the AST-literal syntax for tests whose subject isn't a
 // particular format (here: null-stripping), so they don't depend on JSON reading.
 const CanonicalParser = @import("canonical/parser.zig");
-const TomlParser = @import("toml/parser.zig");
-const TomlPrinter = @import("toml/printer.zig");
-const ZonParser = @import("zon/parser.zig");
-const ZonPrinter = @import("zon/printer.zig");
+const TomlParser = @import("languages/toml/parser.zig");
+const TomlPrinter = @import("languages/toml/printer.zig");
+const ZonParser = @import("languages/zon/parser.zig");
+const ZonPrinter = @import("languages/zon/printer.zig");
 
 /// Parse `input` with `Parser`, run `decode` then `encode(target)`, print with
 /// `Printer`, all inside `arena`. Returns the printed bytes (arena-owned).
