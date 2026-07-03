@@ -327,8 +327,10 @@ const Help = struct {
             \\  Removes the entry the path points at. The last path segment decides:
             \\    a.b.key      -> delete that mapping entry (with its own comments)
             \\    a.list[2]    -> remove item 2 from the sequence a.list
+            \\    a.list[-]    -> remove the last item of the sequence a.list
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
+            \\    [-] or [$] in place of an index means "the last item"
             \\  .md/.markdown files: edits the YAML frontmatter in place.
             \\
         , .{binary_name});
@@ -1508,9 +1510,11 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
                 while (i < path.len and path[i] != ']') : (i += 1) {}
                 if (i >= path.len or i == start) return error.InvalidPath;
 
-                // `[-]` and `[$]` are the "end" tokens used by `insert` to append;
-                // everything else is a literal index. The sentinel resolves to no
-                // real item, so non-insert callers just see a NotFound.
+                // `[-]` and `[$]` are the "end" tokens: `insert` reads the
+                // sentinel as "append", and `delete` reads it as "the last
+                // item" (`editor.removeSeqItem` special-cases it). Any other
+                // caller that walks the path literally (e.g. `get`) just
+                // sees an out-of-range index and surfaces NotFound.
                 const inner = path[start..i];
                 log.debug("number: {s}", .{inner});
                 const seg: fig.AST.PathSegment = if (std.mem.eql(u8, inner, "-") or std.mem.eql(u8, inner, "$"))

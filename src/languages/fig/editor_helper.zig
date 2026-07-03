@@ -724,6 +724,45 @@ test "fig inline array append onto a multi-line one-item-per-line array" {
     try expectFigSource(&ed, "contents = [\n  a,\n  b,\n  c,\n]\n");
 }
 
+test "fig remove last flow item via the [-] end sentinel" {
+    // `removeSeqItem` treats `std.math.maxInt(usize)` — the same sentinel
+    // `parsePath` produces for `contents[-]`/`contents[$]` — as "the last
+    // item", so delete can address the end symmetrically with append.
+    var ed = try newFigEditor("ports = [1, 2, 3]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "ports" }}, std.math.maxInt(usize));
+    try expectFigSource(&ed, "ports = [1, 2]\n");
+}
+
+test "fig remove last item of a multi-line trailing-comma array (regression)" {
+    // Regression: appending to this shape used to leave the array such that
+    // removing the new last item (found via a preceding-comma backward scan
+    // that only skipped spaces/tabs, not newlines) left the item's own
+    // trailing comma dangling with nothing before it — an empty element that
+    // failed to reparse. The scan must cross the newline to find the real
+    // separator comma.
+    var ed = try newFigEditor("contents = [\n  a,\n  b,\n]\n");
+    defer ed.deinit();
+    try ed.appendToSeq(&.{.{ .key = "contents" }}, "c");
+    try expectFigSource(&ed, "contents = [\n  a,\n  b,\n  c,\n]\n");
+    try ed.removeSeqItem(&.{.{ .key = "contents" }}, std.math.maxInt(usize));
+    try expectFigSource(&ed, "contents = [\n  a,\n  b,\n]\n");
+}
+
+test "fig remove middle item of a multi-line one-item-per-line array" {
+    var ed = try newFigEditor("contents = [\n  a,\n  b,\n  c,\n]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "contents" }}, 1);
+    try expectFigSource(&ed, "contents = [\n  a,\n  c,\n]\n");
+}
+
+test "fig remove first item of a multi-line one-item-per-line array" {
+    var ed = try newFigEditor("contents = [\n  a,\n  b,\n  c,\n]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "contents" }}, 0);
+    try expectFigSource(&ed, "contents = [\n  b,\n  c,\n]\n");
+}
+
 // --- renameContainer: no dedicated op — replaceKeyAtPath already does it ---
 
 test "fig rename a container's key via the generic replaceKeyAtPath" {

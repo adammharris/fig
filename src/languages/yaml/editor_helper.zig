@@ -323,6 +323,32 @@ test "yaml remove flow seq first" {
     try expectSource(&ed, "t: [b]\n");
 }
 
+test "yaml remove last flow item via the [-] end sentinel" {
+    var ed = try newYamlEditor("t: [a, b, c]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "t" }}, std.math.maxInt(usize));
+    try expectSource(&ed, "t: [a, b]\n");
+}
+
+test "yaml remove last item of a multi-line trailing-comma flow seq (regression)" {
+    // Regression: the backward scan for the preceding separator comma only
+    // skipped spaces/tabs, not newlines, so it never found the previous
+    // item's comma across a one-item-per-line layout — leaving the removed
+    // item's own trailing comma dangling as an empty element that failed to
+    // reparse.
+    var ed = try newYamlEditor("t: [\n  a,\n  b,\n]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "t" }}, std.math.maxInt(usize));
+    try expectSource(&ed, "t: [\n  a,\n]\n");
+}
+
+test "yaml remove middle item of a multi-line one-item-per-line flow seq" {
+    var ed = try newYamlEditor("t: [\n  a,\n  b,\n  c,\n]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "t" }}, 1);
+    try expectSource(&ed, "t: [\n  a,\n  c,\n]\n");
+}
+
 // --- atomicity ---
 
 test "yaml failed edit rolls back source and keeps editor usable" {

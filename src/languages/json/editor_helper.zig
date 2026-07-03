@@ -170,3 +170,23 @@ test "json5 array append onto a multi-line one-item-per-line array" {
         \\}
     );
 }
+
+test "json5 remove last item of a multi-line trailing-comma array (regression)" {
+    var ed = try newJson5Editor(
+        \\{
+        \\  ports: [
+        \\    1,
+        \\    2,
+        \\  ],
+        \\}
+    );
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "ports" }}, std.math.maxInt(usize));
+    try expectJson5Source(&ed,
+        \\{
+        \\  ports: [
+        \\    1,
+        \\  ],
+        \\}
+    );
+}

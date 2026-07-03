@@ -508,18 +508,30 @@ pub fn Editor(comptime Language: type) type {
             try self.insertSeqLine(line_start, dash_col, value_text);
         }
 
-        /// Remove the item at `index` from the sequence at `path`.
+        /// Remove the item at `index` from the sequence at `path`. `index ==
+        /// std.math.maxInt(usize)` is the "end" sentinel — the same one
+        /// `parsePath` produces for the `[-]`/`[$]` append token — and means
+        /// "the last item" here, so `contents[-]` deletes symmetrically with
+        /// how it appends.
         pub fn removeSeqItem(self: *Self, path: []const AST.PathSegment, index: usize) !void {
             const parsed = try self.getParsed();
             const node = try parsed.ast.getValByPath(path);
             if (node.kind != .sequence) return error.NotASequence;
             const span = parsed.span(node);
             const source = self.source.items;
-            var item = (try parsed.ast.child(&node)) orelse return error.NotFound;
-            for (0..index) |_| item = parsed.ast.next(&item) orelse return error.NotFound;
+            const first = (try parsed.ast.child(&node)) orelse return error.NotFound;
+            var item = first;
+            var is_first = true;
+            if (index == std.math.maxInt(usize)) {
+                item = (try parsed.ast.lastChild(&node)) orelse return error.NotFound;
+                is_first = item.id == first.id;
+            } else {
+                for (0..index) |_| item = parsed.ast.next(&item) orelse return error.NotFound;
+                is_first = index == 0;
+            }
             const item_span = parsed.span(item);
             if (isFlow(source, span)) {
-                try self.removeFlowItem(item_span, index == 0);
+                try self.removeFlowItem(item_span, is_first);
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
@@ -1171,24 +1183,44 @@ pub fn Editor(comptime Language: type) type {
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 
+        /// Whitespace the flow-item scan may cross while hunting for the
+        /// adjoining comma: spaces/tabs plus newlines, so a one-item-per-line
+        /// layout (item on its own indented line) is treated the same as a
+        /// packed single-line layout.
+        fn isFlowItemWs(c: u8) bool {
+            return c == ' ' or c == '\t' or c == '\n';
+        }
+
         fn removeFlowItem(self: *Self, item_span: Span, is_first: bool) !void {
             const source = self.source.items;
             if (is_first) {
-                // Drop the item and a following ", " if present.
+                // Drop the item and a following ", " if present. Consuming
+                // forward through trailing whitespace *including newlines*
+                // means a standalone-line item's own indentation-and-newline
+                // goes with it, leaving the next item on the line the
+                // removed item's leading indent occupied — not a stray
+                // blank line.
                 var e = item_span.end;
-                while (e < source.len and (source[e] == ' ' or source[e] == '\t')) e += 1;
+                while (e < source.len and isFlowItemWs(source[e])) e += 1;
                 if (e < source.len and source[e] == ',') {
                     e += 1;
-                    while (e < source.len and (source[e] == ' ' or source[e] == '\t')) e += 1;
+                    while (e < source.len and isFlowItemWs(source[e])) e += 1;
                 }
                 try self.replaceAtSpan(Span.init(item_span.start, e), "");
             } else {
-                // Drop a preceding ", " and the item.
+                // Drop a preceding ", " and the item. Scanning backward
+                // across newlines (not just spaces/tabs) is what lets this
+                // find the *previous* item's separator comma when the
+                // removed item sits alone on its own line — otherwise the
+                // scan stops at the newline and leaves the removed item's
+                // own trailing comma (if the array uses a trailing-comma
+                // style) dangling with nothing before it, which fails to
+                // reparse as an empty element.
                 var s = item_span.start;
-                while (s > 0 and (source[s - 1] == ' ' or source[s - 1] == '\t')) s -= 1;
+                while (s > 0 and isFlowItemWs(source[s - 1])) s -= 1;
                 if (s > 0 and source[s - 1] == ',') {
                     s -= 1;
-                    while (s > 0 and (source[s - 1] == ' ' or source[s - 1] == '\t')) s -= 1;
+                    while (s > 0 and isFlowItemWs(source[s - 1])) s -= 1;
                 }
                 try self.replaceAtSpan(Span.init(s, item_span.end), "");
             }

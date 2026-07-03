@@ -983,6 +983,17 @@ test "toml inline array append onto a multi-line one-item-per-line array" {
     try expectTomlSource(&ed, "ports = [\n  1,\n  2,\n  3,\n]\n");
 }
 
+test "toml remove last item of a multi-line trailing-comma inline array (regression)" {
+    // Same class of bug as the append regression above, on the delete side:
+    // the backward scan for the preceding comma didn't cross newlines, so
+    // removing the last item left its own trailing comma dangling as an
+    // empty element that failed to reparse.
+    var ed = try newTomlEditor("ports = [\n  1,\n  2,\n]\n");
+    defer ed.deinit();
+    try ed.removeSeqItem(&.{.{ .key = "ports" }}, std.math.maxInt(usize));
+    try expectTomlSource(&ed, "ports = [\n  1,\n]\n");
+}
+
 test "toml inline array ops on array-of-tables are refused" {
     var ed = try newTomlEditor("[[fruit]]\nname = \"apple\"\n");
     defer ed.deinit();
