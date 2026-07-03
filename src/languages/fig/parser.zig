@@ -301,6 +301,10 @@ cur_line_start: usize = 0,
 /// Authoring-time lints collected during the pass (arena-backed; duped out to
 /// the caller by `parseWithReport`). Empty unless a warn site fired.
 warnings: std.ArrayList(Warning) = .empty,
+/// `PendingContainer.reentries` resolved to built node ids during AST
+/// assembly (arena-backed; duped out to `Document.reentry_headers`). Empty
+/// unless some header re-opened an existing container.
+built_reentries: std.ArrayList(Document.ReentryHeader) = .empty,
 
 // ── Intermediate tree types ─────────────────────────────────────────────────
 
@@ -313,6 +317,17 @@ const PendingContainer = struct {
     closed: bool = false,
     mapping: Mapping = .{},
     sequence: Sequence = .{},
+    /// Byte offsets (source order) of every LATER header line whose final path
+    /// segment re-OPENED this container (DESIGN.md "re-entering a path to add
+    /// new keys is fine") — the header-line positions the owning `TNode.span`
+    /// cannot carry, since it is stamped once at creation. Only header-FINAL
+    /// re-opens are recorded: a header/assignment whose final segment CREATES
+    /// something new anchors its own line through that new node's span, and a
+    /// mid-path re-open always rides a line anchored by its final segment one
+    /// way or the other. Threaded out to `Document.reentry_headers` (keyed by
+    /// built node id) during AST assembly, so `Editor(Fig)`'s region gather
+    /// can remove/relocate every physical header occurrence.
+    reentries: std.ArrayList(usize) = .empty,
 
     fn open(self: *PendingContainer) Error!*PendingContainer {
         return if (self.closed) error.FigClosedFlowValue else self;
@@ -442,6 +457,7 @@ const Resolved = struct { container: *PendingContainer, owner: *TNode, entry: ?*
 pub fn parseAbstract(allocator: Allocator, input: []const u8, format: Type) !AST {
     const parsed = try parse(allocator, input, format);
     allocator.free(parsed.node_spans);
+    allocator.free(parsed.reentry_headers);
     return parsed.ast;
 }
 
@@ -485,8 +501,10 @@ fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Repor
     var ast = try b.finish(root_id);
     errdefer ast.deinit();
     const node_spans = try b.takeSpans();
+    errdefer allocator.free(node_spans);
+    const reentry_headers = try allocator.dupe(Document.ReentryHeader, self.built_reentries.items);
 
-    return .{ .source = input, .ast = ast, .node_spans = node_spans };
+    return .{ .source = input, .ast = ast, .node_spans = node_spans, .reentry_headers = reentry_headers };
 }
 
 /// Return `err` with the diagnostic caret pinned to `offset` — for the sites
@@ -1002,6 +1020,9 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
                     .container => |cc| try cc.open(),
                     else => return error.FigDuplicateKey,
                 };
+                // A header re-opening an existing container: record this
+                // line's position on it (see `PendingContainer.reentries`).
+                try c.reentries.append(self.allocator, k.span.start);
                 return .{ .container = c, .owner = &e.value, .entry = e };
             }
             const child = try self.allocator.create(PendingContainer);
@@ -1022,6 +1043,12 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
                             .container => |cc| try cc.open(),
                             else => return error.FigKeyNotContainer,
                         };
+                        // An `xs[i]` header re-opening an existing element —
+                        // the index-addressed twin of the `.key` re-open
+                        // above. No key span exists for an index step; the
+                        // line start is the same-line anchor the region
+                        // gather needs.
+                        try c.reentries.append(self.allocator, self.cur_line_start);
                         return .{ .container = c, .owner = el, .entry = null };
                     } else if (n == s.elements.items.len) {
                         const child = try self.allocator.create(PendingContainer);
@@ -1638,7 +1665,9 @@ fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!Bu
                 end = @max(end, e.value.span.end);
                 try kv_ids.append(self.allocator, kv_id);
             }
-            return .{ .id = try b.addMappingFromEntries(kv_ids.items), .end = end };
+            const id = try b.addMappingFromEntries(kv_ids.items);
+            try self.recordReentries(c, id);
+            return .{ .id = id, .end = end };
         },
         .sequence => {
             var ids: std.ArrayList(AST.Node.Id) = .empty;
@@ -1649,8 +1678,18 @@ fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!Bu
                 for (el.leading.items) |lc| try b.addLeadingComment(el_id, lc);
                 try ids.append(self.allocator, el_id);
             }
-            return .{ .id = try b.addSequence(ids.items), .end = end };
+            const id = try b.addSequence(ids.items);
+            try self.recordReentries(c, id);
+            return .{ .id = id, .end = end };
         },
+    }
+}
+
+/// Resolve `c`'s recorded re-entry header-line offsets (if any) to the built
+/// node id `id` — the `PendingContainer` → `Document.reentry_headers` bridge.
+fn recordReentries(self: *Parser, c: *const PendingContainer, id: AST.Node.Id) Error!void {
+    for (c.reentries.items) |off| {
+        try self.built_reentries.append(self.allocator, .{ .node_id = id, .content_start = off });
     }
 }
 
@@ -1751,6 +1790,27 @@ test "nested containers via markers" {
     defer ast.deinit();
     try testing.expectEqualStrings("localhost", (try ast.getValByPath(&.{ .{ .key = "database" }, .{ .key = "host" } })).kind.string);
     try testing.expectEqualStrings("10", (try ast.getValByPath(&.{ .{ .key = "database" }, .{ .key = "pool" }, .{ .key = "size" } })).kind.number.raw);
+}
+
+test "reentry_headers records every header-final re-open, keyed by node id" {
+    const src = "database\n> x = 1\nother = 1\ndatabase\n> y = 2\n";
+    const parsed = try parse(testing.allocator, src, .Fig);
+    defer parsed.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), parsed.reentry_headers.len);
+    const rh = parsed.reentry_headers[0];
+    const db = try parsed.ast.getValByPath(&.{.{ .key = "database" }});
+    try testing.expectEqual(db.id, rh.node_id);
+    // Anchored at the SECOND "database" header line (the re-open), which the
+    // creating line's span cannot carry.
+    try testing.expectEqual(std.mem.lastIndexOf(u8, src, "database").?, rh.content_start);
+}
+
+test "reentry_headers is empty without re-entry" {
+    const parsed = try parse(testing.allocator, "database\n> x = 1\ndatabase.pool\n> y = 2\n", .Fig);
+    defer parsed.deinit(testing.allocator);
+    // `database.pool` CREATES pool (anchored by pool's own span) — a deeper
+    // dotted path is not a re-open of `database` itself.
+    try testing.expectEqual(@as(usize, 0), parsed.reentry_headers.len);
 }
 
 test "dotted key flattener" {

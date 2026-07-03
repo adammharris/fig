@@ -30,27 +30,35 @@
 //! DESIGN.md's `[a]`/`[other]`/`[a.b]` example translated to `a`/`other`/
 //! `a.b`) for free.
 //!
-//! ## Scope (documented, not silent)
+//! ## Re-entered headers (`Document.reentry_headers`)
 //!
 //! fig uniquely also allows the exact SAME header path to be **re-entered**
 //! verbatim (`database` written a second time, or `> pool` reopened later in
 //! the same parent's body) to add more keys (DESIGN.md "Re-entering a path to
-//! add new keys is fine") — the one shape `gatherContainerRegions` cannot
-//! discover on its own, since only the FIRST occurrence's header-line position
-//! is tracked (`TNode.span.start`, stamped once at creation). Deleting/moving
-//! such a container still gathers every child correctly (they are all in the
-//! node's one merged AST mapping regardless of which physical occurrence
-//! wrote them) but only removes the FIRST header line, leaving any later
-//! reopened header line orphaned with nothing under it — `FigEmptyContainer`
-//! on the reparse `replaceAtSpan` always does, so the edit fails safely
-//! (rolled back), never corrupts. `replaceValAtPath` overwriting such a
-//! container's entire value in one splice carries the same narrow gap.
-//! Index-addressed (`xs[i]`) elements built from more than one disjoint
-//! top-level assignment are the sequence-side analogue; DESIGN.md already
-//! flags `[i]` addressing itself as the edit-fragile, not-for-authoring
-//! surface (`[]`/`+`/`> *` are the primary, always-contiguous ways to build a
-//! list), so this is a pre-existing, self-selecting rarity rather than a new
-//! footgun.
+//! add new keys is fine") — and `fig fmt`'s own grouped hoisting EMITS this
+//! shape (a second flat-sibling run re-enters its section header), so the
+//! gather must handle it, not merely fail safe on it. A container's node span
+//! anchors only the line that CREATED it (`TNode.span.start`, stamped once),
+//! so a later re-entering header line is in no child's span and a span-only
+//! gather would orphan it — an empty reopened header, `FigEmptyContainer` on
+//! the reparse, whole edit rolled back. The fix is exact, not heuristic: the
+//! parser records every header-final re-open (`resolveHeaderFinal` — verbatim
+//! re-entry, a dotted path whose final segment re-selects an existing
+//! container, and `xs[i]` re-opening an element alike) into
+//! `Document.reentry_headers`, and `appendReentryHeaderLines` folds those
+//! extra header lines into the region set wherever a container's own header
+//! line is gathered.
+//!
+//! ## Scope (documented, not silent)
+//!
+//! `replaceValAtPath` overwriting a re-entered/scattered container's entire
+//! value in ONE splice still carries a narrow gap (it replaces the node's
+//! widened span, which is not region-aware); the reparse-rollback net keeps
+//! it safe. And deleting a container whose removal leaves an ANCESTOR header
+//! childless (e.g. `a.b` when `b` was `a`'s only child and `a` was written as
+//! a header) still rolls back via `FigEmptyContainer` — the cascade
+//! ("also delete the now-empty ancestor header") is deliberately not implied
+//! by a delete of the child path.
 
 const std = @import("std");
 
@@ -285,10 +293,26 @@ fn gatherChild(parsed: Document, source: []const u8, allocator: std.mem.Allocato
                 try out.append(allocator, entryLineRegion(source, own_span));
             } else {
                 try out.append(allocator, headerLineRegion(source, val_span.start));
+                try appendReentryHeaderLines(parsed, source, allocator, val.id, out);
                 try gatherContainerRegions(parsed, source, allocator, val, out);
             }
         },
         else => try out.append(allocator, entryLineRegion(source, own_span)),
+    }
+}
+
+/// Append the header-line region of every LATER header that re-OPENED the
+/// container `node_id` (`Document.reentry_headers`, recorded by the parser at
+/// each `resolveHeaderFinal` re-open). A container's own span anchors only the
+/// line that CREATED it; these are the extra physical occurrences — the exact
+/// same header re-entered verbatim, a dotted path re-selecting an existing
+/// container, or an `[i]` header re-opening an element — that would otherwise
+/// be left orphaned (and trip `FigEmptyContainer` on the reparse) when the
+/// container is deleted or moved. Linear scan: the table is empty for the
+/// overwhelming majority of documents.
+fn appendReentryHeaderLines(parsed: Document, source: []const u8, allocator: std.mem.Allocator, node_id: AST.Node.Id, out: *std.ArrayList(Region)) std.mem.Allocator.Error!void {
+    for (parsed.reentry_headers) |rh| {
+        if (rh.node_id == node_id) try out.append(allocator, headerLineRegion(source, rh.content_start));
     }
 }
 
@@ -366,13 +390,14 @@ fn gatherKeyedContainer(parsed: Document, source: []const u8, allocator: std.mem
     var regions: std.ArrayList(Region) = .empty;
     errdefer regions.deinit(allocator);
     try regions.append(allocator, headerLineRegion(source, span.start));
+    try appendReentryHeaderLines(parsed, source, allocator, node.id, &regions);
     try gatherContainerRegions(parsed, source, allocator, node, &regions);
     return .{ .node = node, .regions = regions };
 }
 
 /// Delete the whole block (non-flow) mapping or sequence named by `path` —
-/// its own header line plus every region of its subtree (see the module doc
-/// comment for the gather algorithm and its one scope gap). `path` may end in
+/// its own header line(s) — re-entered occurrences included — plus every
+/// region of its subtree (see the module doc comment). `path` may end in
 /// a key or an index (deleting one sequence element entire — though
 /// `removeSeqItem` is the more direct primitive for that). A scalar or
 /// flow-valued target is refused with `error.NotAContainer` (use `deleteKey`/
@@ -834,16 +859,62 @@ test "fig deleteContainer on a flow-valued key is refused" {
     try expectFigSource(&ed, "p = { x = 1 }\n");
 }
 
-test "fig deleteContainer on a re-entered header fails safely instead of corrupting" {
+test "fig delete a verbatim re-entered header removes every occurrence" {
     // The exact same header (`database`, not a deeper dotted path) written
-    // twice — the one shape gather can't fully discover (see the module doc
-    // comment). Deleting removes every gathered child, orphaning the SECOND
-    // "database" line with nothing under it; `FigEmptyContainer` on the
-    // reparse then rolls the whole edit back rather than leaving a broken file.
+    // twice — the shape spans alone can't discover; found via the parser's
+    // `Document.reentry_headers` record (see the module doc comment). Both
+    // header lines and every child go; the foreign sibling stays put.
     var ed = try newFigEditor("database\n> x = 1\nother = 1\ndatabase\n> y = 2\n");
     defer ed.deinit();
-    try std.testing.expectError(error.FigEmptyContainer, ed.deleteContainer(&.{.{ .key = "database" }}));
-    try expectFigSource(&ed, "database\n> x = 1\nother = 1\ndatabase\n> y = 2\n");
+    try ed.deleteContainer(&.{.{ .key = "database" }});
+    try expectFigSource(&ed, "other = 1\n");
+}
+
+test "fig delete a re-entered NESTED header removes the reopened line too" {
+    // `> pool` reopened later inside the same parent's body — the nested twin
+    // of the verbatim root re-entry (same `resolveHeaderFinal` record).
+    var ed = try newFigEditor("database\n> pool\n>> a = 1\n> pool\n>> b = 2\n> keep = 1\n");
+    defer ed.deinit();
+    try ed.deleteContainer(&.{ .{ .key = "database" }, .{ .key = "pool" } });
+    try expectFigSource(&ed, "database\n> keep = 1\n");
+}
+
+test "fig delete a container re-opened by a dotted header's final segment" {
+    // `b` is CREATED by the dotted assignment `> b.x = 1` (so its span
+    // anchors that line), then RE-OPENED by the `a.b` section header — a
+    // deeper-dotted-path line that is in no child's span. The re-entry record
+    // is what removes it.
+    var ed = try newFigEditor("a\n> keep = 1\n> b.x = 1\nother = 1\na.b\n> y = 2\n");
+    defer ed.deinit();
+    try ed.deleteContainer(&.{ .{ .key = "a" }, .{ .key = "b" } });
+    try expectFigSource(&ed, "a\n> keep = 1\nother = 1\n");
+}
+
+test "fig delete a sequence whose element header is re-opened by index" {
+    // `xs[0]` written twice: the first creates element 0, the second re-opens
+    // it (`resolveHeaderFinal`'s index twin of the key re-open).
+    var ed = try newFigEditor("xs[0]\n> a = 1\nxs[0]\n> b = 2\nother = 1\n");
+    defer ed.deinit();
+    try ed.deleteContainer(&.{.{ .key = "xs" }});
+    try expectFigSource(&ed, "other = 1\n");
+}
+
+test "fig delete carries a re-entered header's own leading comment" {
+    var ed = try newFigEditor("database\n> x = 1\nother = 1\n# more database\ndatabase\n> y = 2\n");
+    defer ed.deinit();
+    try ed.deleteContainer(&.{.{ .key = "database" }});
+    try expectFigSource(&ed, "other = 1\n");
+}
+
+test "fig delete leaving an ANCESTOR header childless fails safely" {
+    // The documented residual edge (module doc "Scope"): removing `a.b`
+    // leaves the `a` header with nothing under it. The cascade delete is
+    // deliberately not implied; `FigEmptyContainer` on the reparse rolls the
+    // edit back instead of leaving a bare childless container behind.
+    var ed = try newFigEditor("a\n> b\n>> x = 1\nother = 1\n");
+    defer ed.deinit();
+    try std.testing.expectError(error.FigEmptyContainer, ed.deleteContainer(&.{ .{ .key = "a" }, .{ .key = "b" } }));
+    try expectFigSource(&ed, "a\n> b\n>> x = 1\nother = 1\n");
 }
 
 // --- moveContainer ---
@@ -867,6 +938,17 @@ test "fig move a dotted-re-entry-scattered container collapses fragments contigu
     defer ed.deinit();
     try ed.moveContainer(&.{.{ .key = "a" }}, null);
     try expectFigSource(&ed, "b\n> y = 2\n\na\n> x = 1\na.c\n> z = 3\n");
+}
+
+test "fig move a verbatim re-entered container relocates both occurrences" {
+    // Both physical `database` blocks (the creating header and the verbatim
+    // re-entry, found via `Document.reentry_headers`) move contiguously; the
+    // re-entered spelling itself is preserved — still-valid fig that parses
+    // to the same merged mapping.
+    var ed = try newFigEditor("database\n> x = 1\nother = 1\ndatabase\n> y = 2\n");
+    defer ed.deinit();
+    try ed.moveContainer(&.{.{ .key = "database" }}, null);
+    try expectFigSource(&ed, "other = 1\n\ndatabase\n> x = 1\ndatabase\n> y = 2\n");
 }
 
 test "fig move destination inside the source is a no-op" {
