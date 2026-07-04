@@ -962,7 +962,12 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
     switch (last) {
         .key => |k| {
             const m = try parent.asMapping();
-            if (self.findEntry(m, k.name) != null) return error.FigDuplicateKey;
+            // `consumeLineEnd` above has already advanced `self.pos` past this
+            // line's newline (onto the START of the next line) — the default
+            // "current cursor" anchor would misattribute the diagnostic to
+            // whatever follows. Pin it to the actual conflicting key's own
+            // span instead.
+            if (self.findEntry(m, k.name) != null) return self.failSpan(k.span.start, k.span.end, error.FigDuplicateKey);
             const entry = try self.allocator.create(MEntry);
             entry.* = .{ .key = k.name, .key_span = k.span, .value = value_node };
             try self.appendComments(&entry.key_leading, leading);

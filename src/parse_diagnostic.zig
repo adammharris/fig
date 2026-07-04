@@ -27,13 +27,23 @@ const Allocator = std.mem.Allocator;
 /// 1-based line/column plus the full offending source line.
 pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
 
-/// Locate `offset` in `source`. A cursor resting exactly past a newline means
-/// the problem was detected while finishing the previous line (an unclosed
-/// container at EOF, a duplicate key noticed only once the value is attached,
-/// …) — report end-of-that-line, not column 1 of an empty next one.
+/// Locate `offset` in `source`. A cursor resting exactly past a newline is
+/// ambiguous from the offset alone: it could mean "the problem was noticed
+/// while finishing the previous line" (an unclosed container discovered only
+/// at EOF) — report end-of-that-line, not column 1 of an empty next one — OR
+/// it could be a token that genuinely STARTS at column 1 of a real next line
+/// (e.g. a duplicate TOML key/table: almost every top-level statement has no
+/// indentation at all, so its span starts exactly here). Only backtrack in
+/// the FORMER case, when there is nothing at `at` to point at instead (EOF,
+/// or another blank line) — a real token at column 1 must be attributed to
+/// ITS OWN line, never silently reattributed to the one before it.
 pub fn locateOffset(source: []const u8, offset: usize) Location {
     var at = @min(offset, source.len);
-    if (at > 0 and source[at - 1] == '\n') at -= 1;
+    if (at > 0 and source[at - 1] == '\n' and
+        (at >= source.len or source[at] == '\n' or source[at] == '\r'))
+    {
+        at -= 1;
+    }
     var line: usize = 1;
     var line_start: usize = 0;
     for (source[0..at], 0..) |c, i| {
@@ -97,12 +107,27 @@ test "locateOffset finds line/column and backtracks past a trailing newline" {
     try testing.expectEqual(@as(usize, 2), loc.column);
     try testing.expectEqualStrings("def", loc.line_text);
 
-    // Resting exactly past a newline (e.g. an EOF right after "abc\n") reports
+    // Resting exactly past a newline at true EOF (nothing follows) reports
     // the end of the PREVIOUS line, not column 1 of an empty next one.
     loc = locateOffset("abc\n", 4);
     try testing.expectEqual(@as(usize, 1), loc.line);
     try testing.expectEqual(@as(usize, 4), loc.column);
     try testing.expectEqualStrings("abc", loc.line_text);
+
+    // Same trailing-newline offset, but a BLANK line (not EOF) follows —
+    // still nothing there to point at, so this also backtracks.
+    loc = locateOffset("abc\n\ndef", 4);
+    try testing.expectEqual(@as(usize, 1), loc.line);
+    try testing.expectEqual(@as(usize, 4), loc.column);
+
+    // But when the offset right after a newline is the start of a line with
+    // REAL content (e.g. a token that genuinely begins at column 1 — the
+    // common case for a duplicate TOML key/table, which has no
+    // indentation), it must NOT be backtracked onto the previous line.
+    loc = locateOffset("abc\ndef\n", 4);
+    try testing.expectEqual(@as(usize, 2), loc.line);
+    try testing.expectEqual(@as(usize, 1), loc.column);
+    try testing.expectEqualStrings("def", loc.line_text);
 }
 
 test "renderReportAlloc renders file:line:col plus the source line and caret" {
