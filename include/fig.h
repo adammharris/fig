@@ -108,12 +108,12 @@ typedef enum FigStatus {
 } FigStatus;
 
 // Not every function accepts every member. fig_parse accepts all of them; the
-// editor (fig_editor_*) supports JSON/JSONC/JSON5/YAML/TOML (others return
+// editor (fig_editor_*) supports JSON/JSONC/JSON5/YAML/TOML/FIG (others return
 // FIG_STATUS_UNSUPPORTED_FORMAT); fig_value_serialize accepts
-// JSON/JSONC/JSON5/YAML/TOML/ZON (JSONC = plain-JSON syntax with comments). XML
-// is reader-only: accepted by fig_parse, rejected by the editor and serializer.
-// To query this matrix programmatically (it also depends on which formats this
-// build compiled in), call fig_format_capabilities below.
+// JSON/JSONC/JSON5/YAML/TOML/ZON/FIG (JSONC = plain-JSON syntax with comments).
+// XML is reader-only: accepted by fig_parse, rejected by the editor and
+// serializer. To query this matrix programmatically (it also depends on which
+// formats this build compiled in), call fig_format_capabilities below.
 typedef enum FigFormat {
     FIG_FORMAT_JSON = 1,
     FIG_FORMAT_JSONC = 2,
@@ -122,6 +122,10 @@ typedef enum FigFormat {
     FIG_FORMAT_ZON = 5,
     FIG_FORMAT_XML = 6,
     FIG_FORMAT_JSON5 = 7,
+    // The native `fig` authoring dialect (see src/languages/fig/DESIGN.md).
+    // Appended (not inserted) to keep the ABI values of the existing members
+    // stable, same as FIG_FORMAT_JSON5 before it.
+    FIG_FORMAT_FIG = 8,
 } FigFormat;
 
 // Capability bits, OR-combined in the return of fig_format_capabilities.
@@ -402,6 +406,8 @@ typedef enum FigEmbedType {
     FIG_EMBED_FRONTMATTER_YAML = 0,
     FIG_EMBED_FRONTMATTER_JSON = 1,
     FIG_EMBED_ENDMATTER_YAML   = 2,
+    // A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
+    FIG_EMBED_FRONTMATTER_FIG  = 3,
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in

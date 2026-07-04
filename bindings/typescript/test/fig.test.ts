@@ -30,6 +30,7 @@ test("parse to plain JS across formats", () => {
   assert.deepEqual(parse("name: fig\ntags:\n- a\n- b\n", Format.Yaml), { name: "fig", tags: ["a", "b"] });
   assert.deepEqual(parse("name = \"fig\"\nn = 7\n", Format.Toml), { name: "fig", n: 7 });
   assert.deepEqual(parse(".{ .name = \"fig\", .n = 3 }", Format.Zon), { name: "fig", n: 3 });
+  assert.deepEqual(parse("name = fig\nn = 42\n", Format.Fig), { name: "fig", n: 42 });
 });
 
 test("Document low-level traversal", () => {
@@ -90,6 +91,7 @@ test("serialize a Value to multiple formats", () => {
   ]);
   assert.equal(serialize(value, Format.Json), '{\n  "name": "fig",\n  "nums": [\n    1,\n    2\n  ]\n}\n');
   assert.equal(serialize(value, Format.Yaml), "name: fig\nnums:\n- 1\n- 2\n");
+  assert.equal(serialize(value, Format.Fig), "name = fig\nnums = [1, 2]\n");
 });
 
 test("serialize honors JSON pretty/compact options", () => {
@@ -215,6 +217,18 @@ test("Editor rejects JSON5-only syntax under strict Json", () => {
     () => Editor.open("{ host: 'localhost' }", Format.Json),
     (err: unknown) => err instanceof FigError && err.status === Status.ParseError,
   );
+});
+
+test("Editor edits the fig authoring dialect", () => {
+  using ed = Editor.open("title = old\nport = 8080\n", Format.Fig);
+  ed.replaceValue(["port"], 9090);
+  assert.equal(ed.source(), "title = old\nport = 9090\n");
+});
+
+test("Embed edits a ```fig fenced frontmatter block, fences and body intact", () => {
+  using fm = Embed.open("```fig\ntitle = Hi\n```\nbody\n", EmbedType.FrontmatterFig);
+  fm.set(["title"], "Yo");
+  assert.equal(fm.render(), "```fig\ntitle = Yo\n```\nbody\n");
 });
 
 test("Embed edits YAML frontmatter, fences and body intact", () => {
@@ -345,6 +359,8 @@ test("version and capabilities", () => {
   assert.equal(versionString(), `${v.major}.${v.minor}.${v.patch}`);
   const json = capabilities(Format.Json);
   assert.deepEqual(json, { read: true, edit: true, serialize: true });
+  const fig = capabilities(Format.Fig);
+  assert.deepEqual(fig, { read: true, edit: true, serialize: true });
 });
 
 test("Document.serialize converts cross-format", () => {

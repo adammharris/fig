@@ -27,6 +27,9 @@ pub enum EmbedType {
     FrontmatterJson,
     /// YAML in a trailing ```` ```endmatter ```` code block.
     EndmatterYaml,
+    /// ```` ```fig ```` … ```` ``` ```` frontmatter at the top of a markdown file,
+    /// in the native fig authoring dialect.
+    FrontmatterFig,
 }
 
 impl EmbedType {
@@ -35,6 +38,7 @@ impl EmbedType {
             EmbedType::FrontmatterYaml => ffi::FigEmbedType::FrontmatterYaml,
             EmbedType::FrontmatterJson => ffi::FigEmbedType::FrontmatterJson,
             EmbedType::EndmatterYaml => ffi::FigEmbedType::EndmatterYaml,
+            EmbedType::FrontmatterFig => ffi::FigEmbedType::FrontmatterFig,
         }
     }
 
@@ -43,6 +47,7 @@ impl EmbedType {
         match self {
             EmbedType::FrontmatterYaml | EmbedType::EndmatterYaml => Format::Yaml,
             EmbedType::FrontmatterJson => Format::Json,
+            EmbedType::FrontmatterFig => Format::Fig,
         }
     }
 }

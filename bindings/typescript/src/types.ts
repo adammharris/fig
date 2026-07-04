@@ -4,8 +4,9 @@ import { Status } from "./ffi.ts";
 export { Status };
 
 /** A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`/
- *  `Toml`; serialization additionally supports `Zon`. Values match the C ABI
- *  (`Json5 = 7` is appended, leaving a gap at the reader-only `Xml = 6`). */
+ *  `Toml`/`Fig`; serialization additionally supports `Zon`. Values match the C
+ *  ABI (`Json5 = 7` is appended, leaving a gap at the reader-only `Xml = 6`;
+ *  `Fig` is appended after it for the same reason). */
 export enum Format {
   Json = 1,
   Jsonc = 2,
@@ -13,6 +14,9 @@ export enum Format {
   Toml = 4,
   Zon = 5,
   Json5 = 7,
+  /** The native `fig` authoring dialect (see `src/languages/fig/DESIGN.md` in
+   *  the core repo) — a memorable, typeable surface over the same AST. */
+  Fig = 8,
 }
 
 /** Controls how {@link serialize} renders output. Omitted fields fall back to
@@ -110,6 +114,8 @@ export enum EmbedType {
   FrontmatterYaml = 0,
   FrontmatterJson = 1,
   EndmatterYaml = 2,
+  /** ```fig fenced frontmatter, in the native fig authoring dialect. */
+  FrontmatterFig = 3,
 }
 
 const STATUS_MESSAGE: Record<number, string> = {

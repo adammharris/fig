@@ -50,9 +50,16 @@ export interface Region {
 }
 
 /** The inner editing format an embed archetype carries (`---`/endmatter ⇒ YAML,
- *  `;;;` ⇒ JSON). */
+ *  `;;;` ⇒ JSON, ```fig ⇒ the fig authoring dialect). */
 function innerFormat(kind: EmbedType): Format {
-  return kind === EmbedType.FrontmatterJson ? Format.Json : Format.Yaml;
+  switch (kind) {
+    case EmbedType.FrontmatterJson:
+      return Format.Json;
+    case EmbedType.FrontmatterFig:
+      return Format.Fig;
+    default:
+      return Format.Yaml;
+  }
 }
 
 export class Embed extends Editable {

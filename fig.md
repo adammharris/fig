@@ -21,6 +21,7 @@ It currently supports the following formats:
 - TOML (1.1 and 1.2)
 - ZON (Zig Object Notation) (read, write, but no editing yet)
 - XML (experimental, read-only)
+- `fig`, a native authoring dialect over the same AST (see `src/languages/fig/DESIGN.md`)
 
 ## Usage
 
@@ -100,7 +101,6 @@ console.log(parse('{"name":"fig"}', Format.Json)); // { name: "fig" }
 
 ## Planned features
 
-- Native `.fig` format
 - Expand editor to include ZON
 - Publish Rust crate
 - Publish NPM package

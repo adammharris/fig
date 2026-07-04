@@ -41,6 +41,7 @@ fn main() {
         ("CARGO_FEATURE_TOML", "-Dtoml=false"),
         ("CARGO_FEATURE_ZON", "-Dzon=false"),
         ("CARGO_FEATURE_XML", "-Dxml=false"),
+        ("CARGO_FEATURE_FIG", "-Dfig=false"),
     ] {
         if env::var_os(feature).is_none() {
             command.arg(flag);

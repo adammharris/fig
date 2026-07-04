@@ -38,6 +38,8 @@ fn from_slice_deserializes_every_format() {
         b".{ .name = \"x\", .n = 5, .tags = .{ \"a\", \"b\" } }",
         Format::Zon,
     ));
+    #[cfg(feature = "fig")]
+    cases.push((b"name = \"x\"\nn = 5\ntags = [\"a\", \"b\"]\n", Format::Fig));
     for (src, format) in cases {
         let got: S = fig::from_slice(src, format).unwrap();
         assert_eq!(got, want, "mismatch for {format:?}");

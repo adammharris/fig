@@ -35,6 +35,8 @@ pub enum FigFormat {
     // variant, so it is intentionally omitted here; the discriminant gap is
     // deliberate to keep JSON5 at its stable ABI value.
     Json5 = 7,
+    // The native `fig` authoring dialect. Appended, same reasoning as JSON5.
+    Fig = 8,
 }
 
 pub enum FigDocument {}
@@ -394,6 +396,7 @@ pub enum FigEmbedType {
     FrontmatterYaml = 0,
     FrontmatterJson = 1,
     EndmatterYaml = 2,
+    FrontmatterFig = 3,
 }
 
 unsafe extern "C" {

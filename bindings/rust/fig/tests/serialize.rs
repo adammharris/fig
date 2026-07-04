@@ -296,3 +296,29 @@ fn json5_serializes_and_parses_back() {
         },
     );
 }
+
+#[test]
+#[cfg(feature = "fig")]
+fn fig_dialect_serializes_and_parses_back() {
+    // Proves `Format::Fig` (the native authoring dialect) is wired through both
+    // the writer and the reader: serialize emits `key = value` fig syntax, and
+    // the fig reader round-trips it back to the same logical value.
+    let value = map(vec![("host", "localhost".into()), ("port", 8080i64.into())]);
+
+    let text = value.serialize(Format::Fig).unwrap();
+    assert_eq!(text, "host = localhost\nport = 8080\n");
+
+    #[derive(Deserialize, PartialEq, Debug)]
+    struct Cfg {
+        host: String,
+        port: i64,
+    }
+    let back: Cfg = fig::from_slice(text.as_bytes(), Format::Fig).unwrap();
+    assert_eq!(
+        back,
+        Cfg {
+            host: "localhost".into(),
+            port: 8080,
+        },
+    );
+}

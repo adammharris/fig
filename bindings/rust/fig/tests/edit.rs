@@ -357,3 +357,21 @@ fn json_frontmatter_edits_in_json() {
         ";;;\n{\"title\": \"Hello\", \"draft\": true}\n;;;\n# Body\n",
     );
 }
+
+#[test]
+#[cfg(feature = "fig")]
+fn fig_dialect_editor_edits_in_place() {
+    let mut ed = Editor::open(b"title = old\nport = 8080\n", Format::Fig).unwrap();
+    ed.replace(&[Segment::Key("port")], &9090).unwrap();
+    assert_eq!(ed.source().unwrap(), "title = old\nport = 9090\n");
+}
+
+#[test]
+#[cfg(feature = "fig")]
+fn fig_dialect_frontmatter_embed_round_trips() {
+    // ```fig fenced frontmatter, in the native fig authoring dialect.
+    let md = "```fig\ntitle = Hi\n```\nbody\n";
+    let mut fm = Embed::open(md.as_bytes(), EmbedType::FrontmatterFig).unwrap();
+    fm.set(&[Segment::Key("title")], "Yo").unwrap();
+    assert_eq!(fm.render().unwrap(), "```fig\ntitle = Yo\n```\nbody\n");
+}

@@ -38,7 +38,7 @@ name = "fig"
 path = "src/lib.rs"
 
 [features]
-default = ["serde", "yaml", "toml", "zon", "xml"]
+default = ["serde", "yaml", "toml", "zon", "xml", "fig"]
 # Typed (de)serialization: `to_string`/`from_str`, the editor's `T: Serialize`
 # value methods, and serde impls for `Value`. Without it, the binding still
 # parses, edits, and serializes via the `Value` tree directly.
@@ -60,6 +60,7 @@ yaml = []
 toml = []
 zon = []
 xml = []
+fig = []
 
 [dependencies]
 serde = { version = "1", optional = true }

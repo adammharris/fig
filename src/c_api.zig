@@ -27,6 +27,9 @@ const ZonParser = if (build_options.lang_zon) @import("languages/zon/parser.zig"
 const ZonType = if (build_options.lang_zon) @import("languages/zon/zon.zig").Type else void;
 const XmlParser = if (build_options.lang_xml) @import("languages/xml/parser.zig") else void;
 const XmlType = if (build_options.lang_xml) @import("languages/xml/xml.zig").Type else void;
+const FigDialectParser = if (build_options.lang_fig) @import("languages/fig/parser.zig") else void;
+const FigDialectType = if (build_options.lang_fig) @import("languages/fig/fig.zig").Type else void;
+const FigDialectLang = if (build_options.lang_fig) @import("languages/fig/fig.zig").Language else void;
 // Cross-format conversion helpers used by `fig_document_serialize`. `Lossless` is
 // format-agnostic (always compiled in); `materialize` is YAML-only, so it follows
 // the gated-import pattern above (collapses to `void` when YAML is off, and every
@@ -65,9 +68,9 @@ pub const FigStatus = enum(c_int) {
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
 /// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
-/// `json`/`jsonc`/`json5`/`yaml`/`toml` (others return `unsupported_format`); the
-/// serializer (`fig_value_serialize`) accepts `json`/`jsonc`/`json5`/`yaml`/
-/// `toml`/`zon` (JSONC = plain-JSON syntax with comments).
+/// `json`/`jsonc`/`json5`/`yaml`/`toml`/`fig` (others return `unsupported_format`);
+/// the serializer (`fig_value_serialize`) accepts `json`/`jsonc`/`json5`/`yaml`/
+/// `toml`/`zon`/`fig` (JSONC = plain-JSON syntax with comments).
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
@@ -80,6 +83,9 @@ pub const FigFormat = enum(c_int) {
     /// JSON5: read, written, and edited (via `fig_editor_*`). Appended (not
     /// inserted) to keep the ABI values of the existing members stable.
     json5 = 7,
+    /// The native `fig` authoring dialect (see src/languages/fig/DESIGN.md).
+    /// Read, written, and edited (via `fig_editor_*`). Appended, same as JSON5.
+    fig = 8,
 };
 
 // ==================
@@ -150,6 +156,7 @@ pub export fn fig_format_capabilities(format: c_int) u32 {
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | edit | serialize else 0,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | serialize else 0,
         @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read else 0,
+        @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) read | edit | serialize else 0,
         else => 0,
     };
 }
@@ -299,6 +306,7 @@ pub export fn fig_parse_ex(
         @intFromEnum(FigFormat.toml) => .toml,
         @intFromEnum(FigFormat.zon) => .zon,
         @intFromEnum(FigFormat.xml) => .xml,
+        @intFromEnum(FigFormat.fig) => .fig,
         else => return fillError(out_err, .unsupported_format, "unsupported or unknown format"),
     };
 
@@ -348,6 +356,11 @@ pub export fn fig_parse_ex(
             return formatDisabled(out_err, source, handle),
         .xml => if (comptime build_options.lang_xml)
             XmlParser.parse(allocator, source, XmlType.XML_1_0) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .fig => if (comptime build_options.lang_fig)
+            FigDialectParser.parse(allocator, source, FigDialectType.Fig) catch |err|
                 return parseFailed(out_err, err, source, handle)
         else
             return formatDisabled(out_err, source, handle),
@@ -735,17 +748,19 @@ pub const FigEditor = opaque {};
 
 // The editor backends, shared by the document editor and the embed editor: a
 // tagged union with one variant per editable language COMPILED INTO THIS BUILD
-// (json/yaml/toml; zon/xml are not editable). The type is assembled from only the
-// enabled languages — rather than carrying `void` placeholder fields — so the
-// `inline else` switches over `handle.inner` stay valid: every variant has a real
-// `Editor` payload to act on. Building it from a list (instead of enumerating the
-// 2^3 enable combinations by hand) is what keeps adding a gate cheap.
+// (json/yaml/toml/fig; zon/xml are not editable). The type is assembled from
+// only the enabled languages — rather than carrying `void` placeholder fields —
+// so the `inline else` switches over `handle.inner` stay valid: every variant
+// has a real `Editor` payload to act on. Building it from a list (instead of
+// enumerating the 2^4 enable combinations by hand) is what keeps adding a gate
+// cheap.
 const editor_variants = blk: {
     const Variant = struct { name: [:0]const u8, Lang: type };
     var variants: []const Variant = &.{};
     if (build_options.lang_json) variants = variants ++ &[_]Variant{.{ .name = "json", .Lang = JsonLang }};
     if (build_options.lang_yaml) variants = variants ++ &[_]Variant{.{ .name = "yaml", .Lang = YamlLang }};
     if (build_options.lang_toml) variants = variants ++ &[_]Variant{.{ .name = "toml", .Lang = TomlLang }};
+    if (build_options.lang_fig) variants = variants ++ &[_]Variant{.{ .name = "fig", .Lang = FigDialectLang }};
     break :blk variants;
 };
 
@@ -810,6 +825,7 @@ pub export fn fig_editor_create(
         @intFromEnum(FigFormat.json5) => if (comptime build_options.lang_json) .json5 else return .unsupported_format,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else return .unsupported_format,
+        @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else return .unsupported_format,
         else => return .unsupported_format,
     };
 
@@ -829,6 +845,7 @@ pub export fn fig_editor_create(
         // outside the edited span.
         .json5 => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator, .format = .JSON5 } } else unreachable,
         .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
+        .fig => if (comptime build_options.lang_fig) .{ .fig = .{ .allocator = allocator } } else unreachable,
         // Filtered out by the format switch above; editing these is not yet wired.
         .zon, .xml => unreachable,
     };
@@ -1251,9 +1268,7 @@ pub const FigEmbedType = enum(c_int) {
     frontmatter_yaml = 0,
     frontmatter_json = 1,
     endmatter_yaml = 2,
-    /// Locate/extract-only (`fig_embed_extract`): fig is not yet an editable
-    /// language in this C ABI (see `embedInnerSupported`), so `fig_embed_open`
-    /// and `fig_embed_open_or_init` report `unsupported_format` for it.
+    /// A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
     frontmatter_fig = 3,
 };
 
@@ -1346,16 +1361,15 @@ fn embedFrom(em: ?*FigEmbed) ?*EmbedHandle {
 }
 
 /// Whether this build can edit `t`'s inner format (YAML frontmatter needs YAML,
-/// JSON frontmatter needs JSON). Gated formats are compiled out. Fig is always
-/// unsupported here regardless of build options: `EditorUnion` (below) has no
-/// fig variant, so there is no combined editor to hand back — `fig_embed_open`/
-/// `fig_embed_open_or_init` report `unsupported_format`, while `fig_embed_extract`
-/// (locate-only, no editor) still works.
+/// JSON frontmatter needs JSON, fig frontmatter needs the fig dialect). Gated
+/// formats are compiled out: `fig_embed_open`/`fig_embed_open_or_init` report
+/// `unsupported_format` for one, while `fig_embed_extract` (locate-only, no
+/// editor) still works regardless.
 fn embedInnerSupported(t: Embed.Type) bool {
     return switch (Embed.innerFormat(t)) {
         .yaml => build_options.lang_yaml,
         .json => build_options.lang_json,
-        .fig => false,
+        .fig => build_options.lang_fig,
     };
 }
 
@@ -1363,8 +1377,8 @@ fn embedInnerSupported(t: Embed.Type) bool {
 /// initializing the inner editor over the region's content. Takes ownership of
 /// `host` (frees it on any failure). Shared by `fig_embed_open` and
 /// `fig_embed_open_or_init`; the caller has already validated the format —
-/// specifically, both callers check `embedInnerSupported(t)` first, so `t`
-/// never carries `.fig` here (`embedInnerSupported` always rejects it).
+/// specifically, both callers check `embedInnerSupported(t)` first, so a
+/// gated-out inner format never reaches the switch below.
 fn embedHandleFromHost(
     allocator: std.mem.Allocator,
     host: []u8,
@@ -1384,7 +1398,7 @@ fn embedHandleFromHost(
         .editor = switch (Embed.innerFormat(t)) {
             .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
             .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
-            .fig => unreachable,
+            .fig => if (comptime build_options.lang_fig) .{ .fig = .{ .allocator = allocator } } else unreachable,
         },
     };
     const content = host[region.content.start..region.content.end];
@@ -1939,6 +1953,7 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else null,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else null,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else null,
+        @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else null,
         else => null,
     };
 }
@@ -2284,9 +2299,10 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             .yaml => .yaml,
             .toml => .toml,
             .zon => .zon,
-            // `serializeFormatOf` never yields `.canonical`/`.fig` (neither is a
-            // member of the C ABI's `FigFormat` yet); these arms keep the switch
-            // total. null would mean decode-only (no envelope on output).
+            // Neither has a `Lossless.Target` counterpart: `.canonical` is never
+            // yielded by `serializeFormatOf` (not a member of the C ABI's
+            // `FigFormat`), and `.fig` has no envelope encoding of its own yet.
+            // Both fall through to decode-only (no envelope on output).
             .canonical, .fig => null,
         };
         const decoded = try arena.create(AST);
@@ -3008,15 +3024,20 @@ test "embed c abi locates a ```fig fenced frontmatter block (extract-only)" {
     try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
 }
 
-test "embed c abi fig_embed_open reports unsupported_format for frontmatter_fig" {
-    // Locate-only (`fig_embed_extract`, above) works for fig, but the combined
-    // editor doesn't yet: fig isn't in `EditorUnion`, so `fig_embed_open`/
-    // `fig_embed_open_or_init` must fail cleanly rather than construct a
-    // handle with no real editor behind it.
+test "embed c abi fig_embed_open edits a ```fig fenced frontmatter block" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
     const md = "```fig\nk = v\n```\nbody\n";
     var out_fm: ?*FigEmbed = null;
-    try std.testing.expectEqual(FigStatus.unsupported_format, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &out_fm));
-    try std.testing.expectEqual(@as(?*FigEmbed, null), out_fm);
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &out_fm));
+    defer fig_embed_destroy(out_fm);
+
+    const path = [_]FigPathSegment{keySeg("k")};
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_val(out_fm, &path, 1, "w", 1));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("```fig\nk = w\n```\nbody\n", ptr[0..len]);
 }
 
 test "embed c abi region size-gate leaves uncovered fields untouched" {
@@ -3337,6 +3358,52 @@ test "fig_document_serialize converts JSON to YAML" {
     }
 }
 
+test "fig_parse parses the fig authoring dialect" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src = "title = Hello\ncount = 42\n";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.fig), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    if (comptime build_options.lang_json) {
+        var ptr: [*c]const u8 = undefined;
+        var len: usize = undefined;
+        try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.json), null, &ptr, &len));
+        try std.testing.expectEqualStrings("{\n  \"title\": \"Hello\",\n  \"count\": 42\n}\n", ptr[0..len]);
+    }
+}
+
+test "fig_document_serialize converts JSON to the fig authoring dialect" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src = "{\"name\":\"fig\",\"nums\":[1,2]}";
+    var out_doc: ?*FigDocument = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_parse(src.ptr, src.len, @intFromEnum(FigFormat.json), &out_doc));
+    defer fig_document_destroy(out_doc);
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.fig), null, &ptr, &len));
+    try std.testing.expectEqualStrings("name = fig\nnums = [1, 2]\n", ptr[0..len]);
+}
+
+test "fig_editor_create edits the fig authoring dialect" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src = "title = old\nport = 8080\n";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.fig), &ed));
+    defer fig_editor_destroy(ed);
+
+    const path = [_]FigPathSegment{keySeg("port")};
+    const repl = "9090";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_replace_val(ed, &path, 1, repl.ptr, repl.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings("title = old\nport = 9090\n", ptr[0..len]);
+}
+
 test "fig_document_serialize materializes the YAML reference layer when leaving YAML" {
     if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
@@ -3441,6 +3508,10 @@ test "fig_format_capabilities reports the per-format matrix" {
         if (build_options.lang_xml) read else 0, // reader-only
         fig_format_capabilities(@intFromEnum(FigFormat.xml)),
     );
+    try std.testing.expectEqual(
+        if (build_options.lang_fig) read | edit | serialize else 0,
+        fig_format_capabilities(@intFromEnum(FigFormat.fig)),
+    );
 
     // Unknown / out-of-range format values report no capabilities.
     try std.testing.expectEqual(@as(u32, 0), fig_format_capabilities(0));
@@ -3469,6 +3540,7 @@ test "fig_format_capabilities agrees with actual READ/EDIT/SERIALIZE behavior" {
         .{ .fmt = .toml, .sample = "a = 1\n" },
         .{ .fmt = .zon, .sample = ".{ .a = 1 }" },
         .{ .fmt = .xml, .sample = "<r>x</r>" },
+        .{ .fmt = .fig, .sample = "a = 1\n" },
     };
 
     // A value every writable format can represent ({"a": 1}); used for the
