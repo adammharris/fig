@@ -162,6 +162,41 @@ pub fn locateRegion(source: []const u8, t: Type) Error!Region {
     return locate(source, archetypeOf(t));
 }
 
+/// The archetypes `detect` tries, in order. Earlier entries are the
+/// position-anchored (`.start`) conventions, checked at the very top of the
+/// file where each one's open token is unambiguous (`---`, `;;;`, and
+/// ```` ```fig ```` can't be confused with one another); `EndmatterYaml` is
+/// last because locating it requires scanning the whole document for its
+/// ```` ```endmatter ```` fence rather than just checking position zero.
+const detect_order = [_]Type{ .FrontmatterFig, .FrontmatterJson, .FrontmatterYaml, .EndmatterYaml };
+
+/// Best-effort content sniffing for which embed archetype `source` uses, the
+/// `Embed` counterpart to `Language.detect`: try each known archetype's OPEN
+/// delimiter (not a full `locate`, which also demands a matching close — an
+/// unterminated block should still be *recognized* as that archetype so the
+/// caller's subsequent `extract`/`locateRegion` call surfaces the real
+/// `error.Unterminated` instead of a misleading "nothing found") and return the
+/// first that matches, or null if `source` opens none of them. Order matters
+/// the same way `Language.detect`'s does — see `detect_order`.
+pub fn detect(source: []const u8) ?Type {
+    for (detect_order) |t| {
+        if (matchesOpen(source, archetypeOf(t))) return t;
+    }
+    return null;
+}
+
+/// Whether `source` opens archetype `a` — anchored at byte 0 (after an
+/// optional UTF-8 BOM) for a `.start` archetype, or anywhere in the document
+/// for an `.end` one (mirrors `locate`'s own open-delimiter search).
+fn matchesOpen(source: []const u8, a: Archetype) bool {
+    var i: usize = 0;
+    if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) i += 3; // UTF-8 BOM
+    return if (a.location == .start)
+        matchDelim(source, i, a.open) != null
+    else
+        scanForDelim(source, i, a.open) != null;
+}
+
 /// Whether `t`'s body (the host prose) sits BEFORE the open fence (endmatter)
 /// rather than after the close fence (frontmatter). Lets a host-coordinate
 /// editor pick the side to splice when replacing the body.
@@ -253,6 +288,45 @@ pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialize
         .close_fence = Span.init(content_end, close_end),
         .body = Span.init(body_start, body_start + source.len),
     } };
+}
+
+/// Rebuild `source`'s embedded region as a DIFFERENT archetype: keep the host
+/// prose (`region.body`, byte-identical) but replace the old fences and
+/// content with `to`'s convention wrapped around `new_content` — the already
+/// re-serialized inner document (e.g. YAML frontmatter content re-printed as
+/// JSON, for `fig convert --to-embed`). `region` must be `source`'s existing
+/// region of whatever archetype it was located as (`locateRegion`/`extract`);
+/// this function doesn't care what that was, only where the body is. Mirrors
+/// `initRegion`'s `.start`/`.end` placement, but re-housing real content
+/// rather than seeding an empty document. The returned buffer is caller-owned.
+pub fn retype(allocator: Allocator, source: []const u8, region: Region, to: Type, new_content: []const u8) ![]u8 {
+    const a = archetypeOf(to);
+    const open_tok = a.open.tokens[0];
+    const close_tok = a.close.tokens[0];
+    const body = Span.of(u8, region.body, source);
+
+    var host: std.ArrayList(u8) = .empty;
+    errdefer host.deinit(allocator);
+
+    if (a.location == .end) {
+        // [ body ][ \n? ][ open\n ][ content ][ close\n ]
+        try host.appendSlice(allocator, body);
+        if (body.len > 0 and body[body.len - 1] != '\n') try host.append(allocator, '\n');
+        try host.appendSlice(allocator, open_tok);
+        try host.append(allocator, '\n');
+        try host.appendSlice(allocator, new_content);
+        try host.appendSlice(allocator, close_tok);
+        try host.append(allocator, '\n');
+        return host.toOwnedSlice(allocator);
+    }
+    // .start: [ open\n ][ content ][ close\n ][ body ]
+    try host.appendSlice(allocator, open_tok);
+    try host.append(allocator, '\n');
+    try host.appendSlice(allocator, new_content);
+    try host.appendSlice(allocator, close_tok);
+    try host.append(allocator, '\n');
+    try host.appendSlice(allocator, body);
+    return host.toOwnedSlice(allocator);
 }
 
 /// Parse an explicit content span as `t`'s inner format, no host scanning.
@@ -715,4 +789,53 @@ test "extractStream: outerSpan lifts node spans into outer coordinates" {
     const node = d1.document.ast.nodes[d1.document.ast.root];
     const outer = d1.outerSpan(d1.document.span(node));
     try testing.expectEqualSlices(u8, "bar", src[outer.start..outer.end]);
+}
+
+// --- Embed.detect / Embed.retype ------------------------------------------
+
+test "detect: recognizes YAML frontmatter" {
+    const src = "---\ntitle: hi\n---\nbody\n";
+    try testing.expectEqual(@as(?Type, .FrontmatterYaml), detect(src));
+}
+
+test "detect: recognizes JSON frontmatter" {
+    const src = ";;;\n{\"title\":\"hi\"}\n;;;\nbody\n";
+    try testing.expectEqual(@as(?Type, .FrontmatterJson), detect(src));
+}
+
+test "detect: recognizes fig frontmatter" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src = "```fig\ntitle = hi\n```\nbody\n";
+    try testing.expectEqual(@as(?Type, .FrontmatterFig), detect(src));
+}
+
+test "detect: recognizes YAML endmatter" {
+    const src = "body prose\n```endmatter\ntitle: hi\n```\n";
+    try testing.expectEqual(@as(?Type, .EndmatterYaml), detect(src));
+}
+
+test "detect: an unterminated block is still recognized (caller sees Unterminated, not NotFound)" {
+    const src = "---\ntitle: hi\n";
+    try testing.expectEqual(@as(?Type, .FrontmatterYaml), detect(src));
+    try testing.expectError(Error.Unterminated, locateRegion(src, detect(src).?));
+}
+
+test "detect: plain prose with no fences at all detects nothing" {
+    try testing.expectEqual(@as(?Type, null), detect("just some markdown\n\nno frontmatter here\n"));
+}
+
+test "retype: YAML frontmatter -> JSON frontmatter, body preserved byte-identical" {
+    const src = "---\ntitle: hi\n---\n# body\n";
+    const region = try locateRegion(src, .FrontmatterYaml);
+    const out = try retype(testing.allocator, src, region, .FrontmatterJson, "{\"title\":\"hi\"}\n");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(";;;\n{\"title\":\"hi\"}\n;;;\n# body\n", out);
+}
+
+test "retype: frontmatter -> endmatter moves the fences to the end, body first" {
+    const src = "---\ntitle: hi\n---\n# body\n";
+    const region = try locateRegion(src, .FrontmatterYaml);
+    const out = try retype(testing.allocator, src, region, .EndmatterYaml, "title: hi\n");
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings("# body\n```endmatter\ntitle: hi\n```\n", out);
 }

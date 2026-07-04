@@ -16,20 +16,29 @@ pub const ZON = if (build_options.lang_zon) @import("zon/zon.zig").Language else
 pub const XML = if (build_options.lang_xml) @import("xml/xml.zig").Language else void;
 pub const FIG = if (build_options.lang_fig) @import("fig/fig.zig").Language else void;
 
-/// A format `detect` can recognize. The `jsonc` dialect, `canonical`, and the
-/// `fig` authoring dialect are deliberately excluded: jsonc overlaps
-/// json/json5 on most input, and both canonical and fig are explicit
-/// selections rather than something to sniff (fig's grammar overlaps heavily
-/// with TOML/YAML, so sniffing it would just steal their ambiguous input).
-pub const Detected = enum { json, json5, yaml, toml, zon, xml };
+/// A format `detect` can recognize. The `jsonc` dialect and `canonical` are
+/// deliberately excluded: jsonc overlaps json/json5 on most input, and
+/// canonical is an explicit selection rather than something to sniff. `fig`
+/// IS included, but slotted just ahead of YAML (see the ordering note on
+/// `detect`) since its grammar overlaps TOML/YAML on plain `key = value`
+/// content — it only wins detection on input that is either invalid for
+/// every stricter format, or uses fig-only structural syntax (`>` section
+/// depth, `*` elements, `+` continuations, `[]` group headers).
+pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig };
 
 /// Best-effort content sniffing: try each COMPILED-IN parser and return the
 /// first that accepts `input`, or null if none do (also what an
 /// all-languages-disabled build returns). Order matters because the grammars
-/// overlap — the strict/structured formats are tried before YAML, which is so
-/// permissive (a bare line is a valid scalar) that it would otherwise claim
-/// nearly any input. This is a heuristic, not a proof: input valid as more than
-/// one format resolves to the earliest candidate in this order.
+/// overlap — from most to least strict: JSON/JSON5, ZON, XML, TOML, then fig,
+/// then YAML. fig sits just before YAML, not after it: YAML is so permissive
+/// (a bare line is a valid plain scalar) that almost anything falls through to
+/// it, which would starve fig of a turn if it went last. fig itself overlaps
+/// TOML heavily (both accept plain `key = value`), so it is tried only after
+/// TOML has had first claim — a plain TOML-shaped document still resolves to
+/// `.toml`, and fig only wins on content TOML can't parse (its `>`/`*`/`+`/`[]`
+/// structural markers) or that is otherwise TOML-invalid. This is a heuristic,
+/// not a proof: input valid as more than one format resolves to the earliest
+/// candidate in this order.
 pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
     if (comptime build_options.lang_json) {
         if (tryParse(JSON, allocator, input, .JSON)) return .json;
@@ -43,6 +52,9 @@ pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
     }
     if (comptime build_options.lang_toml) {
         if (tryParse(TOML, allocator, input, TOML.default_type)) return .toml;
+    }
+    if (comptime build_options.lang_fig) {
+        if (tryParse(FIG, allocator, input, FIG.default_type)) return .fig;
     }
     if (comptime build_options.lang_yaml) {
         if (tryParse(YAML, allocator, input, YAML.default_type)) return .yaml;
@@ -87,9 +99,23 @@ test "detect identifies each compiled-in format by content" {
     if (comptime build_options.lang_toml) {
         try std.testing.expectEqual(Detected.toml, detect(a, "x = 1\n").?);
     }
+    if (comptime build_options.lang_fig) {
+        // A bare container header line (no `=`, no `:`, no brackets) followed
+        // by a `>`-depth child isn't valid JSON/ZON/XML/TOML, so this resolves
+        // to fig even though it's tried before YAML.
+        try std.testing.expectEqual(Detected.fig, detect(a, "database\n> host = localhost\n").?);
+    }
     if (comptime build_options.lang_yaml) {
-        // A plain mapping that is not valid JSON/TOML/etc. falls through to YAML,
-        // the most permissive grammar and therefore tried last.
+        // A plain mapping that is not valid JSON/TOML/fig/etc. falls through to
+        // YAML, the most permissive grammar and therefore tried last.
         try std.testing.expectEqual(Detected.yaml, detect(a, "key: value\n").?);
     }
+}
+
+test "detect: plain `key = value` prefers TOML over fig despite fig accepting it too" {
+    const a = std.testing.allocator;
+    if (comptime !build_options.lang_toml or !build_options.lang_fig) return error.SkipZigTest;
+    // fig's root-level dotted assignment accepts the exact same shape TOML
+    // does; TOML is tried first, so it wins the tie.
+    try std.testing.expectEqual(Detected.toml, detect(a, "x = 1\n").?);
 }

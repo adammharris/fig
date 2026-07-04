@@ -85,6 +85,7 @@ const CliAction = enum {
     comment,
     check,
     fmt,
+    convert,
 };
 
 const CliActionOptions = union(CliAction) {
@@ -266,6 +267,53 @@ const CliActionOptions = union(CliAction) {
         /// embedded region is reformatted, spliced back in place.
         embed: ?fig.Embed.Type = null,
     },
+    convert: struct {
+        /// The file to convert in place. `-` reads stdin — only valid with
+        /// `dry_run`/`diff`, same restriction as `fmt`.
+        file: []const u8,
+        requested_help: bool = false,
+        /// Whole-file mode (`--output`): parse as `from`, re-emit as `to`.
+        /// Mutually exclusive with the embed-archetype mode (`to_embed`) — one
+        /// of the two must be set, checked in `parseConfig`.
+        from: Format = .json,
+        to: Format = .json,
+        /// Set when `from` couldn't be pinned by `--input`/the file extension:
+        /// the handler sniffs the contents with `Language.detect`, mirroring
+        /// `fmt`/`get`.
+        detect: bool = false,
+        /// Embed-archetype mode (`--to-embed <archetype>`): rehouse a host
+        /// document's embedded region from one archetype's fence-and-format
+        /// convention to another's (e.g. YAML frontmatter → JSON frontmatter),
+        /// splicing the new fences + re-serialized content in place while
+        /// leaving the host prose (`Embed.Region.body`) byte-identical. `to`/
+        /// `from`/`detect` are unused in this mode; the archetypes fix both
+        /// formats.
+        to_embed: ?fig.Embed.Type = null,
+        /// The source archetype for embed-archetype mode: `--embed`, else the
+        /// file extension's default (e.g. `.md` ⇒ `FrontmatterYaml`), else —
+        /// when `detect_embed` is set — sniffed from the content with
+        /// `Embed.detect`.
+        embed: ?fig.Embed.Type = null,
+        /// Set when `embed` couldn't be pinned by `--embed`/the extension and
+        /// `to_embed` is set: the handler sniffs the host content with
+        /// `Embed.detect`.
+        detect_embed: bool = false,
+        /// As in `get`: drop unknown/custom YAML tags instead of erroring,
+        /// when converting away from YAML.
+        lax_tags: bool = false,
+        /// As in `get`: preserve values the target can't represent natively
+        /// through a `$fig` envelope, and decode any such envelope on input.
+        lossless: bool = false,
+        serialize: fig.AST.SerializeOptions = .{},
+        quiet: bool = false,
+        strict: bool = false,
+        /// Print the converted result to stdout instead of writing it back,
+        /// and exit 1 if the conversion would change the file's bytes.
+        dry_run: bool = false,
+        /// Like `dry_run`, but print a unified diff instead of the whole
+        /// converted file.
+        diff: bool = false,
+    },
 };
 
 /// The in-place editing operation `applyEdit` performs. Generalizes the editor's
@@ -325,6 +373,8 @@ const Help = struct {
             \\  comment: add or edit a comment on part of a file
             \\  check: validate that one or more files parse cleanly
             \\  fmt: reformat a file in place (house style; gofmt-style)
+            \\  convert: convert a file (or a host document's embedded region)
+            \\    from one format/archetype to another, in place
             \\
             \\For information on action options, pass --help or -h
             \\to the action you would like to learn about.
@@ -538,6 +588,53 @@ const Help = struct {
         , .{binary_name});
         try term.writer.flush();
     }
+
+    fn convert(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} convert --output <format> [--input <format>] [--dry-run | --diff] <file>
+            \\       {s} convert --to-embed <archetype> [--embed <archetype>] [--dry-run | --diff] <file>
+            \\  Convert a file in place — `fmt`'s twin for when the target format
+            \\  differs from the source. Exactly one of --output/--to-embed picks
+            \\  the target; the other flag group is unused (rejected together).
+            \\
+            \\  Whole-file mode (--output): parse the whole file as --input (else the
+            \\    extension, else sniffed from its contents) and re-emit it as
+            \\    --output, in the target format's house style. A host document
+            \\    whose extension implies an embedded region (`.md`/`.markdown`) is
+            \\    rejected here — use embed-archetype mode, or pass --input to force
+            \\    whole-file conversion anyway.
+            \\  -i, --input, -o, --output: json, json5, yaml, toml, zon, canonical, fig.
+            \\
+            \\  Embed-archetype mode (--to-embed): rehouse a host document's
+            \\    embedded region from one archetype's fence-and-content convention
+            \\    to another's — e.g. turn YAML frontmatter into JSON frontmatter —
+            \\    splicing the new fences and re-serialized content in place while
+            \\    leaving the surrounding prose byte-identical. The source archetype
+            \\    is --embed, else the extension default (`.md` ⇒ frontmatter), else
+            \\    sniffed from the file's own fences.
+            \\  --embed, --to-embed <archetype>: frontmatter (---/YAML), frontmatter-json
+            \\    (;;;/JSON), frontmatter-fig (```fig fenced block), or endmatter
+            \\    (trailing ```endmatter block).
+            \\
+            \\  --dry-run: print the converted result to stdout instead of writing
+            \\    it back; exit 1 if conversion would change the file, 0 if it's
+            \\    already in the target format.
+            \\  --diff: like --dry-run, but print a unified diff instead of the
+            \\    whole converted file.
+            \\  --compact / --pretty: single-line vs multi-line output (default pretty).
+            \\  --indent N / --width N: as in `get`/`fmt`.
+            \\  --strip-comments: drop comments instead of carrying them across formats.
+            \\  --lossless / --lossy: preserve values the target can't represent
+            \\    natively via a $fig envelope (default --lossy).
+            \\  --lax-tags: drop unknown/custom YAML tags instead of erroring, when
+            \\    converting away from YAML.
+            \\  -q, --quiet: suppress warnings on stderr.
+            \\  --strict: treat any warning as an error (exit non-zero, no write).
+            \\  reads stdin when <file> is `-`, but only with --dry-run/--diff.
+            \\
+        , .{ binary_name, binary_name });
+        try term.writer.flush();
+    }
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -603,6 +700,10 @@ pub fn main(init: std.process.Init) !void {
         },
         ArgError.MissingFmtArgument => {
             try Help.fmt(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingConvertArgument => {
+            try Help.convert(&stderr_terminal, "fig");
             std.process.exit(2);
         },
         else => return err,
@@ -1212,6 +1313,107 @@ pub fn main(init: std.process.Init) !void {
                 try input.setLength(io, reformatted.len);
             }
         },
+        .convert => {
+            const opts = config.options.convert;
+            if (opts.requested_help) {
+                try Help.convert(&stdout_terminal, config.binary_name);
+                return;
+            }
+            const preview_only = opts.dry_run or opts.diff;
+            const is_stdin = std.mem.eql(u8, opts.file, "-");
+            if (!preview_only and is_stdin) {
+                try stderr_terminal.writer.print(
+                    "error: cannot convert stdin in place; pass --dry-run or --diff to print the converted result instead.\n",
+                    .{},
+                );
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+
+            const input = try getInput(io, opts.file, if (preview_only) .read_only else .read_write);
+            defer if (!is_stdin) input.close(io);
+
+            const a = init.arena.allocator();
+            const content = try readAll(a, io, input);
+
+            if (opts.to_embed) |to_embed_type| {
+                // Embed-archetype mode: resolve the SOURCE archetype (--embed,
+                // else content-sniffed with `Embed.detect` — extension-derived
+                // defaults were already folded into `opts.embed` at parse time),
+                // convert the region's inner content, then rehouse it under the
+                // target archetype's fences, preserving the host prose exactly.
+                const source_type = opts.embed orelse (if (opts.detect_embed) fig.Embed.detect(content) else null) orelse {
+                    try stderr_terminal.writer.print(
+                        "error: could not detect an embedded region in `{s}`; pass --embed explicitly.\n",
+                        .{opts.file},
+                    );
+                    try stderr_terminal.writer.flush();
+                    std.process.exit(2);
+                };
+                const region = try fig.Embed.locateRegion(content, source_type);
+                const inner = content[region.content.start..region.content.end];
+                const converted_inner = try convertSlice(
+                    a,
+                    &stderr_terminal,
+                    opts.file,
+                    embedFormat(source_type),
+                    embedFormat(to_embed_type),
+                    inner,
+                    opts.serialize,
+                    opts.lossless,
+                    opts.lax_tags,
+                    opts.quiet,
+                    opts.strict,
+                );
+                const out = try fig.Embed.retype(a, content, region, to_embed_type, converted_inner);
+
+                const changed = !std.mem.eql(u8, content, out);
+                if (opts.diff) {
+                    try diff.unifiedDiff(a, stdout_terminal.writer, opts.file, content, out, 3);
+                    try stdout_terminal.writer.flush();
+                    if (changed) std.process.exit(1);
+                } else if (opts.dry_run) {
+                    try stdout_terminal.writer.writeAll(out);
+                    try stdout_terminal.writer.flush();
+                    if (changed) std.process.exit(1);
+                } else if (changed) {
+                    try input.writePositionalAll(io, out, 0);
+                    try input.setLength(io, out.len);
+                }
+                return;
+            }
+
+            var from = opts.from;
+            if (opts.detect) from = try resolveFormatFromContent(a, content, opts.file);
+
+            const converted = try convertSlice(
+                a,
+                &stderr_terminal,
+                opts.file,
+                from,
+                opts.to,
+                content,
+                opts.serialize,
+                opts.lossless,
+                opts.lax_tags,
+                opts.quiet,
+                opts.strict,
+            );
+            const changed = !std.mem.eql(u8, content, converted);
+
+            if (opts.diff) {
+                try diff.unifiedDiff(a, stdout_terminal.writer, opts.file, content, converted, 3);
+                try stdout_terminal.writer.flush();
+                if (changed) std.process.exit(1);
+            } else if (opts.dry_run) {
+                try stdout_terminal.writer.writeAll(converted);
+                try stdout_terminal.writer.flush();
+                if (changed) std.process.exit(1);
+            } else if (changed) {
+                try input.writePositionalAll(io, converted, 0);
+                try input.setLength(io, converted.len);
+            }
+        },
     };
 }
 
@@ -1533,8 +1735,9 @@ fn parseJson(allocator: std.mem.Allocator, content: []const u8, jtype: fig.Langu
         fig.Language.JSON.Parser.parseWithReport(allocator, content, jtype, r);
 }
 
-/// Map a `Language.detect` result to the CLI `Format`. `Detected` has no `jsonc`,
-/// `canonical`, or `fig` (none is content-sniffed), so the mapping is total.
+/// Map a `Language.detect` result to the CLI `Format`. `Detected` has no
+/// `jsonc` or `canonical` (neither is content-sniffed), so the mapping is
+/// total.
 fn mapDetected(d: fig.Language.Detected) Format {
     return switch (d) {
         .json => .json,
@@ -1543,6 +1746,7 @@ fn mapDetected(d: fig.Language.Detected) Format {
         .toml => .toml,
         .zon => .zon,
         .xml => .xml,
+        .fig => .fig,
     };
 }
 
@@ -1661,6 +1865,138 @@ fn reformatSlice(
         if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
     } else {
         try doc.ast.serializeWith(&out.writer, target, serialize);
+    }
+    return out.toOwnedSlice();
+}
+
+/// Parse `content` as `from` and re-emit it as `to` — `convert`'s core, and the
+/// in-place-writeback twin of `get`'s cross-format pipeline: materializing
+/// YAML's reference layer when leaving YAML (aliases/merges/tags resolved),
+/// the optional `--lossless` envelope round-trip, the same lossy-conversion
+/// diagnostics, and TOML's lossy null-strip when serializing without
+/// `--lossless`. Unlike `get` there is no `--path`/gron/`--body` projection —
+/// `convert` always converts the whole document (or, under embed-archetype
+/// mode, the whole embedded region's content). Returns the converted bytes
+/// (caller-owned).
+fn convertSlice(
+    allocator: std.mem.Allocator,
+    term: *Io.Terminal,
+    file_path: []const u8,
+    from: Format,
+    to: Format,
+    content: []const u8,
+    serialize: fig.AST.SerializeOptions,
+    lossless: bool,
+    lax_tags: bool,
+    quiet: bool,
+    strict: bool,
+) !([]u8) {
+    if (to == .xml) {
+        try term.writer.print("error: cannot convert to XML (reader-only; no printer).\n", .{});
+        try term.writer.flush();
+        return error.UnsupportedXmlFmt;
+    }
+    if (to == .gron) {
+        try term.writer.print("error: cannot convert to gron (a CLI projection, not a stored document format).\n", .{});
+        try term.writer.flush();
+        return error.UnsupportedGronFmt;
+    }
+
+    var fig_report: fig.Language.FIG.Parser.Report = .{};
+    var json_report: fig.Language.JSON.Parser.Report = .{};
+    var toml_report: fig.Language.TOML.Parser.Report = .{};
+    const doc = parseSliceAs(from, .{}, allocator, content, false, .{ .fig = &fig_report, .json = &json_report, .toml = &toml_report }) catch |err| {
+        if (fig_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
+        if (json_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.JSON.Parser.describe(d.code), fig.Language.JSON.Parser.shortLabel(d.code));
+        if (toml_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.TOML.Parser.describe(d.code), fig.Language.TOML.Parser.shortLabel(d.code));
+        return err;
+    };
+    try handleParseWarnings(term, content, file_path, "fig authoring", fig_report.warnings, fig.Language.FIG.Parser.Warning.describeWarning, fig.Language.FIG.Parser.Warning.shortLabel, quiet, strict);
+    try handleParseWarnings(term, content, file_path, "JSON authoring", json_report.warnings, fig.Language.JSON.Parser.Warning.describeWarning, fig.Language.JSON.Parser.Warning.shortLabel, quiet, strict);
+    try handleParseWarnings(term, content, file_path, "TOML authoring", toml_report.warnings, fig.Language.TOML.Parser.Warning.describeWarning, fig.Language.TOML.Parser.Warning.shortLabel, quiet, strict);
+
+    // Converting YAML to a non-YAML format resolves the reference layer first
+    // (aliases → copies, merges → flattened, tags applied/dropped). YAML→YAML
+    // keeps it intact for round-trip; JSON never has it. Mirrors `get`.
+    const src_is_yaml = from == .yaml or from == .yml;
+    const dst_is_yaml = to == .yaml or to == .yml;
+    const base_ast: *const fig.AST = if (src_is_yaml and !dst_is_yaml) blk: {
+        if (comptime build_options.lang_yaml) {
+            const mode: fig.Language.YAML.TagMode = if (lax_tags) .lax else .strict;
+            const mat = try allocator.create(fig.AST);
+            mat.* = try fig.Language.YAML.materialize(allocator, &doc.ast, mode);
+            break :blk mat;
+        } else unreachable;
+    } else &doc.ast;
+
+    const ast: *const fig.AST = if (lossless and !(src_is_yaml and dst_is_yaml)) blk: {
+        const maybe_target: ?fig.Lossless.Target = switch (to) {
+            .json, .jsonc, .json5, .gron => .json,
+            .yaml, .yml => .yaml,
+            .toml => .toml,
+            .zon => .zon,
+            .canonical, .fig => null,
+            .xml => unreachable, // rejected up front (reader-only)
+        };
+        const decoded = try allocator.create(fig.AST);
+        decoded.* = try fig.Lossless.decode(allocator, base_ast);
+        const target = maybe_target orelse break :blk decoded;
+        const encoded = try allocator.create(fig.AST);
+        encoded.* = try fig.Lossless.encode(allocator, decoded, target);
+        break :blk encoded;
+    } else base_ast;
+
+    const target: fig.AST.SerializeFormat = switch (to) {
+        .json => .json,
+        .jsonc => .jsonc,
+        .json5 => .json5,
+        .yaml, .yml => .yaml,
+        .toml => .toml,
+        .zon => .zon,
+        .canonical => .canonical,
+        .fig => .fig,
+        .xml, .gron => unreachable, // rejected up front above
+    };
+
+    if (!quiet or strict) {
+        const warnings = try fig.Diagnostics.analyze(allocator, ast, ast.root, target, .{
+            .pretty = serialize.pretty,
+            .strip_comments = serialize.strip_comments,
+            .lossless = lossless,
+        });
+        var surfaced: usize = 0;
+        for (warnings) |w| {
+            if (w.cause != .format_limitation) continue;
+            surfaced += 1;
+            if (!quiet) {
+                try term.setColor(.yellow);
+                try term.writer.writeAll("warning: ");
+                try term.setColor(.reset);
+                try w.render(term.writer, target);
+                try term.writer.writeByte('\n');
+            }
+        }
+        if (!quiet) try term.writer.flush();
+        if (strict and surfaced > 0) {
+            try term.writer.print("error: {d} lossy conversion warning(s); --strict aborts.\n", .{surfaced});
+            try term.writer.flush();
+            std.process.exit(1);
+        }
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    if (target == .toml and !lossless) {
+        // Same lossy-strip-then-print path `get` uses for a lossy TOML target:
+        // TOML has no null, so an unrepresentable value is dropped up front
+        // (already reported above) rather than aborting mid-print.
+        const result = try fig.Lossless.lossyStrip(allocator, ast, ast.root, .toml);
+        if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
+    } else {
+        try ast.serializeWith(&out.writer, target, serialize);
     }
     return out.toOwnedSlice();
 }
@@ -2081,7 +2417,7 @@ fn embedFormat(t: fig.Embed.Type) Format {
     };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, MissingFmtArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, MissingFmtArgument, MissingConvertArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 /// Map a `--input`/`-i` format name to a `Format`. The enum member names cover
 /// every accepted token (including `canonical` and `fig`) directly. Returns null
@@ -2691,6 +3027,187 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .diff = diff_mode,
             .embed = embed,
         } };
+    } else if (std.mem.eql(u8, action_str, "convert") or std.mem.eql(u8, action_str, "cv")) {
+        config.action = .convert;
+
+        var input_override: ?Format = null;
+        var output_override: ?Format = null;
+        var embed_override: ?fig.Embed.Type = null;
+        var to_embed_override: ?fig.Embed.Type = null;
+        var lax_tags = false;
+        var lossless = false;
+        var quiet = false;
+        var strict = false;
+        var dry_run = false;
+        var diff_mode = false;
+        var requested_help = false;
+        var serialize: fig.AST.SerializeOptions = .{};
+        var positionals: std.ArrayList([]const u8) = .empty;
+        defer positionals.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                requested_help = true;
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--diff")) {
+                diff_mode = true;
+            } else if (std.mem.eql(u8, arg, "--compact")) {
+                serialize.pretty = false;
+            } else if (std.mem.eql(u8, arg, "--pretty")) {
+                serialize.pretty = true;
+            } else if (std.mem.eql(u8, arg, "--strip-comments")) {
+                serialize.strip_comments = true;
+            } else if (std.mem.eql(u8, arg, "--lax-tags")) {
+                lax_tags = true;
+            } else if (std.mem.eql(u8, arg, "--lossless")) {
+                lossless = true;
+            } else if (std.mem.eql(u8, arg, "--lossy")) {
+                lossless = false;
+            } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--no-warnings")) {
+                quiet = true;
+            } else if (std.mem.eql(u8, arg, "--strict")) {
+                strict = true;
+            } else if (std.mem.eql(u8, arg, "--embed")) {
+                const name = args.next() orelse {
+                    log.err("Missing archetype after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                embed_override = embedTypeFromName(name) orelse {
+                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, frontmatter-fig, endmatter)\n", .{name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--to-embed")) {
+                const name = args.next() orelse {
+                    log.err("Missing archetype after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                to_embed_override = embedTypeFromName(name) orelse {
+                    log.err("Unknown --to-embed archetype: {s} (frontmatter, frontmatter-json, frontmatter-fig, endmatter)\n", .{name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--indent")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                serialize.indent = std.fmt.parseInt(u8, n, 10) catch {
+                    log.err("Invalid --indent value: {s}\n", .{n});
+                    return ArgError.MissingConvertArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--width")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                serialize.width = std.fmt.parseInt(u16, n, 10) catch {
+                    log.err("Invalid --width value: {s}\n", .{n});
+                    return ArgError.MissingConvertArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
+                const fmt_name = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                input_override = parseFormatName(fmt_name) orelse {
+                    log.err("Unsupported format: {s}\n", .{fmt_name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
+                const fmt_name = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingConvertArgument;
+                };
+                output_override = parseFormatName(fmt_name) orelse {
+                    log.err("Unsupported format: {s}\n", .{fmt_name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else {
+                try positionals.append(allocator, arg);
+            }
+        }
+
+        if (!requested_help and positionals.items.len == 0) {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and positionals.items.len > 1) {
+            log.err("convert takes a single file, not a path within it: {s}\n", .{positionals.items[1]});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and dry_run and diff_mode) {
+            log.err("--dry-run and --diff are mutually exclusive.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and output_override != null and to_embed_override != null) {
+            log.err("--output and --to-embed are mutually exclusive: whole-file conversion picks the target format directly, embed-archetype conversion picks it via the archetype.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and output_override == null and to_embed_override == null) {
+            log.err("convert needs a target: pass --output <format> to convert the whole file, or --to-embed <archetype> to rehouse an embedded region.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and input_override != null and to_embed_override != null) {
+            log.err("--input is not used with --to-embed: the source archetype (--embed, else detected) fixes the input format.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+        if (!requested_help and embed_override != null and to_embed_override == null) {
+            log.err("--embed requires --to-embed (embed-archetype conversion always changes the archetype); use `fmt --embed` to reformat without changing format.\n", .{});
+            return ArgError.MissingConvertArgument;
+        }
+
+        const file_path = if (positionals.items.len > 0) positionals.items[0] else "-";
+
+        const detected_input: ?Detected = if (!requested_help) detectLanguageFromFileEnding(file_path) else null;
+
+        if (!requested_help and to_embed_override != null) {
+            // Embed-archetype mode: `from`/`to`/`detect` are unused — the
+            // source and target archetypes fix both formats.
+            const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+            config.options = .{ .convert = .{
+                .file = file_path,
+                .requested_help = requested_help,
+                .to_embed = to_embed_override,
+                .embed = embed,
+                .detect_embed = embed == null,
+                .lax_tags = lax_tags,
+                .lossless = lossless,
+                .serialize = serialize,
+                .quiet = quiet,
+                .strict = strict,
+                .dry_run = dry_run,
+                .diff = diff_mode,
+            } };
+        } else {
+            // Whole-file mode. A host document whose extension implies an
+            // embed (currently only `.md`/`.markdown`) can't be converted
+            // whole without either destroying its prose or guessing at a
+            // fence convention for `--output`'s format — point the user at
+            // `--to-embed` instead, unless they passed an explicit `--input`
+            // that overrides the extension's guess entirely.
+            if (!requested_help and input_override == null) {
+                if (detected_input) |d| if (d.embed != null) {
+                    log.err("{s} is a host document (embedded config detected); use --to-embed <archetype> to convert its embedded region, or pass --input explicitly to force whole-file conversion.\n", .{file_path});
+                    return ArgError.MissingConvertArgument;
+                };
+            }
+            const needs_detect = !requested_help and input_override == null and detected_input == null;
+            const from = input_override orelse (if (detected_input) |d| d.format else null) orelse .json;
+            config.options = .{ .convert = .{
+                .file = file_path,
+                .requested_help = requested_help,
+                .from = from,
+                .to = output_override orelse .json,
+                .detect = needs_detect,
+                .lax_tags = lax_tags,
+                .lossless = lossless,
+                .serialize = serialize,
+                .quiet = quiet,
+                .strict = strict,
+                .dry_run = dry_run,
+                .diff = diff_mode,
+            } };
+        }
     } else {
         log.err("Action not recognized: {s}", .{action_str});
         config.action = .help;
@@ -2897,6 +3414,67 @@ test "parseConfig routes set, --seq, and --embed" {
     var fm = TestArgs{ .items = &.{ "fig", "set", "--embed", "frontmatter-fig", "post.md", "k", "v" } };
     const fmc = try parseConfig(a, &fm);
     try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), fmc.options.set.embed);
+}
+
+test "parseConfig routes convert: whole-file mode, embed mode, and their guards" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Whole-file mode: --input/--output resolve `from`/`to` directly.
+    var wf = TestArgs{ .items = &.{ "fig", "convert", "-i", "yaml", "-o", "toml", "f.yaml" } };
+    const wfc = try parseConfig(a, &wf);
+    try t.expectEqual(CliAction.convert, wfc.action);
+    try t.expectEqual(Format.yaml, wfc.options.convert.from);
+    try t.expectEqual(Format.toml, wfc.options.convert.to);
+    try t.expectEqual(@as(?fig.Embed.Type, null), wfc.options.convert.to_embed);
+    try t.expect(!wfc.options.convert.detect);
+
+    // Whole-file mode with an unrecognized extension: `--output` alone still
+    // needs `from` sniffed at runtime.
+    var det = TestArgs{ .items = &.{ "fig", "convert", "-o", "json", "f.weirdext" } };
+    const detc = try parseConfig(a, &det);
+    try t.expect(detc.options.convert.detect);
+
+    // Embed mode: --to-embed alone (no --embed) defers source detection to
+    // the handler (`detect_embed`); the file extension doesn't imply an
+    // archetype here (not .md), so `embed` stays null.
+    var em = TestArgs{ .items = &.{ "fig", "convert", "--to-embed", "frontmatter-json", "f.txt" } };
+    const emc = try parseConfig(a, &em);
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterJson), emc.options.convert.to_embed);
+    try t.expectEqual(@as(?fig.Embed.Type, null), emc.options.convert.embed);
+    try t.expect(emc.options.convert.detect_embed);
+
+    // Embed mode on a `.md` file: the extension default (FrontmatterYaml)
+    // fills `embed` even without an explicit `--embed`, so no runtime sniff
+    // is needed.
+    var md = TestArgs{ .items = &.{ "fig", "convert", "--to-embed", "frontmatter-json", "post.md" } };
+    const mdc = try parseConfig(a, &md);
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), mdc.options.convert.embed);
+    try t.expect(!mdc.options.convert.detect_embed);
+
+    // Embed mode: explicit --embed overrides the extension default.
+    var ov = TestArgs{ .items = &.{ "fig", "convert", "--embed", "endmatter", "--to-embed", "frontmatter-fig", "post.md" } };
+    const ovc = try parseConfig(a, &ov);
+    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), ovc.options.convert.embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), ovc.options.convert.to_embed);
+
+    // The four guard rejections (no target at all; --output+--to-embed
+    // together; --embed without --to-embed; whole-file --output on a `.md`
+    // host document without an explicit --input) all return
+    // `ArgError.MissingConvertArgument` after a `log.err` — verified manually
+    // against the built CLI rather than here, since this test binary's
+    // default runner (Zig 0.16) fails any test that logs at `.err`
+    // regardless of whether the returned error was expected (see
+    // `test_runner.zig`'s `log_err_count`), the same reason no other
+    // `parseConfig` error path in this file is exercised as a unit test.
+
+    // An explicit --input forces whole-file conversion on a `.md` file anyway.
+    var mdforced = TestArgs{ .items = &.{ "fig", "convert", "-i", "yaml", "-o", "toml", "post.md" } };
+    const mdforcedc = try parseConfig(a, &mdforced);
+    try t.expectEqual(Format.yaml, mdforcedc.options.convert.from);
+    try t.expect(!mdforcedc.options.convert.detect);
 }
 
 test "resolveSpec maps YAML version strings" {
