@@ -728,33 +728,24 @@ pub fn main(init: std.process.Init) !void {
                     if (!opts.output_explicit) to = from;
                 }
                 var fig_report: fig.Language.FIG.Parser.Report = .{};
-                const parsed = parseSliceAs(from, .{}, init.arena.allocator(), content, false, &fig_report) catch |err| {
-                    // A fig parse failure renders as a `file:line:col` teaching
+                var json_report: fig.Language.JSON.Parser.Report = .{};
+                const parsed = parseSliceAs(from, .{}, init.arena.allocator(), content, false, .{ .fig = &fig_report, .json = &json_report }) catch |err| {
+                    // A parse failure renders as a `file:line:col` teaching
                     // message (DESIGN.md: every diagnostic names the fix) and
                     // exits cleanly — no error-return trace for a user typo.
-                    if (fig_report.diag) |d| {
-                        try printFigDiag(&stderr_terminal, content, opts.file, d.offset, d.end, "error", .red, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
-                        try stderr_terminal.writer.flush();
-                        std.process.exit(2);
-                    }
+                    // Only fig and JSON fill a report so far; every other
+                    // format still falls through to the bare `return err`.
+                    if (fig_report.diag) |d|
+                        try reportParseError(&stderr_terminal, content, opts.file, d.offset, d.end, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
+                    if (json_report.diag) |d|
+                        try reportParseError(&stderr_terminal, content, opts.file, d.offset, d.end, fig.Language.JSON.Parser.describe(d.code), fig.Language.JSON.Parser.shortLabel(d.code));
                     return err;
                 };
-                // fig authoring warnings (parse-time lints) ride the same
+                // Authoring-time lints (parse-time warnings) ride the same
                 // `--quiet`/`--strict` contract as the serialize-side
                 // diagnostics below: quiet silences, strict aborts.
-                if (fig_report.warnings.len > 0) {
-                    if (!opts.quiet) {
-                        for (fig_report.warnings) |w| {
-                            try printFigDiag(&stderr_terminal, content, opts.file, w.offset, w.end, "warning", .yellow, fig.Language.FIG.Parser.Warning.describeWarning(w.code), fig.Language.FIG.Parser.Warning.shortLabel(w.code));
-                        }
-                        try stderr_terminal.writer.flush();
-                    }
-                    if (opts.strict) {
-                        try stderr_terminal.writer.print("error: {d} fig authoring warning(s); --strict aborts.\n", .{fig_report.warnings.len});
-                        try stderr_terminal.writer.flush();
-                        std.process.exit(2);
-                    }
-                }
+                try handleParseWarnings(&stderr_terminal, content, opts.file, "fig authoring", fig_report.warnings, fig.Language.FIG.Parser.Warning.describeWarning, fig.Language.FIG.Parser.Warning.shortLabel, opts.quiet, opts.strict);
+                try handleParseWarnings(&stderr_terminal, content, opts.file, "JSON authoring", json_report.warnings, fig.Language.JSON.Parser.Warning.describeWarning, fig.Language.JSON.Parser.Warning.shortLabel, opts.quiet, opts.strict);
                 break :blk parsed;
             };
 
@@ -1008,10 +999,10 @@ pub fn main(init: std.process.Init) !void {
             // bad file makes the whole run exit non-zero — the CI contract.
             var any_failed = false;
             for (opts.files) |file| {
-                var fig_source: ?[]const u8 = null;
-                var fig_errors: ?[]const fig.Language.FIG.Parser.Diagnostic = null;
-                var fig_warnings: ?[]const fig.Language.FIG.Parser.Warning = null;
-                if (checkOne(a, io, file, opts.format, opts.spec, &fig_source, &fig_errors, &fig_warnings)) |fmt| {
+                var diag_source: ?[]const u8 = null;
+                var diag_errors: ?[]const fig.ParseDiagnostic.Rendered = null;
+                var diag_warnings: ?[]const fig.ParseDiagnostic.Rendered = null;
+                if (checkOne(a, io, file, opts.format, opts.spec, &diag_source, &diag_errors, &diag_warnings)) |fmt| {
                     if (!opts.quiet) {
                         try stdout_terminal.setColor(.green);
                         try stdout_terminal.writer.writeAll("ok");
@@ -1022,24 +1013,24 @@ pub fn main(init: std.process.Init) !void {
                             try stdout_terminal.writer.print(": {s} ({s} {s})\n", .{ file, @tagName(fmt), spec })
                         else
                             try stdout_terminal.writer.print(": {s} ({s})\n", .{ file, @tagName(fmt) });
-                        // fig authoring lints: the file is valid (still `ok`),
+                        // Authoring-time lints: the file is valid (still `ok`),
                         // but likely-mistake lines print right below it. Rendered
                         // live against the real terminal (not buffered into a
-                        // string — see `printFigDiag`), then flushed immediately
-                        // so it can't interleave with the next file's logging.
-                        if (fig_warnings) |ws| {
-                            for (ws) |w| try printFigDiag(&stderr_terminal, fig_source.?, file, w.offset, w.end, "warning", .yellow, fig.Language.FIG.Parser.Warning.describeWarning(w.code), fig.Language.FIG.Parser.Warning.shortLabel(w.code));
+                        // string — see `printDiag`), then flushed immediately so
+                        // it can't interleave with the next file's logging.
+                        if (diag_warnings) |ws| {
+                            for (ws) |w| try printDiag(&stderr_terminal, diag_source.?, file, w.offset, w.end, "warning", .yellow, w.message, w.short_label);
                             try stderr_terminal.writer.flush();
                         }
                     }
                 } else |err| {
                     any_failed = true;
-                    // A fig failure renders as a full `file:line:col: error: …`
-                    // teaching report per error (recovery collects every error in
-                    // the file, not just the first) instead of the generic
-                    // `file: ErrorName` line.
-                    if (fig_errors) |errs| {
-                        for (errs) |d| try printFigDiag(&stderr_terminal, fig_source.?, file, d.offset, d.end, "error", .red, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
+                    // A covered-language failure renders as a full
+                    // `file:line:col: error: …` teaching report per error
+                    // (recovery collects every error in the file, not just the
+                    // first) instead of the generic `file: ErrorName` line.
+                    if (diag_errors) |errs| {
+                        for (errs) |d| try printDiag(&stderr_terminal, diag_source.?, file, d.offset, d.end, "error", .red, d.message, d.short_label);
                         try stderr_terminal.writer.flush();
                         continue;
                     }
@@ -1064,7 +1055,7 @@ pub fn main(init: std.process.Init) !void {
     };
 }
 
-/// Print a fig teaching report straight to `term`, cargo/rustc-style:
+/// Print a teaching report straight to `term`, cargo/rustc-style:
 ///   <label>: <message>
 ///   --> <file>:<line>:<col>
 ///    |
@@ -1073,10 +1064,13 @@ pub fn main(init: std.process.Init) !void {
 /// highlighting the reported `[offset, end)` span (a `~~~~` underline, or a
 /// single `^` when `end` is null or the span is one byte), coloring the label
 /// word and the highlight+`short_label` in `color`, and the `-->` pointer plus
-/// the `N |` gutter in blue. This is a CLI-only sibling of
-/// `Parser.Diagnostic.renderAlloc`/`Parser.Warning.renderAlloc` (see
-/// `languages/fig/parser.zig`'s private `renderReport`, which still produces
-/// its own plain `file:line:col: <label>: <message>` shape) — not a
+/// the `N |` gutter in blue. Language-agnostic (every field is plain data —
+/// see `fig.ParseDiagnostic.Rendered`), so every covered language (fig, JSON,
+/// TOML/YAML to come) renders through this one function; only `renderAll`'s
+/// per-language `describe`/`shortLabel` calls differ. This is a CLI-only
+/// sibling of a language's own `Diagnostic.renderAlloc`/`Warning.renderAlloc`
+/// (see `languages/fig/parser.zig`'s private `renderReportAlloc`, which still
+/// produces its own plain `file:line:col: <label>: <message>` shape) — not a
 /// replacement: the library's `renderAlloc` stays a plain, colorless string for
 /// every other caller (the LSP reads the structured `code`/`offset` fields
 /// directly and never calls it; the C ABI's `FigWarning`/`FigError` are plain
@@ -1088,8 +1082,8 @@ pub fn main(init: std.process.Init) !void {
 /// attributes via a direct syscall rather than writing escape bytes into the
 /// stream, so it only works called live against the real terminal — see
 /// `std.Io.Terminal.setColor`.
-fn printFigDiag(term: *Io.Terminal, source: []const u8, file: []const u8, offset: usize, end: ?usize, label: []const u8, color: Io.Terminal.Color, message: []const u8, short_label: []const u8) !void {
-    const loc = fig.Language.FIG.Parser.locateOffset(source, offset);
+fn printDiag(term: *Io.Terminal, source: []const u8, file: []const u8, offset: usize, end: ?usize, label: []const u8, color: Io.Terminal.Color, message: []const u8, short_label: []const u8) !void {
+    const loc = fig.ParseDiagnostic.locateOffset(source, offset);
     try term.setColor(color);
     try term.writer.writeAll(label);
     try term.setColor(.reset);
@@ -1145,6 +1139,51 @@ fn printFigDiag(term: *Io.Terminal, source: []const u8, file: []const u8, offset
     }
 }
 
+/// Convert a language's own `Diagnostic`/`Warning` slice (each carries a typed
+/// `code` that only that language's `describe`/`shortLabel`-shaped functions
+/// know how to read) into the language-agnostic `fig.ParseDiagnostic.Rendered`
+/// shape `printDiag` and the `check` action work with — computed once, right
+/// after parsing, so nothing downstream needs per-language knowledge. `items`
+/// is any `[]const T` for a `T` with `{ code, offset, end }` fields (a
+/// language's `Diagnostic` or `Warning`); `describeFn`/`labelFn` are that
+/// type's own `describe`/`shortLabel`-shaped functions. Allocates with `a`
+/// (the CLI's arena — never freed individually, same as the reports this
+/// replaces).
+fn renderAll(a: std.mem.Allocator, items: anytype, comptime describeFn: anytype, comptime labelFn: anytype) ![]const fig.ParseDiagnostic.Rendered {
+    const out = try a.alloc(fig.ParseDiagnostic.Rendered, items.len);
+    for (items, 0..) |it, i| out[i] = .{ .offset = it.offset, .end = it.end, .message = describeFn(it.code), .short_label = labelFn(it.code) };
+    return out;
+}
+
+/// Render one parse failure as a `printDiag` teaching report and exit(2) — the
+/// `get`-time twin of `check`'s per-error loop, for the single diagnostic a
+/// non-recovering parse produces. Shared by every language with a `Report`
+/// (fig, JSON; TOML/YAML to come) so `get`'s error path doesn't repeat this
+/// print-flush-exit sequence per language.
+fn reportParseError(term: *Io.Terminal, source: []const u8, file: []const u8, offset: usize, end: ?usize, message: []const u8, short_label: []const u8) !void {
+    try printDiag(term, source, file, offset, end, "error", .red, message, short_label);
+    try term.writer.flush();
+    std.process.exit(2);
+}
+
+/// Print every parse-time authoring warning in `warnings` (unless `--quiet`),
+/// then exit(2) if `--strict` and any fired — `get`'s shared `--quiet`/
+/// `--strict` contract for a language's authoring-time lints (fig's, JSON's
+/// `duplicate_key`, …), so each language's call site is one line instead of
+/// repeating the print/flush/strict-abort sequence.
+fn handleParseWarnings(term: *Io.Terminal, source: []const u8, file: []const u8, kind_name: []const u8, warnings: anytype, comptime describeFn: anytype, comptime labelFn: anytype, quiet: bool, strict: bool) !void {
+    if (warnings.len == 0) return;
+    if (!quiet) {
+        for (warnings) |w| try printDiag(term, source, file, w.offset, w.end, "warning", .yellow, describeFn(w.code), labelFn(w.code));
+        try term.writer.flush();
+    }
+    if (strict) {
+        try term.writer.print("error: {d} {s} warning(s); --strict aborts.\n", .{ warnings.len, kind_name });
+        try term.writer.flush();
+        std.process.exit(2);
+    }
+}
+
 /// Validate that `file` parses cleanly, returning the resolved format on success.
 /// Format precedence mirrors `get`: an explicit `--input` `override`, else the
 /// file extension, else sniffing the contents. `spec_str` (from `--spec`) pins
@@ -1152,13 +1191,14 @@ fn printFigDiag(term: *Io.Terminal, source: []const u8, file: []const u8, offset
 /// known — an unknown/inapplicable version is reported like a parse error. When
 /// the extension implies an embedded region (e.g. markdown frontmatter) the
 /// inner document is extracted and parsed. Any IO/parse/spec error propagates to
-/// the caller, which reports it — except fig: a parse failure fills `fig_errors`
-/// with the raw `Diagnostic`s, and a clean parse may fill `fig_warnings` with
-/// the raw `Warning`s (both borrow `fig_source`, which is set alongside them).
-/// The caller renders these live against the real terminal via `printFigDiag`
-/// rather than a pre-rendered string, so it can color the label — see
-/// `printFigDiag`'s doc comment for why that can't happen in here instead.
-fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8, fig_source: *?[]const u8, fig_errors: *?[]const fig.Language.FIG.Parser.Diagnostic, fig_warnings: *?[]const fig.Language.FIG.Parser.Warning) !Format {
+/// the caller, which reports it — except fig and JSON: a parse failure fills
+/// `diag_errors` with every diagnostic rendered into the language-agnostic
+/// `ParseDiagnostic.Rendered` shape, and a clean parse may fill `diag_warnings`
+/// the same way (both borrow `diag_source`, which is set alongside them). The
+/// caller renders these live against the real terminal via `printDiag` rather
+/// than a pre-rendered string, so it can color the label — see `printDiag`'s
+/// doc comment for why that can't happen in here instead.
+fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?Format, spec_str: ?[]const u8, diag_source: *?[]const u8, diag_errors: *?[]const fig.ParseDiagnostic.Rendered, diag_warnings: *?[]const fig.ParseDiagnostic.Rendered) !Format {
     const input = try getInput(io, file, .read_only);
     defer if (!std.mem.eql(u8, file, "-")) input.close(io);
     const content = try readAll(allocator, io, input);
@@ -1187,22 +1227,29 @@ fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?F
     if (embed) |embed_type| {
         _ = try fig.Embed.extract(allocator, content, embed_type);
     } else {
-        fig_source.* = content;
-        var report: fig.Language.FIG.Parser.Report = .{};
-        // `recover` so a fig file reports EVERY error in one pass (a language
+        diag_source.* = content;
+        var fig_report: fig.Language.FIG.Parser.Report = .{};
+        var json_report: fig.Language.JSON.Parser.Report = .{};
+        // `recover` so a file reports EVERY error in one pass (a language
         // server squiggles them all; `check` shouldn't hide errors 2..N behind
-        // the first). Non-fig formats stop at their first error (`report.errors`
-        // stays empty) — fall back to the single `diag`.
-        _ = parseSliceAs(format, spec, allocator, content, true, &report) catch |err| {
-            if (report.errors.len > 0) {
-                fig_errors.* = report.errors;
-            } else if (report.diag) |d| {
-                fig_errors.* = try allocator.dupe(fig.Language.FIG.Parser.Diagnostic, &.{d});
+        // the first). Formats without a report yet stop at their first error
+        // and fall back to the generic `file: ErrorName` line below.
+        _ = parseSliceAs(format, spec, allocator, content, true, .{ .fig = &fig_report, .json = &json_report }) catch |err| {
+            if (fig_report.errors.len > 0) {
+                diag_errors.* = try renderAll(allocator, fig_report.errors, fig.Language.FIG.Parser.describe, fig.Language.FIG.Parser.shortLabel);
+            } else if (fig_report.diag) |d| {
+                diag_errors.* = try renderAll(allocator, &[_]fig.Language.FIG.Parser.Diagnostic{d}, fig.Language.FIG.Parser.describe, fig.Language.FIG.Parser.shortLabel);
+            } else if (json_report.errors.len > 0) {
+                diag_errors.* = try renderAll(allocator, json_report.errors, fig.Language.JSON.Parser.describe, fig.Language.JSON.Parser.shortLabel);
+            } else if (json_report.diag) |d| {
+                diag_errors.* = try renderAll(allocator, &[_]fig.Language.JSON.Parser.Diagnostic{d}, fig.Language.JSON.Parser.describe, fig.Language.JSON.Parser.shortLabel);
             }
             return err;
         };
-        if (report.warnings.len > 0) {
-            fig_warnings.* = report.warnings;
+        if (fig_report.warnings.len > 0) {
+            diag_warnings.* = try renderAll(allocator, fig_report.warnings, fig.Language.FIG.Parser.Warning.describeWarning, fig.Language.FIG.Parser.Warning.shortLabel);
+        } else if (json_report.warnings.len > 0) {
+            diag_warnings.* = try renderAll(allocator, json_report.warnings, fig.Language.JSON.Parser.Warning.describeWarning, fig.Language.JSON.Parser.Warning.shortLabel);
         }
     }
     return format;
@@ -1250,6 +1297,18 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
     };
 }
 
+/// Per-language parse-report out-parameters for `parseSliceAs` — one optional
+/// pointer per language that has grown the rich diagnostic layer (position +
+/// teaching messages, authoring-time warnings; see `languages/fig/parser.zig`'s
+/// `Report` and `languages/json/parser.zig`'s twin). Grows by one field as
+/// TOML/YAML gain their own `Report` type; every existing caller is unaffected
+/// (each field defaults to `null`, meaning "don't collect this language's
+/// report").
+const ParseReports = struct {
+    fig: ?*fig.Language.FIG.Parser.Report = null,
+    json: ?*fig.Language.JSON.Parser.Report = null,
+};
+
 /// Parse already-read `content` as the CLI `format` under `spec`. The
 /// content-based parser the `get` and `check` actions use: reading the input
 /// once means detection and parsing share the same bytes, so a piped stdin is
@@ -1257,16 +1316,16 @@ fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}!Spe
 /// YAML; `.canonical` is the AST's 1:1 oracle grammar. `spec` picks the version
 /// where one is selectable (TOML 1.0 vs 1.1, YAML version).
 ///
-/// `fig_report` (optional) receives the fig authoring dialect's parse report —
-/// `diag` on failure (position + teaching message rendered as a
-/// `file:line:col` report), `warnings` (authoring lints) always. Only the
-/// `.fig` branch fills it; the other formats keep their error-name reporting
-/// for now.
-fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8, recover: bool, fig_report: ?*fig.Language.FIG.Parser.Report) !fig.Document {
+/// `reports` (fields optional) receives each covered language's own parse
+/// report — `diag` on failure (position + teaching message), `warnings`
+/// (authoring-time lints) always; `errors` (every failure, source order) when
+/// `recover`. Only the `.fig` and `.json`/`.jsonc`/`.json5` branches fill one;
+/// the other formats keep their bare error-name reporting for now.
+fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, content: []const u8, recover: bool, reports: ParseReports) !fig.Document {
     return switch (format) {
-        .json => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON) else error.FormatDisabled,
-        .jsonc => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSONC) else error.FormatDisabled,
-        .json5 => if (comptime build_options.lang_json) fig.Language.JSON.Parser.parse(allocator, content, .JSON5) else error.FormatDisabled,
+        .json => if (comptime build_options.lang_json) parseJson(allocator, content, .JSON, recover, reports.json) else error.FormatDisabled,
+        .jsonc => if (comptime build_options.lang_json) parseJson(allocator, content, .JSONC, recover, reports.json) else error.FormatDisabled,
+        .json5 => if (comptime build_options.lang_json) parseJson(allocator, content, .JSON5, recover, reports.json) else error.FormatDisabled,
         .yaml, .yml => if (comptime build_options.lang_yaml) fig.Language.YAML.Parser.parse(allocator, content, spec.yaml) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) fig.Language.TOML.Parser.parse(allocator, content, spec.toml) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
@@ -1274,7 +1333,7 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         .canonical => fig.Canonical.parse(allocator, content),
         .fig => if (comptime build_options.lang_fig) blk: {
             var local: fig.Language.FIG.Parser.Report = .{};
-            const r = fig_report orelse &local;
+            const r = reports.fig orelse &local;
             // `recover` collects the whole file's errors (`check`); otherwise
             // stop at the first (`get`/convert only needs to fail once).
             break :blk if (recover)
@@ -1286,6 +1345,18 @@ fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, conten
         // reusing the JSON parser for each RHS — so it needs JSON compiled in.
         .gron => if (comptime build_options.lang_json) gron.parseDocument(allocator, content) else error.FormatDisabled,
     };
+}
+
+/// The three JSON dialects share one parser/`Report` type, differing only in
+/// `jtype` — factored out of `parseSliceAs` so its `.json`/`.jsonc`/`.json5`
+/// arms don't triplicate the recover-vs-single-shot dispatch.
+fn parseJson(allocator: std.mem.Allocator, content: []const u8, jtype: fig.Language.JSON.Type, recover: bool, report: ?*fig.Language.JSON.Parser.Report) !fig.Document {
+    var local: fig.Language.JSON.Parser.Report = .{};
+    const r = report orelse &local;
+    return if (recover)
+        fig.Language.JSON.Parser.parseCollecting(allocator, content, jtype, r)
+    else
+        fig.Language.JSON.Parser.parseWithReport(allocator, content, jtype, r);
 }
 
 /// Map a `Language.detect` result to the CLI `Format`. `Detected` has no `jsonc`,

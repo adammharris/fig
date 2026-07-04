@@ -54,7 +54,10 @@ pub const Kind = enum {
     }
 };
 
-const TokenizeError = error{ UnexpectedToken, MissingToken, OutOfMemory, UnexpectedSlash, MissingCloseBrace, MissingOpenQuote, MissingColon, MissingCloseBracket, LeadingZero, UnclosedString, UnexpectedEndOfInput, UnclosedComment };
+/// `pub` so the parser can fold it into its own unified `Error` set (see
+/// `parser.zig`'s `Error`) — a tokenizer failure surfaces before the parser's
+/// token loop even starts, so it needs its own describable code there too.
+pub const TokenizeError = error{ UnexpectedToken, MissingToken, OutOfMemory, UnexpectedSlash, MissingCloseBrace, MissingOpenQuote, MissingColon, MissingCloseBracket, LeadingZero, UnclosedString, UnexpectedEndOfInput, UnclosedComment };
 
 // State
 tokens: std.ArrayList(Token) = .empty,

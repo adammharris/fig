@@ -23,6 +23,8 @@ const Token = @import("../../token.zig").Token(Tokenizer.Kind);
 const Type = @import("json.zig").Type;
 const Span = @import("../../util/span.zig");
 
+const parse_diagnostic = @import("../../parse_diagnostic.zig");
+
 const ContainerKind = enum { array, object };
 /// Either an array or object in the process of being parsed.
 const OpenContainer = struct {
@@ -31,6 +33,10 @@ const OpenContainer = struct {
     first_child: ?AST.Node.Id = null,
     last_child: ?AST.Node.Id = null,
     pending_key: ?AST.Node.Id = null,
+    /// Object only: every key text seen so far, to warn on a repeat (see
+    /// `Warning.Code.duplicate_key`). Freed when the container closes
+    /// (`closeContainer`) or, on an aborted parse, in `Parser.deinit`.
+    seen_keys: std.StringHashMapUnmanaged(void) = .empty,
 };
 
 // State
@@ -61,8 +67,165 @@ allocator: std.mem.Allocator,
 /// (unquoted keys, trailing commas, `Infinity`/`NaN`, single-quoted strings).
 format: Type = .JSON,
 
+/// Error-recovery mode: when set, a per-token dispatch failure is recorded
+/// into `diagnostics` and the parser resyncs to the next safe token instead of
+/// aborting — see `resync`. Off by default; `parseCollecting` turns it on.
+/// `error.OutOfMemory` is never recovered (it is not a document defect).
+recover: bool = false,
+/// Every parse error hit so far, in source order. Populated on EVERY failure
+/// (not just in `recover` mode) — the single-shot entry points
+/// (`parse`/`parseWithReport`) still stop at the first, but the location is
+/// captured the same way either way, so `parseWithReport`'s `Report.diag`
+/// never has to re-derive it differently from `parseCollecting`'s
+/// `Report.errors[0]`.
+diagnostics: std.ArrayList(Diagnostic) = .empty,
+/// Authoring-time lints collected during the parse (see `Warning.Code`).
+/// Valid alongside a failure too, same as fig's.
+warnings: std.ArrayList(Warning) = .empty,
+
 const ParseError = error{ UnclosedObject, UnclosedArray, UnclosedString, InvalidBool, InvalidNumber, UnexpectedToken, InvalidUnicodeEscape };
 const ParserError = ParseError || std.mem.Allocator.Error;
+const TokenizeError = Tokenizer.TokenizeError;
+
+/// The union of every error this parser can produce — both the one-shot
+/// tokenizer (which runs to completion before the token loop even starts, so
+/// its failures need describing too) and the token-dispatch parser. Kept as
+/// one flat set (mirrors fig's `Error = error{...} || tok.ScanError`) so a
+/// `Diagnostic` needs only one `code` field regardless of which stage failed.
+pub const Error = ParserError || TokenizeError;
+
+/// The teaching message for `code` — one sentence naming the fix, same
+/// contract as fig's `describe` (DESIGN.md "every diagnostic names the fix").
+/// JSON's flatter, single-state-machine grammar means many distinct mistakes
+/// (a missing comma, a bad key, a stray token) all surface as the same
+/// `UnexpectedToken` — so that message stays intentionally general; the
+/// caret still narrows it to the exact offending token.
+pub fn describe(code: Error) []const u8 {
+    return switch (code) {
+        error.UnclosedObject => "unclosed object; add the missing `}`",
+        error.UnclosedArray => "unclosed array; add the missing `]`",
+        error.UnclosedString => "unclosed string; a JSON string cannot span multiple lines — add the closing quote, or escape the newline as `\\n`",
+        error.InvalidBool => "not a valid boolean; JSON's only booleans are the lowercase literals `true` and `false`",
+        error.InvalidNumber => "not a valid number; a JSON number allows at most one `.` and one exponent (`e`/`E`)",
+        error.UnexpectedToken => "unexpected token here; check for a missing comma, colon, key, or closing bracket/brace",
+        error.InvalidUnicodeEscape => "invalid `\\u` escape; it needs exactly 4 hex digits (e.g. `\\u00e9`)",
+        error.MissingToken => "missing token",
+        error.UnexpectedSlash => "a `/` here must start a `//` or `/* */` comment, and strict JSON has no comments at all — use a .jsonc/.json5 file, or remove it",
+        error.MissingCloseBrace => "missing `}` to close this object",
+        error.MissingOpenQuote => "object keys must be quoted strings in strict JSON — write `\"key\"`, or use a .json5 file for unquoted keys",
+        error.MissingColon => "missing `:` between this key and its value",
+        error.MissingCloseBracket => "missing `]` to close this array",
+        error.LeadingZero => "a number cannot have a leading zero; write the digits without the padding, or quote it as a string to keep the padding (e.g. a zip code)",
+        error.UnexpectedEndOfInput => "the document ended before this value/token was complete",
+        error.UnclosedComment => "unclosed block comment; add the closing `*/`",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+/// A short (few-word) noun phrase for `code` — for a caret annotation
+/// (`^ unexpected token`), same purpose as fig's `shortLabel`.
+pub fn shortLabel(code: Error) []const u8 {
+    return switch (code) {
+        error.UnclosedObject => "unclosed object",
+        error.UnclosedArray => "unclosed array",
+        error.UnclosedString => "unclosed string",
+        error.InvalidBool => "invalid boolean",
+        error.InvalidNumber => "invalid number",
+        error.UnexpectedToken => "unexpected token",
+        error.InvalidUnicodeEscape => "invalid unicode escape",
+        error.MissingToken => "missing token",
+        error.UnexpectedSlash => "comments not allowed here",
+        error.MissingCloseBrace => "missing `}`",
+        error.MissingOpenQuote => "key must be quoted",
+        error.MissingColon => "missing `:`",
+        error.MissingCloseBracket => "missing `]`",
+        error.LeadingZero => "leading zero",
+        error.UnexpectedEndOfInput => "unexpected end of input",
+        error.UnclosedComment => "unclosed comment",
+        error.OutOfMemory => "out of memory",
+    };
+}
+
+/// A parse failure plus the byte span where it fired. The parser doesn't
+/// thread a location through every helper's return site (`getString`,
+/// `getNumber`, …); instead the main token loop (`parse_once`) knows which
+/// token it was dispatching when an error propagates and anchors the
+/// diagnostic on that token's whole span — less surgical than fig's per-site
+/// overrides (an invalid `\u` escape mid-string points at the whole string,
+/// not the 4 offending hex chars), but a real location beats none, and JSON's
+/// flat grammar rarely needs finer resolution. A tokenizer failure (before the
+/// token loop starts) anchors on the tokenizer's cursor instead.
+pub const Diagnostic = struct {
+    code: Error,
+    offset: usize,
+    end: ?usize = null,
+
+    /// 1-based line/column of `offset`, plus the full offending line.
+    pub fn locate(self: Diagnostic, source: []const u8) parse_diagnostic.Location {
+        return parse_diagnostic.locateOffset(source, self.offset);
+    }
+
+    /// Render `file:line:col: error: <message>` + source line + caret.
+    pub fn renderAlloc(self: Diagnostic, allocator: std.mem.Allocator, source: []const u8, file: []const u8) std.mem.Allocator.Error![]u8 {
+        return parse_diagnostic.renderReportAlloc(allocator, source, self.offset, file, "error", describe(self.code));
+    }
+};
+
+/// An authoring-time lint: the document is valid JSON, but the shape is a
+/// likely mistake. Collected during the parse (valid alongside a failure too);
+/// the caller (CLI `--quiet`/`--strict`, a future language server) decides how
+/// to present it — same contract as fig's `Warning`.
+pub const Warning = struct {
+    code: Code,
+    offset: usize,
+    end: ?usize = null,
+
+    pub const Code = enum {
+        /// A key appears more than once in one object. Legal per the JSON
+        /// spec (which does not forbid it), but consumers disagree on which
+        /// value wins (this library's own `getValByPath` resolves to the
+        /// FIRST; most JS-based tooling resolves to the LAST) — so one value
+        /// is always silently discarded, which is rarely what a hand-edited
+        /// or merged file meant.
+        duplicate_key,
+    };
+
+    pub fn describeWarning(code: Code) []const u8 {
+        return switch (code) {
+            .duplicate_key => "this key already appears earlier in the object; the JSON spec allows it, but most consumers keep only ONE of the two values (which one is implementation-defined) and silently discard the other — remove one of the two, or rename a key if both were intended",
+        };
+    }
+
+    /// A short (few-word) noun phrase for `code` — mirrors `shortLabel`.
+    pub fn shortLabel(code: Code) []const u8 {
+        return switch (code) {
+            .duplicate_key => "duplicate key",
+        };
+    }
+
+    pub fn locate(self: Warning, source: []const u8) parse_diagnostic.Location {
+        return parse_diagnostic.locateOffset(source, self.offset);
+    }
+
+    /// Render `file:line:col: warning: <message>` + source line + caret.
+    pub fn renderAlloc(self: Warning, allocator: std.mem.Allocator, source: []const u8, file: []const u8) std.mem.Allocator.Error![]u8 {
+        return parse_diagnostic.renderReportAlloc(allocator, source, self.offset, file, "warning", describeWarning(self.code));
+    }
+};
+
+/// Everything a parse reports besides the tree — mirrors fig's `Report`
+/// (`languages/fig/parser.zig`) field-for-field, so the CLI treats every
+/// language's report the same shape (see `main.zig`'s `checkOne`).
+pub const Report = struct {
+    diag: ?Diagnostic = null,
+    /// Every parse error, in source order — populated ONLY by the recovering
+    /// entry point (`parseCollecting`), which resyncs past each failure and
+    /// keeps going. The single-shot `parse`/`parseWithReport` stop at the
+    /// first error and leave this empty, setting `diag` alone. When
+    /// non-empty, `diag` mirrors `errors[0]`.
+    errors: []const Diagnostic = &.{},
+    warnings: []const Warning = &.{},
+};
 
 const State = enum {
     ExpectValue,
@@ -227,9 +390,46 @@ pub fn parseAbstract(allocator: std.mem.Allocator, input: []const u8, format: Ty
 }
 
 pub fn parse(allocator: std.mem.Allocator, input: []const u8, format: Type) !Document {
-    var parser: Parser = .{ .allocator = allocator };
+    return parseImpl(allocator, input, format, null, false);
+}
+
+/// `parse`, but also fills `out`: `diag` on failure (error code + byte span,
+/// for `file:line:col` teaching messages), `warnings` always (authoring-time
+/// lints — currently just `duplicate_key`). Mirrors fig's
+/// `Parser.parseWithReport` — the hook the CLI renders reports from.
+pub fn parseWithReport(allocator: std.mem.Allocator, input: []const u8, format: Type, out: *Report) !Document {
+    return parseImpl(allocator, input, format, out, false);
+}
+
+/// `parseWithReport`, but recovers past each parser-level error (resyncing to
+/// the next safe token — see `resync`) to collect the WHOLE file's diagnostics
+/// in one pass (`out.errors`, source order) rather than stopping at the first.
+/// A TOKENIZER failure (before the token loop even starts) is never
+/// recoverable — it still stops the parse after exactly one diagnostic. On any
+/// error the return value is still the first error code and the tree is NOT
+/// built (both consumers discard it); a clean parse returns the Document
+/// exactly as `parseWithReport` would. `out.diag` mirrors `errors[0]`. Mirrors
+/// fig's `Parser.parseCollecting`.
+pub fn parseCollecting(allocator: std.mem.Allocator, input: []const u8, format: Type, out: *Report) !Document {
+    return parseImpl(allocator, input, format, out, true);
+}
+
+fn parseImpl(allocator: std.mem.Allocator, input: []const u8, format: Type, out: ?*Report, recover: bool) !Document {
+    var parser: Parser = .{ .allocator = allocator, .recover = recover };
     defer parser.deinit();
-    return parser.parse_once(input, format);
+    const result = parser.parse_once(input, format);
+    // Warnings are duped out on every exit path (they are valid alongside a
+    // failure too), before `parser.deinit()` frees the list.
+    if (out) |o| o.warnings = allocator.dupe(Warning, parser.warnings.items) catch &.{};
+    return result catch |err| {
+        if (out) |o| {
+            if (parser.diagnostics.items.len > 0) {
+                o.diag = parser.diagnostics.items[0];
+                if (recover) o.errors = allocator.dupe(Diagnostic, parser.diagnostics.items) catch &.{};
+            }
+        }
+        return err;
+    };
 }
 
 fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
@@ -240,29 +440,136 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
         .kind = kind,
     };
 
-    const tokens = try tokenizer.tokenize();
+    const tokens = tokenizer.tokenize() catch |err| {
+        // The tokenizer's cursor sits on (or just after) the offending byte —
+        // precise enough for `file:line:col` without threading a location
+        // through its many scan-error sites (mirrors the parser's own
+        // token-span anchor below).
+        try self.diagnostics.append(self.allocator, .{ .code = err, .offset = tokenizer.index });
+        return err;
+    };
     defer self.allocator.free(tokens);
 
     // Each Document.Node has an id, a kind, and a next_sibling ID.
     // We produce them from the tokens.
 
-    for (tokens, 0..) |token, i| {
+    var i: usize = 0;
+    while (i < tokens.len) {
+        const token = tokens[i];
         switch (token.kind) {
             // A newline closes the previous value's trailing-comment window: a
             // comment on the next line leads the next node instead.
             .whitespace => {
                 if (std.mem.indexOfScalar(u8, input[token.span.start..token.span.end], '\n') != null)
                     self.last_value_id = null;
+                i += 1;
                 continue;
             },
             .comment => {
                 try self.handleComment(input, tokens, i);
+                i += 1;
                 continue;
             },
             else => {},
         }
 
-        switch (self.state) {
+        self.dispatchToken(input, token) catch |err| {
+            if (err == error.OutOfMemory) return err; // never a document defect
+            // Anchor on the WHOLE token being dispatched when the error fired
+            // — the exact site varies (a bad key, a missing colon, an
+            // unclosed container noticed at EOF), but the current token is
+            // always a reasonable, precise-enough caret.
+            try self.diagnostics.append(self.allocator, .{ .code = err, .offset = token.span.start, .end = token.span.end });
+            if (!self.recover) return err;
+            const sync = self.resync(tokens, i);
+            switch (tokens[sync].kind) {
+                .comma => {
+                    // Consume the comma ourselves and put the parser into the
+                    // state it legally produces, so the next key/value parses
+                    // normally from the token right after it.
+                    if (self.container_stack.items.len > 0) {
+                        const top = self.container_stack.items[self.container_stack.items.len - 1];
+                        self.state = switch (top.kind) {
+                            .array => .ExpectArrayValueOrEnd,
+                            .object => .ExpectObjectKey,
+                        };
+                    }
+                    i = sync + 1;
+                },
+                .close_bracket, .close_brace => {
+                    // Leave the closer for the normal dispatch to consume,
+                    // but fix the state first so it's legal to see it (the
+                    // failure may have left `self.state` expecting something
+                    // else entirely, e.g. a colon).
+                    if (self.container_stack.items.len > 0) {
+                        const top = self.container_stack.items[self.container_stack.items.len - 1];
+                        self.state = switch (top.kind) {
+                            .array => .ExpectArrayCommaOrEnd,
+                            .object => .ExpectObjectCommaOrEnd,
+                        };
+                    }
+                    i = sync;
+                },
+                // Nothing left to resync onto (EOF): stop recovering. Falls
+                // through to the shared diagnostics check below, which
+                // returns `diagnostics.items[0].code` — the first failure,
+                // same contract as the non-recovering path.
+                else => break,
+            }
+            continue;
+        };
+        i += 1;
+    }
+
+    if (self.diagnostics.items.len > 0) {
+        // Recover mode collected 1+ errors (or the loop above stopped early):
+        // the tree may be malformed (dangling open containers, no root), so
+        // don't try to build it — return the first failure's code, matching
+        // the non-recovering contract exactly. `parseImpl` reads the full list
+        // out of `self.diagnostics` for `Report.errors` before this unwinds.
+        return self.diagnostics.items[0].code;
+    }
+
+    // Ready to return a Document!
+    const root = self.root orelse return ParseError.UnexpectedToken;
+
+    const nodes = try self.nodes.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(nodes);
+    self.nodes = .empty;
+
+    const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
+    errdefer self.allocator.free(node_spans);
+    self.node_spans = .empty;
+
+    const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
+    self.owned_strings = .empty;
+
+    var ast: AST = .{
+        .allocator = self.allocator,
+        .owned_strings = owned_strings,
+        .root = root,
+        .nodes = nodes,
+    };
+    // Materialized last (no fallible step follows): hand the owned `leading`
+    // slices to the AST. Only when comments were actually attached.
+    if (self.comments_seen) {
+        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
+        self.node_comments = .empty;
+    }
+
+    return .{
+        .source = input,
+        .ast = ast,
+        .node_spans = node_spans,
+    };
+}
+
+/// One token's worth of the state machine — extracted from `parse_once`'s
+/// main loop so it can be `catch`-wrapped there (single-shot: propagate;
+/// `recover`: record + resync — see `resync`) without duplicating the switch.
+/// Bodies are unchanged from the original inline dispatch.
+fn dispatchToken(self: *Parser, input: []const u8, token: Token) ParserError!void {
+    switch (self.state) {
             .ExpectValue => {
                 switch (token.kind) {
                     .open_brace => {
@@ -419,49 +726,62 @@ fn parse_once(self: *Parser, input: []const u8, kind: Type) !Document {
 
             .ExpectEndOfFile => {
                 switch (token.kind) {
-                    .end_of_file => continue,
+                    .end_of_file => {},
                     else => return ParseError.UnexpectedToken,
                 }
             },
         }
+}
+
+/// After a parse error at `tokens[start]` (only reachable in `recover` mode),
+/// scan forward for a safe resumption point: the next `,`/`]`/`}` at the SAME
+/// nesting depth as the error, tracking any `[`/`{` seen along the way so a
+/// well-formed nested value inside the garbage doesn't confuse the scan (a
+/// `,` or closer belonging to a nested container it opens doesn't count).
+/// A depth-0 closer whose kind doesn't match the currently open container
+/// (`]` while an object is open, or vice versa — garbage, not a real close of
+/// anything reachable here) is skipped like ordinary content rather than
+/// accepted: the caller always resumes dispatch AT the token this returns for
+/// the close-bracket/brace case, so returning a non-matching one would hand
+/// dispatch a token it rejects in the very same state, re-erroring on the
+/// same index forever. Falls back to the tokenizer's own trailing
+/// `end_of_file` token when no such point exists before it (unclosed to the
+/// end of the document), or when a matching closer would close a container
+/// that isn't actually open (nothing left to recover into at the root) — the
+/// caller's outer loop treats landing on `end_of_file` as "stop recovering",
+/// so this always terminates.
+fn resync(self: *Parser, tokens: []const Token, start: usize) usize {
+    var depth: isize = 0;
+    var j = start;
+    while (j < tokens.len) : (j += 1) {
+        switch (tokens[j].kind) {
+            .open_brace, .open_bracket => depth += 1,
+            .close_brace, .close_bracket => {
+                if (depth == 0) {
+                    if (self.container_stack.items.len == 0) return tokens.len - 1;
+                    const top = self.container_stack.items[self.container_stack.items.len - 1];
+                    const matches = (tokens[j].kind == .close_brace and top.kind == .object) or
+                        (tokens[j].kind == .close_bracket and top.kind == .array);
+                    if (matches) return j;
+                    // Mismatched closer: doesn't belong to anything open at
+                    // this depth (e.g. `]` while an object is open) — treat it
+                    // as ordinary garbage and keep scanning past it.
+                    continue;
+                }
+                depth -= 1;
+            },
+            .comma => if (depth == 0) return j,
+            .end_of_file => return j,
+            else => {},
+        }
     }
-
-    // while loop completed.
-    // Ready to return a Document!
-    const root = self.root orelse return ParseError.UnexpectedToken;
-
-    const nodes = try self.nodes.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(nodes);
-    self.nodes = .empty;
-
-    const node_spans = try self.node_spans.toOwnedSlice(self.allocator);
-    errdefer self.allocator.free(node_spans);
-    self.node_spans = .empty;
-
-    const owned_strings = try self.owned_strings.toOwnedSlice(self.allocator);
-    self.owned_strings = .empty;
-
-    var ast: AST = .{
-        .allocator = self.allocator,
-        .owned_strings = owned_strings,
-        .root = root,
-        .nodes = nodes,
-    };
-    // Materialized last (no fallible step follows): hand the owned `leading`
-    // slices to the AST. Only when comments were actually attached.
-    if (self.comments_seen) {
-        ast.node_comments = try self.node_comments.toOwnedSlice(self.allocator);
-        self.node_comments = .empty;
-    }
-
-    return .{
-        .source = input,
-        .ast = ast,
-        .node_spans = node_spans,
-    };
+    return tokens.len - 1;
 }
 
 pub fn deinit(self: *Parser) void {
+    // An aborted parse can still have open containers whose `seen_keys` map
+    // was never freed by a normal `closeContainer` — do it here instead.
+    for (self.container_stack.items) |*c| c.seen_keys.deinit(self.allocator);
     self.container_stack.deinit(self.allocator);
     self.nodes.deinit(self.allocator);
     self.node_spans.deinit(self.allocator);
@@ -474,6 +794,8 @@ pub fn deinit(self: *Parser) void {
     for (self.node_comments.items) |nc| self.allocator.free(nc.leading);
     self.node_comments.deinit(self.allocator);
     self.pending_leading.deinit(self.allocator);
+    self.diagnostics.deinit(self.allocator);
+    self.warnings.deinit(self.allocator);
 }
 
 // ===============
@@ -582,7 +904,19 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) !void {
             const key_id = parent.pending_key orelse return ParseError.UnexpectedToken;
             parent.pending_key = null;
 
+            // Authoring-time lint: JSON permits duplicate keys within one
+            // object (the spec does not forbid it), but every mainstream
+            // parser keeps only the LAST value, so an earlier duplicate is
+            // silently discarded — warn rather than stay silent about it (see
+            // `Warning.Code.duplicate_key`).
             const key_span = self.node_spans.items[key_id];
+            const key_text = self.nodes.items[key_id].kind.string;
+            if (parent.seen_keys.contains(key_text)) {
+                try self.warnings.append(self.allocator, .{ .code = .duplicate_key, .offset = key_span.start, .end = key_span.end });
+            } else {
+                try parent.seen_keys.put(self.allocator, key_text, {});
+            }
+
             const value_span = self.node_spans.items[value_id];
             const pair_id = try self.addNode(.{ .keyvalue = .{
                 .key = key_id,
@@ -745,7 +1079,8 @@ fn openContainer(self: *Parser, kind: ContainerKind, node_id: AST.Node.Id) !void
 /// `dangling` run.
 fn closeContainer(self: *Parser, span_end: usize) !AST.Node.Id {
     if (self.container_stack.items.len == 0) return ParseError.UnexpectedToken;
-    const container = self.container_stack.pop().?;
+    var container = self.container_stack.pop().?;
+    container.seen_keys.deinit(self.allocator);
     self.node_spans.items[container.id].end = span_end;
     try self.claimDangling(container.id);
     return container.id;
@@ -1012,6 +1347,109 @@ test "json5: comment-free document carries no comment table" {
     var ast = try parseJson5("{ a: 1, b: [2, 3] }");
     defer ast.deinit();
     try testing.expectEqual(@as(usize, 0), ast.node_comments.len);
+}
+
+// ── diagnostics ──────────────────────────────────────────────────────────────
+
+test "parseWithReport anchors the diagnostic on the offending token" {
+    var report: Report = .{};
+    // `{"a": }` — the value slot is empty; the `}` is the unexpected token.
+    const src = "{\"a\": }";
+    try testing.expectError(error.UnexpectedToken, Parser.parseWithReport(testing.allocator, src, .JSON, &report));
+    defer testing.allocator.free(report.warnings);
+    const d = report.diag.?;
+    try testing.expectEqual(error.UnexpectedToken, d.code);
+    try testing.expectEqual(@as(usize, 6), d.offset); // the `}`
+    try testing.expectEqual(@as(usize, 0), report.errors.len); // single-shot: no recovery
+}
+
+test "parseWithReport reports the tokenizer's own failures with a location" {
+    var report: Report = .{};
+    const src = "{\"a\": \"unterminated}";
+    try testing.expectError(error.UnclosedString, Parser.parseWithReport(testing.allocator, src, .JSON, &report));
+    defer testing.allocator.free(report.warnings);
+    const d = report.diag.?;
+    try testing.expectEqual(error.UnclosedString, d.code);
+}
+
+test "parseCollecting reports every error in one pass" {
+    var report: Report = .{};
+    // Three malformed entries in one object, using only lexically-valid
+    // tokens (a bare identifier like `bogus` would fail at the TOKENIZER
+    // stage in strict JSON, which is never recoverable — see `parse_once`'s
+    // doc comment; these are genuine PARSER-level placement mistakes): a
+    // missing value (`,` where `ExpectObjectValue` wants one), a stray number
+    // before the next comma, and another stray number before the close.
+    // Strict JSON should surface all three, not just the first.
+    const src = "{\"a\": , \"b\": 1 2, \"c\": 3 4}";
+    defer if (report.errors.len > 0) testing.allocator.free(report.errors);
+    defer testing.allocator.free(report.warnings);
+    try testing.expectError(error.UnexpectedToken, Parser.parseCollecting(testing.allocator, src, .JSON, &report));
+    try testing.expectEqual(@as(usize, 3), report.errors.len);
+    // Errors are recorded in source order.
+    var last_offset: usize = 0;
+    for (report.errors) |d| {
+        try testing.expectEqual(error.UnexpectedToken, d.code);
+        try testing.expect(d.offset >= last_offset);
+        last_offset = d.offset;
+    }
+}
+
+test "parseCollecting still recovers a trailing well-formed key/value after a broken one" {
+    var report: Report = .{};
+    defer if (report.errors.len > 0) testing.allocator.free(report.errors);
+    defer testing.allocator.free(report.warnings);
+    const src = "{\"bad\": , \"good\": 42}";
+    try testing.expectError(error.UnexpectedToken, Parser.parseCollecting(testing.allocator, src, .JSON, &report));
+    try testing.expectEqual(@as(usize, 1), report.errors.len);
+}
+
+test "parseCollecting terminates on a mismatched closer instead of looping forever" {
+    // `]` while an OBJECT is open (not an array) is garbage at that position —
+    // `resync` must not treat it as a valid sync point just because SOME
+    // container happens to be open (see `resync`'s doc comment); otherwise
+    // dispatch rejects the same token forever.
+    var report: Report = .{};
+    defer if (report.errors.len > 0) testing.allocator.free(report.errors);
+    defer testing.allocator.free(report.warnings);
+    const src = "{\"a\":1]";
+    try testing.expectError(error.UnexpectedToken, Parser.parseCollecting(testing.allocator, src, .JSON, &report));
+    try testing.expect(report.errors.len >= 1);
+
+    // The reverse shape: `}` while an ARRAY is open.
+    var report2: Report = .{};
+    defer if (report2.errors.len > 0) testing.allocator.free(report2.errors);
+    defer testing.allocator.free(report2.warnings);
+    const src2 = "[1}";
+    try testing.expectError(error.UnexpectedToken, Parser.parseCollecting(testing.allocator, src2, .JSON, &report2));
+    try testing.expect(report2.errors.len >= 1);
+}
+
+test "duplicate object key warns without failing the parse" {
+    var report: Report = .{};
+    var ast = try Parser.parseWithReport(testing.allocator, "{\"a\": 1, \"a\": 2}", .JSON, &report);
+    defer ast.deinit(testing.allocator);
+    defer testing.allocator.free(report.warnings);
+    try testing.expectEqual(@as(usize, 1), report.warnings.len);
+    try testing.expectEqual(Warning.Code.duplicate_key, report.warnings[0].code);
+    // The warning anchors on the SECOND (repeated) key, not the first.
+    try testing.expectEqual(@as(usize, 9), report.warnings[0].offset);
+}
+
+test "no duplicate-key warning across sibling objects, or for array elements" {
+    var report: Report = .{};
+    var ast = try Parser.parseWithReport(testing.allocator, "[{\"a\": 1}, {\"a\": 2}]", .JSON, &report);
+    defer ast.deinit(testing.allocator);
+    defer testing.allocator.free(report.warnings);
+    try testing.expectEqual(@as(usize, 0), report.warnings.len);
+}
+
+test "describe and shortLabel cover every Error variant" {
+    // Exhaustiveness is enforced by the compiler (the switches in `describe`/
+    // `shortLabel` must cover every `Error` member); this just checks a
+    // sample renders non-empty teaching text.
+    try testing.expect(describe(error.UnexpectedToken).len > 0);
+    try testing.expect(shortLabel(error.LeadingZero).len > 0);
 }
 
 fn countItems(ast: AST, container: AST.Node.Id) usize {

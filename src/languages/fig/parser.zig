@@ -182,53 +182,23 @@ pub fn shortLabel(code: Error) []const u8 {
     };
 }
 
-/// 1-based line/column plus the full offending line — shared by `Diagnostic`
-/// (errors) and `Warning` (lints) so both render the same report shape.
-pub const Location = struct { line: usize, column: usize, line_text: []const u8 };
-
-/// Locate `offset` in `source`. A cursor resting exactly past a newline means
-/// the problem was detected while finishing the previous line (duplicate key,
-/// unclosed flow at EOF, …) — report end-of-that-line, not column 1 of an
-/// empty next one.
-pub fn locateOffset(source: []const u8, offset: usize) Location {
-    var at = @min(offset, source.len);
-    if (at > 0 and source[at - 1] == '\n') at -= 1;
-    var line: usize = 1;
-    var line_start: usize = 0;
-    for (source[0..at], 0..) |c, i| {
-        if (c == '\n') {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-    const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
-    return .{ .line = line, .column = at - line_start + 1, .line_text = source[line_start..line_end] };
-}
+/// Shared byte-offset → line/col + `file:line:col:` report rendering — the
+/// half of the diagnostic system that has nothing to do with fig's own error
+/// codes. Every other language's parser (`json`, and `toml`/`yaml` to come)
+/// reuses this same module rather than each growing its own copy — see
+/// `src/parse_diagnostic.zig`'s doc comment. `Location`/`locateOffset` are
+/// re-exported under their original names so existing call sites
+/// (`Parser.locateOffset`, `Parser.Location`, in `main.zig`/`lsp/main.zig`)
+/// keep working unchanged.
+const parse_diagnostic = @import("../../parse_diagnostic.zig");
+pub const Location = parse_diagnostic.Location;
+pub const locateOffset = parse_diagnostic.locateOffset;
 
 /// The compiler-style report both severities share: `file:line:col: <label>:
 /// <message>`, then the offending source line and a caret marking the column.
 /// Caller owns the returned bytes.
 fn renderReportAlloc(allocator: Allocator, source: []const u8, offset: usize, file: []const u8, label: []const u8, message: []const u8) Allocator.Error![]u8 {
-    const loc = locateOffset(source, offset);
-    var aw = std.Io.Writer.Allocating.init(allocator);
-    defer aw.deinit();
-    renderReport(&aw.writer, loc, file, label, message) catch return error.OutOfMemory;
-    return aw.toOwnedSlice();
-}
-
-fn renderReport(w: *std.Io.Writer, loc: Location, file: []const u8, label: []const u8, message: []const u8) std.Io.Writer.Error!void {
-    try w.print("{s}:{d}:{d}: {s}: {s}\n", .{ file, loc.line, loc.column, label, message });
-    // The offending line, capped so a pathological line can't flood the
-    // terminal. The caret line mirrors tabs so it stays aligned under them.
-    const max_shown = 160;
-    const shown = loc.line_text[0..@min(loc.line_text.len, max_shown)];
-    if (shown.len == 0) return; // EOF/blank line: nothing to point into
-    try w.print("    {s}{s}\n", .{ shown, if (shown.len < loc.line_text.len) "…" else "" });
-    if (loc.column - 1 <= shown.len) {
-        try w.writeAll("    ");
-        for (shown[0 .. loc.column - 1]) |c| try w.writeByte(if (c == '\t') '\t' else ' ');
-        try w.writeAll("^\n");
-    }
+    return parse_diagnostic.renderReportAlloc(allocator, source, offset, file, label, message);
 }
 
 /// A parse failure plus the byte position where the parser stopped. The parser

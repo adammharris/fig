@@ -10,6 +10,12 @@ pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
 /// Serialization diagnostics: report what a cross-format conversion would lose.
 pub const Diagnostics = @import("diagnostics.zig");
+/// Shared parse-diagnostic rendering (byte-offset → line/col, the
+/// `file:line:col: label: message` report, the language-agnostic `Rendered`
+/// shape). Each language keeps its own error/warning codes and teaching
+/// messages; only the offset/rendering machinery is shared — see the module
+/// doc comment.
+pub const ParseDiagnostic = @import("parse_diagnostic.zig");
 /// The canonical form: the AST's own 1:1, total, bijective text encoding — the
 /// comparison oracle and lossless serialization. (Formerly "native".) The
 /// human-facing `fig` authoring dialect is a separate surface over the same AST;
@@ -39,6 +45,7 @@ test {
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
     _ = @import("diagnostics.zig");
+    _ = @import("parse_diagnostic.zig");
     _ = @import("canonical/canonical.zig");
     _ = @import("deserialize.zig");
     _ = @import("c_api.zig");
