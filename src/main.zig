@@ -11,6 +11,7 @@ const Io = std.Io;
 // library, the C ABI, or `Language.detect`. It rides the `get` pipeline by
 // deriving straight from the public AST (see `cli/gron.zig`).
 const gron = @import("cli/gron.zig");
+const diff = @import("cli/diff.zig");
 
 // Logging for the CLI binary. `std.log`'s default handler (`std.log.defaultLog`)
 // writes to stderr through `std.Options.debug_io` — a statically initialized,
@@ -83,6 +84,7 @@ const CliAction = enum {
     get,
     comment,
     check,
+    fmt,
 };
 
 const CliActionOptions = union(CliAction) {
@@ -234,6 +236,36 @@ const CliActionOptions = union(CliAction) {
         quiet: bool = false,
         requested_help: bool = false,
     },
+    fmt: struct {
+        /// The file to reformat in place. `-` reads stdin — only valid with
+        /// `dry_run` (there is nowhere to write an in-place result back to).
+        file: []const u8,
+        /// The single format `fmt` parses AND re-emits — unlike `get`, there is
+        /// no `--output`: reformatting never changes the document's format.
+        from: Format,
+        requested_help: bool = false,
+        /// Set when `from` could not be inferred from the file extension and no
+        /// `--input` was given: the handler sniffs the contents with
+        /// `Language.detect`.
+        detect: bool = false,
+        /// Output style — see `get`'s twin field.
+        serialize: fig.AST.SerializeOptions = .{},
+        /// Suppress the lossy-conversion (e.g. `--strip-comments`) and fig
+        /// authoring-lint warnings normally written to stderr.
+        quiet: bool = false,
+        /// Treat any warning as an error (exit non-zero without writing).
+        strict: bool = false,
+        /// Print the reformatted result to stdout instead of writing it back,
+        /// and exit 1 if reformatting would change the file (0 if already
+        /// clean) — the CI-friendly "would this file's formatting change" gate.
+        dry_run: bool = false,
+        /// Like `dry_run`, but print a unified diff of the change instead of
+        /// the whole reformatted file (nothing is written either way).
+        diff: bool = false,
+        /// When set, `file` is a host document (e.g. markdown) and only its
+        /// embedded region is reformatted, spliced back in place.
+        embed: ?fig.Embed.Type = null,
+    },
 };
 
 /// The in-place editing operation `applyEdit` performs. Generalizes the editor's
@@ -292,6 +324,7 @@ const Help = struct {
             \\  get: print a file or a specific part of a file to stdout
             \\  comment: add or edit a comment on part of a file
             \\  check: validate that one or more files parse cleanly
+            \\  fmt: reformat a file in place (house style; gofmt-style)
             \\
             \\For information on action options, pass --help or -h
             \\to the action you would like to learn about.
@@ -408,7 +441,8 @@ const Help = struct {
             \\    extension — select it explicitly.)
             \\  fig: the human-facing authoring dialect (`.fig`); lossy at the
             \\    edges (non-string keys, YAML refs) — use `canonical`/`--lossless`
-            \\    for those. `-o fig` is `fig fmt`.
+            \\    for those. `-o fig` prints in house style; use `fig fmt` to
+            \\    rewrite a file in place instead of printing to stdout.
             \\  gron: a line-oriented `path = value;` projection (greppable, and
             \\    reversible with `-i gron`); must be selected explicitly, never
             \\    sniffed. Fidelity matches JSON (drops comments/anchors).
@@ -463,6 +497,43 @@ const Help = struct {
             \\    warnings; errors still print.
             \\  reads stdin when <file> is `-`.
             \\  .md/.markdown files: validates the YAML frontmatter.
+            \\
+        , .{binary_name});
+        try term.writer.flush();
+    }
+
+    fn fmt(term: *Io.Terminal, binary_name: []const u8) !void {
+        try term.writer.print(
+            \\Usage: {s} fmt [--input <format>] [--dry-run | --diff] <file>
+            \\  Reformat a file in place: parse then re-emit in the format's house
+            \\  style — `.fig`'s printer applies the style DESIGN.md describes
+            \\  (spaced marker runs, `[]`/`+` list sigils, ...); other formats get
+            \\  their own printer's canonical layout. Unlike `get`, the output
+            \\  format always matches the input — reformatting never converts.
+            \\  A file already in house style is left byte-identical (no-op write).
+            \\  --dry-run: print the reformatted result to stdout instead of
+            \\    writing it back; exit 1 if reformatting would change the file,
+            \\    0 if it's already clean — a check gate for pre-commit/CI.
+            \\  --diff: like --dry-run, but print a unified diff of the change to
+            \\    stdout instead of the whole reformatted file; nothing is printed
+            \\    (and exit is 0) when the file is already clean.
+            \\  -i, --input: input format (defaults to the file extension, then
+            \\    to sniffing the file's contents if the extension is unknown).
+            \\  --compact: single-line output with minimal whitespace (JSON, JSON5, ZON).
+            \\  --pretty: multi-line, indented output (the default).
+            \\  --indent N: spaces per indent level for pretty JSON, and for TOML's
+            \\    wrapped arrays (default 2).
+            \\  --width N: TOML column budget (default 80); a mapping/array that fits
+            \\    stays inline, a wider one expands to a [section] / wrapped array.
+            \\  --strip-comments: drop comments instead of re-emitting them.
+            \\  -q, --quiet: suppress warnings on stderr.
+            \\  --strict: treat any warning as an error (exit non-zero, no write).
+            \\  --embed <archetype>: reformat an embedded region of a host file —
+            \\    `frontmatter` (the .md default), `frontmatter-json`,
+            \\    `frontmatter-fig`, or `endmatter` — instead of the whole file.
+            \\  reads stdin when <file> is `-`, but only with --dry-run/--diff:
+            \\    there is nowhere to write an in-place result back to.
+            \\  .md/.markdown files: reformats the YAML frontmatter in place.
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -528,6 +599,10 @@ pub fn main(init: std.process.Init) !void {
         },
         ArgError.MissingCheckArgument => {
             try Help.check(&stderr_terminal, "fig");
+            std.process.exit(2);
+        },
+        ArgError.MissingFmtArgument => {
+            try Help.fmt(&stderr_terminal, "fig");
             std.process.exit(2);
         },
         else => return err,
@@ -1056,6 +1131,87 @@ pub fn main(init: std.process.Init) !void {
             try stderr_terminal.writer.flush();
             if (any_failed) std.process.exit(1);
         },
+        .fmt => {
+            const opts = config.options.fmt;
+            if (opts.requested_help) {
+                try Help.fmt(&stdout_terminal, config.binary_name);
+                return;
+            }
+            // `--diff` is a preview mode just like `--dry-run` — nothing is
+            // ever written to `file` under either.
+            const preview_only = opts.dry_run or opts.diff;
+            const is_stdin = std.mem.eql(u8, opts.file, "-");
+            if (!preview_only and is_stdin) {
+                try stderr_terminal.writer.print(
+                    "error: cannot format stdin in place; pass --dry-run or --diff to print the formatted result instead.\n",
+                    .{},
+                );
+                try stderr_terminal.writer.flush();
+                std.process.exit(2);
+            }
+
+            // Read-only when only previewing (`--dry-run`/`--diff`): no need to
+            // open for writing what will never be written. Otherwise read_write,
+            // like `edit`/`set`/`insert`/`delete` — read the whole file first,
+            // then splice the same handle in place (never via shell redirection,
+            // which truncates a `> file` target before this process ever runs).
+            const input = try getInput(io, opts.file, if (preview_only) .read_only else .read_write);
+            defer if (!is_stdin) input.close(io);
+
+            const a = init.arena.allocator();
+            const content = try readAll(a, io, input);
+
+            // `--embed`: only the region between the fences is reformatted; the
+            // rest of the host document is carried through byte-identical.
+            if (opts.embed) |embed_type| {
+                const region = try fig.Embed.locateRegion(content, embed_type);
+                const inner = content[region.content.start..region.content.end];
+                const reformatted_inner = try reformatSlice(a, &stderr_terminal, opts.file, embedFormat(embed_type), inner, opts.serialize, opts.quiet, opts.strict);
+
+                var out: std.ArrayList(u8) = .empty;
+                defer out.deinit(a);
+                try out.appendSlice(a, content[0..region.content.start]);
+                try out.appendSlice(a, reformatted_inner);
+                try out.appendSlice(a, content[region.content.end..]);
+
+                const changed = !std.mem.eql(u8, content, out.items);
+                if (opts.diff) {
+                    try diff.unifiedDiff(a, stdout_terminal.writer, opts.file, content, out.items, 3);
+                    try stdout_terminal.writer.flush();
+                    if (changed) std.process.exit(1);
+                } else if (opts.dry_run) {
+                    try stdout_terminal.writer.writeAll(out.items);
+                    try stdout_terminal.writer.flush();
+                    if (changed) std.process.exit(1);
+                } else if (changed) {
+                    try input.writePositionalAll(io, out.items, 0);
+                    try input.setLength(io, out.items.len);
+                }
+                return;
+            }
+
+            var from = opts.from;
+            if (opts.detect) from = try resolveFormatFromContent(a, content, opts.file);
+
+            const reformatted = try reformatSlice(a, &stderr_terminal, opts.file, from, content, opts.serialize, opts.quiet, opts.strict);
+            const changed = !std.mem.eql(u8, content, reformatted);
+
+            if (opts.diff) {
+                try diff.unifiedDiff(a, stdout_terminal.writer, opts.file, content, reformatted, 3);
+                try stdout_terminal.writer.flush();
+                if (changed) std.process.exit(1);
+            } else if (opts.dry_run) {
+                try stdout_terminal.writer.writeAll(reformatted);
+                try stdout_terminal.writer.flush();
+                if (changed) std.process.exit(1);
+            } else if (changed) {
+                // Read-then-splice-same-handle (never shell redirection): the
+                // in-memory `content` above was read before this write touches
+                // the file, so there is no truncate-before-read race.
+                try input.writePositionalAll(io, reformatted, 0);
+                try input.setLength(io, reformatted.len);
+            }
+        },
     };
 }
 
@@ -1411,6 +1567,102 @@ fn detectFileFormat(io: Io, allocator: std.mem.Allocator, file_path: []const u8)
     defer if (!std.mem.eql(u8, file_path, "-")) probe.close(io);
     const content = try readAll(allocator, io, probe);
     return resolveFormatFromContent(allocator, content, file_path);
+}
+
+/// Parse `content` as `format` and re-emit it in the *same* format — the `fmt`
+/// action's core, and `get`'s twin minus the cross-format machinery: since the
+/// output format always equals the input, there's no YAML reference-layer
+/// materialization and no `--lossless` envelope pass to consider (those only
+/// matter when `from != to`). Shares `get`'s parse-error/authoring-warning
+/// reporting and lossy-conversion diagnostics so `fmt`'s stderr output matches
+/// `get`'s for the same file. Returns the reformatted bytes (caller-owned).
+fn reformatSlice(
+    allocator: std.mem.Allocator,
+    term: *Io.Terminal,
+    file_path: []const u8,
+    format: Format,
+    content: []const u8,
+    serialize: fig.AST.SerializeOptions,
+    quiet: bool,
+    strict: bool,
+) !([]u8) {
+    if (format == .xml) {
+        try term.writer.print("error: cannot format XML (reader-only; no printer).\n", .{});
+        try term.writer.flush();
+        return error.UnsupportedXmlFmt;
+    }
+    if (format == .gron) {
+        try term.writer.print("error: cannot format gron (a CLI projection, not a stored document format).\n", .{});
+        try term.writer.flush();
+        return error.UnsupportedGronFmt;
+    }
+
+    var fig_report: fig.Language.FIG.Parser.Report = .{};
+    var json_report: fig.Language.JSON.Parser.Report = .{};
+    var toml_report: fig.Language.TOML.Parser.Report = .{};
+    const doc = parseSliceAs(format, .{}, allocator, content, false, .{ .fig = &fig_report, .json = &json_report, .toml = &toml_report }) catch |err| {
+        if (fig_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.FIG.Parser.describe(d.code), fig.Language.FIG.Parser.shortLabel(d.code));
+        if (json_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.JSON.Parser.describe(d.code), fig.Language.JSON.Parser.shortLabel(d.code));
+        if (toml_report.diag) |d|
+            try reportParseError(term, content, file_path, d.offset, d.end, fig.Language.TOML.Parser.describe(d.code), fig.Language.TOML.Parser.shortLabel(d.code));
+        return err;
+    };
+    try handleParseWarnings(term, content, file_path, "fig authoring", fig_report.warnings, fig.Language.FIG.Parser.Warning.describeWarning, fig.Language.FIG.Parser.Warning.shortLabel, quiet, strict);
+    try handleParseWarnings(term, content, file_path, "JSON authoring", json_report.warnings, fig.Language.JSON.Parser.Warning.describeWarning, fig.Language.JSON.Parser.Warning.shortLabel, quiet, strict);
+    try handleParseWarnings(term, content, file_path, "TOML authoring", toml_report.warnings, fig.Language.TOML.Parser.Warning.describeWarning, fig.Language.TOML.Parser.Warning.shortLabel, quiet, strict);
+
+    const target: fig.AST.SerializeFormat = switch (format) {
+        .json => .json,
+        .jsonc => .jsonc,
+        .json5 => .json5,
+        .yaml, .yml => .yaml,
+        .toml => .toml,
+        .zon => .zon,
+        .canonical => .canonical,
+        .fig => .fig,
+        .xml, .gron => unreachable, // rejected up front above
+    };
+
+    if (!quiet or strict) {
+        const warnings = try fig.Diagnostics.analyze(allocator, &doc.ast, doc.ast.root, target, .{
+            .pretty = serialize.pretty,
+            .strip_comments = serialize.strip_comments,
+            .lossless = false,
+        });
+        var surfaced: usize = 0;
+        for (warnings) |w| {
+            if (w.cause != .format_limitation) continue;
+            surfaced += 1;
+            if (!quiet) {
+                try term.setColor(.yellow);
+                try term.writer.writeAll("warning: ");
+                try term.setColor(.reset);
+                try w.render(term.writer, target);
+                try term.writer.writeByte('\n');
+            }
+        }
+        if (!quiet) try term.writer.flush();
+        if (strict and surfaced > 0) {
+            try term.writer.print("error: {d} lossy conversion warning(s); --strict aborts.\n", .{surfaced});
+            try term.writer.flush();
+            std.process.exit(1);
+        }
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    if (target == .toml) {
+        // Same lossy-strip-then-print path `get` uses for a lossy TOML target:
+        // TOML has no null, so an unrepresentable value is dropped up front
+        // (already reported above) rather than aborting mid-print.
+        const result = try fig.Lossless.lossyStrip(allocator, &doc.ast, doc.ast.root, .toml);
+        if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
+    } else {
+        try doc.ast.serializeWith(&out.writer, target, serialize);
+    }
+    return out.toOwnedSlice();
 }
 
 /// Extract the embedded config of `embed_type` from a host file and parse it.
@@ -1829,7 +2081,7 @@ fn embedFormat(t: fig.Embed.Type) Format {
     };
 }
 
-const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
+const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, MissingFmtArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
 
 /// Map a `--input`/`-i` format name to a `Format`. The enum member names cover
 /// every accepted token (including `canonical` and `fig`) directly. Returns null
@@ -2327,6 +2579,118 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                 .requested_help = requested_help,
             },
         };
+    } else if (std.mem.eql(u8, action_str, "fmt") or std.mem.eql(u8, action_str, "f")) {
+        config.action = .fmt;
+
+        var input_override: ?Format = null;
+        var quiet = false;
+        var strict = false;
+        var dry_run = false;
+        var diff_mode = false;
+        var requested_help = false;
+        var embed_override: ?fig.Embed.Type = null;
+        var serialize: fig.AST.SerializeOptions = .{};
+        var positionals: std.ArrayList([]const u8) = .empty;
+        defer positionals.deinit(allocator);
+
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                requested_help = true;
+            } else if (std.mem.eql(u8, arg, "--dry-run")) {
+                dry_run = true;
+            } else if (std.mem.eql(u8, arg, "--diff")) {
+                diff_mode = true;
+            } else if (std.mem.eql(u8, arg, "--compact")) {
+                serialize.pretty = false;
+            } else if (std.mem.eql(u8, arg, "--pretty")) {
+                serialize.pretty = true;
+            } else if (std.mem.eql(u8, arg, "--strip-comments")) {
+                serialize.strip_comments = true;
+            } else if (std.mem.eql(u8, arg, "--quiet") or std.mem.eql(u8, arg, "-q") or std.mem.eql(u8, arg, "--no-warnings")) {
+                quiet = true;
+            } else if (std.mem.eql(u8, arg, "--strict")) {
+                strict = true;
+            } else if (std.mem.eql(u8, arg, "--embed")) {
+                const name = args.next() orelse {
+                    log.err("Missing archetype after {s}\n", .{arg});
+                    return ArgError.MissingFmtArgument;
+                };
+                embed_override = embedTypeFromName(name) orelse {
+                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, frontmatter-fig, endmatter)\n", .{name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else if (std.mem.eql(u8, arg, "--indent")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingFmtArgument;
+                };
+                serialize.indent = std.fmt.parseInt(u8, n, 10) catch {
+                    log.err("Invalid --indent value: {s}\n", .{n});
+                    return ArgError.MissingFmtArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--width")) {
+                const n = args.next() orelse {
+                    log.err("Missing value after {s}\n", .{arg});
+                    return ArgError.MissingFmtArgument;
+                };
+                serialize.width = std.fmt.parseInt(u16, n, 10) catch {
+                    log.err("Invalid --width value: {s}\n", .{n});
+                    return ArgError.MissingFmtArgument;
+                };
+            } else if (std.mem.eql(u8, arg, "--input") or std.mem.eql(u8, arg, "-i")) {
+                const fmt_name = args.next() orelse {
+                    log.err("Missing format value after {s}\n", .{arg});
+                    return ArgError.MissingFmtArgument;
+                };
+                input_override = parseFormatName(fmt_name) orelse {
+                    log.err("Unsupported format: {s}\n", .{fmt_name});
+                    return ArgError.UnsupportedFileFormat;
+                };
+            } else {
+                try positionals.append(allocator, arg);
+            }
+        }
+
+        if (!requested_help and positionals.items.len == 0) {
+            log.err("No file provided.\n", .{});
+            return ArgError.MissingFmtArgument;
+        }
+        // `fmt` reformats a whole file (or a whole embedded region) — there is no
+        // sub-document path argument the way `get`/`edit`/etc. take one.
+        if (!requested_help and positionals.items.len > 1) {
+            log.err("fmt takes a single file, not a path within it: {s}\n", .{positionals.items[1]});
+            return ArgError.MissingFmtArgument;
+        }
+        if (!requested_help and dry_run and diff_mode) {
+            log.err("--dry-run and --diff are mutually exclusive.\n", .{});
+            return ArgError.MissingFmtArgument;
+        }
+
+        const file_path = if (positionals.items.len > 0) positionals.items[0] else "-";
+
+        const detected_input: ?Detected = if (!requested_help and input_override == null)
+            detectLanguageFromFileEnding(file_path)
+        else
+            null;
+        // An explicit `--embed` archetype wins over the extension-inferred one.
+        const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+        const needs_detect = !requested_help and input_override == null and embed_override == null and detected_input == null;
+        const from = input_override orelse
+            (if (embed_override) |et| embedFormat(et) else null) orelse
+            (if (detected_input) |d| d.format else null) orelse .json;
+
+        config.options = .{ .fmt = .{
+            .file = file_path,
+            .from = from,
+            .requested_help = requested_help,
+            .detect = needs_detect,
+            .serialize = serialize,
+            .quiet = quiet,
+            .strict = strict,
+            .dry_run = dry_run,
+            .diff = diff_mode,
+            .embed = embed,
+        } };
     } else {
         log.err("Action not recognized: {s}", .{action_str});
         config.action = .help;
