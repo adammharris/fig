@@ -2,149 +2,195 @@
 # fig authoring dialect — kitchen-sink example
 # Exercises every feature in DESIGN.md, in ONE valid document.
 #
-# This file is in `fig fmt` form: depth = count of leading `>`, and each line
-# also carries `2 × depth` spaces of indentation. The indent is NOT load-bearing
-# (meaning lives entirely in the `>` count) — it is the redundant second signal,
-# and `fig fmt` emits it so the linter can warn when indent and count disagree.
+# House style (settled): depth = count of leading `>`, written as a SPACED
+# run (`> >`, not `>>`) with ZERO leading indentation — the spaced run
+# rebuilds the visual ruler out of the markers themselves, so no second
+# (indentation) signal needs to be kept in sync by hand. Meaning lives
+# entirely in the `>` count; indentation is opt-in (`fig fmt --indent`) and
+# is not used here. A couple of lines below deliberately use the glued
+# (`>>>`) or unspaced (`>*`) spellings on purpose, to show the parser
+# accepts both — see the note in the "Sequences" section.
 # ─────────────────────────────────────────────────────────────
 
-
 # === Containers, assignments, prefix-count depth ===
-database                         # container header (bare word, no `=`)
-  > host = localhost             # database.host
-  > port = 5432                  # database.port  (bare number)
-  > pool                         # nested container header
-    >> size = 10                 # database.pool.size
-    >> timeout = 30              # database.pool.timeout
+database                        # container header (bare word, no `=`)
+> host = localhost              # database.host
+> port = 5432                   # database.port  (bare number)
+> pool                          # nested container header
+> > size = 10                   # database.pool.size
+> > timeout = 30                # database.pool.timeout
 
 
 # === Dotted-key flattener (flatten within one line) ===
 cache
-  > redis.host = 127.0.0.1       # cache.redis.host  (IP → string, 3 dots)
-  > redis.port = 6379            # cache.redis.port
+> redis.host = 127.0.0.1        # cache.redis.host  (IP → string, 3 dots)
+> redis.port = 6379             # cache.redis.port
+
+# A chain of single-child maps collapses to ONE dotted line under `fig fmt`
+# (the printer's mirror of the flattener above — see "What fig fmt normalizes"):
+deep.nested.single.value = 42   # deep.nested.single.value
 
 
 # === Root-level assignments (zero markers, zero indent) ===
-version = 2                      # a plain key in the root map
-title = My Application           # bare string, spaces and all
+version = 2                     # a plain key in the root map
+title = My Application          # bare string, spaces and all
 
 
 # === Explicit typing:  key: type = value  (optional) ===
 server
-  > port: int = 8080            # annotated (vs inferred)
-  > name: string = My Server    # bare string with spaces
-  > mode: enum = creative       # enum atom (explicit-typing-only)
-  > debug: bool = false
+> port: int = 8080              # annotated (vs inferred)
+> name: string = My Server      # bare string with spaces
+> mode: enum = creative         # enum atom (explicit-typing-only)
+> debug: bool = false
 
 
 # === Values: literal-else-string ===
 values
-  > answer = 42                 # int
-  > ratio = 3.14                # float
-  > mask = 0xFF                 # hex int lexeme
-  > big = 1.5e3                 # float with exponent
-  > enabled = true              # bool (lowercase only)
-  > missing = null              # null
-  > flag = "true"               # STRING — quotes override the bool literal
-  > movie = 12 monkeys          # STRING — doesn't fully parse as a number
-  > norway = Yes                # STRING — "Yes"/"on"/"TRUE" are never bools
-  > zip = 007                   # STRING — leading zero != number; padding kept
-  > team = "99"                 # STRING — quote to override the int literal
-  > class: enum = minecraft     # enum atom (explicit-typing-only)
-  > when = 2026-07-01T12:00:00Z # datetime (RFC-3339, self-identifying)
-  > day = 2026-07-01            # date (RFC-3339 full-date)
-  > huge: float = inf           # non-finite: explicit-typing-only
-  > nope: float = nan           # bare inf/nan would be plain strings
+> answer = 42                  # int
+> ratio = 3.14                 # float
+> mask = 0xFF                  # hex int lexeme
+> big = 1.5e3                  # float with exponent
+> enabled = true               # bool (lowercase only)
+> missing = null               # null
+> flag = "true"                # STRING — quotes override the bool literal
+> movie = 12 monkeys           # STRING — doesn't fully parse as a number
+> norway = Yes                 # STRING — "Yes"/"on"/"TRUE" are never bools
+> zip = 007                    # STRING — leading zero != number; padding kept
+> team = "99"                  # STRING — quote to override the int literal
+> class: enum = minecraft      # enum atom (explicit-typing-only)
+> when = 2026-07-01T12:00:00Z  # datetime (RFC-3339, self-identifying)
+> day = 2026-07-01             # date (RFC-3339 full-date)
+> huge: float = inf            # non-finite: explicit-typing-only
+> nope: float = nan            # bare inf/nan would be plain strings
 
 
 # === Quotes:  '' raw/literal   ""  escaped ===
 strings
-  > raw = 'C:\Users\me\no-escapes'   # single quotes: backslashes stay literal
-  > esc = "line1\nline2\ttabbed"     # double quotes: \n \t \uXXXX honored
-  > snowman = "frozen ☃"
-  > "my.key" = present               # key with a literal dot MUST be quoted
+> raw = 'C:\Users\me\no-escapes'    # single quotes: backslashes stay literal
+> esc = "line1\nline2\ttabbed"      # double quotes: \n \t \uXXXX honored
+> snowman = "frozen ☃"
+> "my.key" = present                # key with a literal dot MUST be quoted
 
 
 # === Comment marker (#) only after whitespace — URLs survive ===
 links
-  > home = https://example.com           # the // in the URL stays in the value
-  > docs = https://example.com/docs      # comment starts here; value ends before it
-  > api = https://example.com/v1#stable  # #stable has no leading space -> kept
+> home = https://example.com            # the // in the URL stays in the value
+> docs = https://example.com/docs       # comment starts here; value ends before it
+> api = https://example.com/v1#stable   # #stable has no leading space -> kept
 
 
 # === Sequences — form A2 (`*` is an anonymous positional key) ===
 # The element `*` sits in key position after the run: `> *` (normalized), `>*`
 # (glued) — both appear below on purpose. YAML's `-` is a hard error.
 servers
-  > *                           # first element (a map): fields one level deeper
-    >> host = a.com
-    >> port = 25565
-    >> backends                 # nested list field
-      >>> *                     # spaced form (normalized)
-        >>>> url = x
-        >>>> weight = 1
-      >>>*
-        >>>> url = y
-  > *                           # second element
-    >> host = b.com
+> *                            # first element (a map): fields one level deeper
+> > host = a.com
+> > port = 25565
+> > backends                   # nested list field
+> > > *                        # spaced form (normalized)
+> > > > url = x
+> > > > weight = 1
+> > >*                         # glued form — parses identically to `> > >  *`
+> > > > url = y
+> *                            # second element
+> > host = b.com
 
-ports                           # scalar elements
-  >* 25565
-  >* 25566
-  >* 25567
+ports                          # scalar elements
+> * 25565
+> * 25566
+> * 25567
 
-weights                         # typing composes with `*`
-  >*: int = 1
-  >*: int = 2
+weights                        # typing composes with `*`
+> *: int = 1
+> *: int = 2
 
 
 # === Dotted section header — re-anchors baseline (like TOML [a.b.c]) ===
-services.web.frontend           # selects/creates services.web.frontend
-  > replicas = 3                # services.web.frontend.replicas (depth is RELATIVE)
-  > image = nginx:latest        # ':' in a value is fine -> bare string
+services.web.frontend          # selects/creates services.web.frontend
+> replicas = 3                 # services.web.frontend.replicas (depth is RELATIVE)
+> image = nginx:latest         # ':' in a value is fine -> bare string
 
 
 # === Appending sequence headers — primary surface for nested lists of maps ===
 # `a.b[]` appends an element to sequence a.b and re-anchors; fields stay 1 deep
-# no matter how deep the LIST nests. Edit-stable (append, not index).
+# no matter how deep the LIST nests. Edit-stable (append, not index). A `+`
+# line re-runs the most recent zero-marker `[]` header without retyping it.
 jobs.test
-  > runs-on = ubuntu-latest
-jobs.test.steps[]               # append a step, re-anchor here
-  > uses = actions/setup-node@v4
-  > with.node-version = 20
-jobs.test.steps[]               # append another step
-  > run = npm test
+> runs-on = ubuntu-latest
+jobs.test.steps[]              # append a step, re-anchor here
+> uses = actions/setup-node@v4
+> with.node-version = 20
++                               # same as repeating `jobs.test.steps[]`
+> run = npm test
+
+# Nested lists of lists: a non-final `[]` means "the last element" — only the
+# final `[]` in the path appends. So `spec.containers[].ports[]` appends a
+# port to the LAST container, and `+` re-runs the whole path.
+spec.containers[]              # append a container
+> name = app
+spec.containers[].ports[]      # last container -> append a port
+> containerPort = 80
++                               # same path again -> another port, same container
+> containerPort = 443
+spec.containers[]              # a second container
+> name = sidecar
 
 
 # === Index addressing — for editing an EXISTING element (edit-fragile) ===
-clusters[0].name = alpha        # clusters is a sequence; element 0
+clusters[0].name = alpha       # clusters is a sequence; element 0
 clusters[0].size = 3
-clusters[1].name = beta         # element 1 (skipping [1] would be an error)
+clusters[1].name = beta        # element 1 (skipping [1] would be an error)
 clusters[1].size = 5
 
 
 # === Flow mode — value starting with [ or { (fig-inline OR pasted JSON) ===
 flow
-  > tags = [a, b, c]            # fig-inline: bare strings
-  > audience = [friends, Adam Harris, Makena Harris]   # bare values keep spaces
-  > point = { x = 1, y = 2 }    # fig-inline object: `=` pairs, bare keys
-  > pasted = { "x": 1, "y": [2, 3] }   # JSON object: `:` pairs, quoted keys
-  > jsonc = [1, 2, 3,]          # JSONC: trailing comma (and `#` comments) OK
-  > matrix = [[1, 2], [3, 4]]   # nested
-  > records = [{ id = 1 }, { id = 2 }]
-  > empty_list = []             # required spelling for an empty sequence
-  > empty_map = {}              # required spelling for an empty map
+> tags = [a, b, c]                                    # fig-inline: bare strings
+> audience = [friends, Adam Harris, Makena Harris]    # bare values keep spaces
+> point = { x = 1, y = 2 }                            # fig-inline object: `=` pairs, bare keys
+> pasted = { "x": 1, "y": [2, 3] }                    # JSON object: `:` pairs, quoted keys
+> jsonc = [1, 2, 3,]                                  # JSONC: trailing comma (and `#` comments) OK
+> matrix = [[1, 2], [3, 4]]                           # nested
+> records = [{ id = 1 }, { id = 2 }]
+> empty_list = []                                     # required spelling for an empty sequence
+> empty_map = {}                                      # required spelling for an empty map
+
+
+# === Multi-line flow for long lists (the frontmatter surface) ===
+# A fully flow-representable sequence with no map elements stacks one element
+# per line, trailing comma, when it overflows the width budget or exceeds the
+# item-count threshold (default 6) — the terse spelling for frontmatter-style
+# link/tag lists. Still one assignment, so it isn't blank-line separated.
+frontmatter
+> tags = [
+    rust,
+    zig,
+    parsing,
+    config,
+    yaml,
+    toml,
+    json,
+  ]
+
+
+# === Quote-avoidance: bare beats quoted when a broken list would need quotes ===
+# Flow would force quotes here (each element has a top-level comma, which
+# terminates a bare flow value); the `> *` block form keeps them bare instead,
+# since a comma is ordinary text in a block bare string.
+random
+> * test of very long things in a list to see if it works
+> * hello there, this is also a long test; hopefully it works
 
 
 # === Multiline strings — two flavors ===
 docs
-  > license = '''               # '' raw/verbatim: no escapes, whitespace exact
+> license = '''               # '' raw/verbatim: no escapes, whitespace exact
 Copyright (c) 2026
 All rights reserved. \n is literal here.
 '''
 # ^ raw content is flush-left ON PURPOSE: in a raw block leading indentation
-#   becomes part of the value, so it opts out of the file's count-aligned indent.
-  > banner = """                # "" escaped + smart-dedent
+#   becomes part of the value, so it opts out of the file's spaced-marker style.
+> banner = """                # "" escaped + smart-dedent
       Welcome!
       Enjoy your ☃ stay.
       """
@@ -156,6 +202,6 @@ All rights reserved. \n is literal here.
 # A run of #-lines is one logical block comment; a printer may downgrade a
 # stored block comment to exactly this shape.
 logging
-  > # a DEPTH-PREFIXED comment (note the `>`) attaches to the next sibling
-  > level = info                # inline comment (after whitespace)
-  > format = json
+> # a DEPTH-PREFIXED comment (note the `>`) attaches to the next sibling
+> level = info                 # inline comment (after whitespace)
+> format = json
