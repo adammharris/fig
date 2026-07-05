@@ -50,16 +50,20 @@ values
 > ratio = 3.14                 # float
 > mask = 0xFF                  # hex int lexeme
 > big = 1.5e3                  # float with exponent
+> sigfig = 1.10                # float — lexeme kept VERBATIM; not collapsed to 1.1
+> exp = 1e2                    # float — a distinct lexeme from 100.0 (numeric identity = lexeme identity)
 > enabled = true               # bool (lowercase only)
 > missing = null               # null
 > flag = "true"                # STRING — quotes override the bool literal
 > movie = 12 monkeys           # STRING — doesn't fully parse as a number
+> semver = 1.2.3               # STRING — three components, not a clean number (so it's NOT mangled)
 > norway = Yes                 # STRING — "Yes"/"on"/"TRUE" are never bools
 > zip = 007                    # STRING — leading zero != number; padding kept
 > team = "99"                  # STRING — quote to override the int literal
 > class: enum = minecraft      # enum atom (explicit-typing-only)
 > when = 2026-07-01T12:00:00Z  # datetime (RFC-3339, self-identifying)
 > day = 2026-07-01             # date (RFC-3339 full-date)
+> clock = 07:30:00             # time (RFC-3339 partial-time, self-identifying)
 > huge: float = inf            # non-finite: explicit-typing-only
 > nope: float = nan            # bare inf/nan would be plain strings
 

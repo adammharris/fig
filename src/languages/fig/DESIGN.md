@@ -228,6 +228,15 @@ pre-fmt paste-safety.
   block anywhere and nothing renumbers. Same AST as `> *` (a `sequence` of element
   children). Borrowed straight from TOML's array-of-tables `[[steps]]`.
 
+  **An append header is a log, not a declaration.** Because `[]` appends and a
+  non-final `[]` binds to *the last element*, the file is deliberately
+  **order-dependent**: reordering two `spec.containers[]` blocks changes which
+  container a following `spec.containers[].ports[]` (or `+`) attaches to. This is
+  the price of edit-stability (no indices to renumber) and is intended — but it
+  means append blocks read top-to-bottom as a sequence of operations, not as a
+  set of independent declarations. Index addressing (`[i]`) is the order-*in*dependent
+  counterpart, trading edit-stability for it.
+
   **Nested lists of lists** use TOML's rule: a **non-final `[]` means "the last
   element,"** only the final `[]` appends. So `containers[].ports[]` appends a port
   to the *last* container — the real k8s shape, still flat:
@@ -273,6 +282,34 @@ pre-fmt paste-safety.
   `*` element syntax for the same sequence is a type error** (same spirit as the
   `key = v` + `*` rule).
 
+**When a path doesn't resolve: auto-create absent structure, error on conflicts.**
+The rule for headers, dotted keys, `[]`, and `+` is asymmetric on purpose:
+
+- **Absent parent structure is auto-created.** A header or dotted key names a map
+  path; missing intermediate maps are materialized silently (`a.b.c = 1` creates
+  `a` and `a.b`). Deep config shouldn't require declaring every ancestor first.
+- **Conflicting structure is a hard error.** Stepping a path into an existing
+  *non-container* value is `FigKeyNotContainer`; a non-final `[]` on an *empty*
+  sequence (there is no "last element") is `FigEmptyAppendTarget`; a `+` with no
+  preceding `[]` header is `FigDanglingContinuation`; re-defining an existing leaf
+  is `FigDuplicateKey`. Auto-vivification never *overwrites* — it only fills gaps.
+  **Absent and empty converge on one error, by design:** a non-final
+  `spec.containers[].ports[]` on a file with *no* `spec.containers` auto-creates
+  `spec.containers` as an empty sequence, whose "last element" then doesn't
+  exist — landing on the same `FigEmptyAppendTarget`. Both paths name the remedy
+  ("append one first with a header-final `[]`"), so a CI log tells the author the
+  fix regardless of which path they took.
+
+**The auto-create footgun tooling can catch (the format can't).** Auto-vivify has
+one inherent hazard no *syntax* can fix: a typo'd path (`servces.web` for
+`services.web`) silently creates a parallel tree rather than erroring — the classic
+INI/TOML footgun. This is a property of auto-create itself, not a fig flaw, and the
+right home for it is a **lint**, not a parse rule. fig is unusually well-positioned
+to ship it: the CST already holds every sibling name and every read/write site, so
+a `fig fmt`/`check --strict` lint can flag *sibling containers with edit-distance-1
+names* and *a container created but never read*. Recorded as a tooling direction,
+not a format change.
+
 The four ways to descend, as a 2×2 — the append header completes it:
 
 | | nested (costs depth) | flat header (re-anchors) |
@@ -294,6 +331,44 @@ Which list surface to reach for:
   answer for frontmatter link/tag lists.
 - **`[i]` index** — editing / addressing an *existing* element (accepts the
   fragility).
+
+### Append headers are a log, not a declaration
+
+The conceptual key to the whole sequence surface — and the thing that makes its
+order-dependence feel *designed* rather than accidental. A reader arriving from
+TOML expects headers to be **declarative and commutative**: `[a.b]` names a table,
+and reordering two `[a.b]` blocks is a no-op. fig's append surface is the
+opposite by construction: **`a.b[]`, `+`, and the non-final `[]` are events
+applied in document order.** The file is a *script that builds the tree*, and the
+canonical form is the **replayed log** — one canonical event sequence. This single
+reframe explains behaviors that are otherwise surprising:
+
+- **Why reordering `[]` blocks changes meaning.** Two `spec.containers[]` blocks
+  are two append events; swap them and a following `spec.containers[].ports[]`
+  (whose non-final `[]` means "the last element") attaches to a different
+  container. That is a log being replayed in a new order, not a declaration being
+  mis-parsed.
+- **Why `+` is positional.** `+` re-runs *the most recent `[]` append event*
+  (verified: an intervening plain assignment or bare header breaks the run into a
+  hard `FigDanglingContinuation`; only another `[]` header rebinds it — because a
+  new append event legitimately becomes the thing `+` continues). Under the log
+  model this is not "action at a distance" — `+` means "another element of the
+  append that just ran," and reading top-to-bottom there is exactly one such
+  append. The retarget some reviewers worry about (interpose or reorder a `[]`
+  header above a `+` and its target shifts) is **the log behaving as a log**: the
+  event that most recently ran *is* the antecedent. No purely-local rule can make
+  that an error instead of a rebind, because after the edit the `+` is genuinely
+  positioned to continue the new event — only an accessor that re-reads intent
+  (a full-path echo, or a lint over the CST) could, and the log framing is what
+  makes the plain positional rule the *correct* one rather than a compromise.
+- **Why `[i]` index addressing exists.** It is the escape hatch to *declaration*
+  semantics — address element `[0]` by identity, order-independently — traded for
+  edit-fragility (inserting renumbers). Append when authoring a growing list;
+  index when you need to name an existing element.
+
+The fmt contract falls out cleanly: the printer **replays the log and emits one
+canonical event sequence** — `[]` for a sequence's first element, `+` for the
+rest — so any two documents that build the same tree normalize to the same script.
 
 ### What `fig fmt` normalizes (house style)
 
@@ -525,6 +600,15 @@ servers
   `2026-07-01`), never on a full RFC-3339 timestamp with `T` and zone — to avoid
   warn-fatigue. Strictness via warning, not by removing the ergonomic default.
 - **Bare strings by default**, including spaces: `title = My server`.
+- **Bare-string whitespace: interior kept, edges trimmed; quote to preserve
+  edges.** A bare value is trimmed of leading and trailing whitespace but keeps
+  its interior spaces verbatim — `title = My server` is `"My server"`, and
+  `movie = 12 monkeys` (no comment) is `"12 monkeys"` with the trailing run
+  dropped. This composes with the `#` rule below: the value ends at the first
+  whitespace-preceded `#`, then edge-trimming removes the space *before* that
+  `#`. To keep a leading/trailing space (or a value that is only whitespace),
+  quote it — `'  padded  '` preserves every byte, since quotes turn off both the
+  trim and the bare-`#` truncation.
 - **Comment marker (`#`) only after whitespace or line-start.** This saves URLs
   and fragments: `url = https://example.com  # real comment` → value
   `https://example.com`, comment `real comment`; `url = https://x#frag` keeps
@@ -543,10 +627,28 @@ servers
   `timeout: float = inf` — so bare `inf`/`nan` stay strings; `fig fmt` emits the
   explicit form when the AST holds a `number_special`. Char literals degrade to
   string.
+- **A number's value *is* its lexeme (normative, cross-implementation).** fig
+  stores the source bytes of a number, not a decoded `f64`/`i64`: equality,
+  round-trip, and canonical emission are all defined **over the source lexeme**,
+  so `1.10` stays `1.10` (never `1.1`), `1e2` stays distinct from `100.0`, and
+  `0xFF` is preserved rather than normalized to `255`. A conforming parser **MUST
+  NOT** define value identity by numeric conversion; it **MAY** offer numeric
+  coercion (`as_f64()`, `as_i64()`) as an explicitly *lossy accessor*, never as
+  the stored value. This is the guarantee that stops a `float()`-based
+  reimplementation from silently mangling versions and significant figures — it
+  is a property of *the format*, not merely of the reference Zig library (whose
+  `Number { raw, kind }` is where it happens to live today). Two numbers are
+  equal iff their lexemes match byte-for-byte and their kinds agree.
 - **Keys** are strings (bare or quoted). A **bare key may not contain a structural
   character** — `.` (path), `:` (type), `=` (assign), `[` (index) — nor whitespace,
   and may not begin with `>` or `-` (and `*`/`+` are not bare-key characters); any key that needs such a character must be quoted:
   `"my.key" = x`, `"foo:bar" = x` (bare `foo:bar = x` would read `bar` as a type).
+  The no-whitespace rule closes the **dropped-`=` trap**: a header is a bare word,
+  so `port 5432` (a `port = 5432` with the `=` fumbled) does **not** silently
+  create a container named `port 5432` — the interior space makes it a hard
+  `FigBadKey` ("a bare key cannot contain … whitespace"). A multi-word name that
+  is genuinely intended must be quoted (`"port 5432"`). Erroring on the typo is
+  the whole point: a format earns trust by demonstrating it has seen the traps.
   Non-string keys are deliberately **not** natively representable — the AST allows
   them (`keyvalue.key` is any node) but almost no config needs them; they fall to
   the canonical form / envelope.
