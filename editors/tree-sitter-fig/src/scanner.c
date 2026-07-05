@@ -103,20 +103,37 @@ static bool scan_bracket_run(TSLexer *lexer) {
 // the tail turns out to be empty. Every byte before the first stop byte has
 // already been confirmed non-whitespace by the caller, so the first
 // iteration always commits at least one byte.
-static bool scan_tail(TSLexer *lexer, const char *stop) {
+//
+// `#` in `stop` is special-cased: it only stops the run when preceded by
+// whitespace *within this run* — a `#` glued to non-whitespace (a URL
+// fragment like `v1#stable`) stays literal, mirroring `scanBareRestOfLine`/
+// `scanFlowBareValue`/`scanFlowBareBracket`'s `prev_space` tracking. Every
+// other byte in `stop` (`,`/`]`/`}`) always stops unconditionally. `prev_space`
+// seeds that tracking with whatever whitespace the caller already consumed
+// just before this call, so a `#` glued to the run's own start (e.g.
+// `[80]#glued`) is still recognized as glued.
+static bool scan_tail(TSLexer *lexer, const char *stop, bool prev_space) {
   bool any = false;
   while (!lexer->eof(lexer) && lexer->lookahead != '\n') {
+    int32_t c = lexer->lookahead;
     bool stop_here = false;
     for (const char *s = stop; *s; s++) {
-      if (lexer->lookahead == (unsigned char)*s) { stop_here = true; break; }
+      unsigned char sc = (unsigned char)*s;
+      if (sc == '#') {
+        if (c == '#' && prev_space) { stop_here = true; break; }
+      } else if (c == sc) {
+        stop_here = true;
+        break;
+      }
     }
     if (stop_here) break;
-    bool ws = is_hspace(lexer->lookahead);
+    bool ws = is_hspace(c);
     lexer->advance(lexer, false);
     if (!ws) {
       any = true;
       lexer->mark_end(lexer);
     }
+    prev_space = (c == ' ' || c == '\t'); // matches prev_space's own `\r`-excluding check
   }
   return any;
 }
@@ -154,9 +171,9 @@ static bool scan(TSLexer *lexer, const bool *valid_symbols) {
     if (lexer->eof(lexer) || lexer->lookahead == '\n') return false;
     if (saw_space && lexer->lookahead == '#') return false;
 
-    // Balanced-then-trailing: the rest of the line (to `#`/EOL) is the tail,
-    // same shape/trim as `bare_string` itself.
-    if (!scan_tail(lexer, "#")) return false;
+    // Balanced-then-trailing: the rest of the line (to a whitespace-preceded
+    // `#`, or EOL) is the tail, same shape/trim as `bare_string` itself.
+    if (!scan_tail(lexer, "#", saw_space)) return false;
     lexer->result_symbol = BRACKET_LED_BARE_STRING;
     return true;
   }
@@ -174,7 +191,7 @@ static bool scan(TSLexer *lexer, const bool *valid_symbols) {
       break;
   }
 
-  if (!scan_tail(lexer, ",]}#")) return false;
+  if (!scan_tail(lexer, ",]}#", false)) return false;
   lexer->result_symbol = FLOW_BRACKET_LED_BARE;
   return true;
 }

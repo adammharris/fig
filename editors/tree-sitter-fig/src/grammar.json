@@ -1143,22 +1143,58 @@
     "bare_string": {
       "type": "TOKEN",
       "content": {
-        "type": "PATTERN",
-        "value": "[^\\s#\\[\\]{}\"':=][^\\n#]*[^\\s#]|[^\\s#\\[\\]{}\"':=]"
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[^\\s#\\[\\]{}\"':=][^\\s]*"
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "PATTERN",
+              "value": "[ \\t]+[^\\s#][^\\s]*"
+            }
+          }
+        ]
       }
     },
     "string_sink": {
       "type": "TOKEN",
       "content": {
-        "type": "PATTERN",
-        "value": "[^\\s#][^\\n#]*[^\\s#]|[^\\s#]"
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[^\\s#][^\\s]*"
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "PATTERN",
+              "value": "[ \\t]+[^\\s#][^\\s]*"
+            }
+          }
+        ]
       }
     },
     "flow_bare": {
       "type": "TOKEN",
       "content": {
-        "type": "PATTERN",
-        "value": "[^\\s,\\[\\]{}#\"'][^,\\[\\]{}\\n#]*[^\\s,\\[\\]{}#]|[^\\s,\\[\\]{}#\"']"
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "PATTERN",
+            "value": "[^\\s,\\[\\]{}#\"'][^\\s,\\[\\]{}]*"
+          },
+          {
+            "type": "REPEAT",
+            "content": {
+              "type": "PATTERN",
+              "value": "[ \\t]+[^\\s,\\[\\]{}#][^\\s,\\[\\]{}]*"
+            }
+          }
+        ]
       }
     },
     "bare_key": {

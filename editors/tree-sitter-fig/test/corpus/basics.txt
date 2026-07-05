@@ -414,3 +414,48 @@ line one
         (bare_key)))
     value: (multiline_double
       (comment))))
+
+==================
+a `#` glued to non-whitespace stays literal value text (URL fragments)
+==================
+
+api = https://example.com/v1#stable
+api2 = https://example.com/v1 # real comment
+sink: string = https://example.com/v1#stable
+bracket = [80]#glued
+tags = [a#glued, [Blog](/x)#frag]
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bare_string)
+    (comment))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (string_sink))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (bracket_led_bare_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (flow
+      (flow_array
+        (flow_bare)
+        (flow_bracket_led_bare)))))

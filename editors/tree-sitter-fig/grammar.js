@@ -15,11 +15,15 @@
  *     and the Zig parser ever disagree, the only consequence is a cosmetic
  *     mis-color, never wrong behavior.
  *
- * Known intentional approximations (all cosmetic):
- *   - a `#` with no leading space inside a bare value (e.g. `url = x#frag`) is
- *     treated as a comment, though fig keeps it in the value. This applies
- *     equally to the tail of a `bracket_led_bare_string`/`flow_bracket_led_bare`
- *     (see `src/scanner.c`).
+ * `bare_string`/`string_sink`/`flow_bare` (and the `bracket_led_bare_string`/
+ * `flow_bracket_led_bare` externals in `src/scanner.c`) all honor the Zig
+ * tokenizer's `#`-after-whitespace rule: a `#` glued to non-whitespace (a URL
+ * fragment like `v1#stable`) stays literal value text; only a `#` preceded by
+ * whitespace opens a comment. Each is built as alternating whitespace-
+ * separated "runs" so a glued `#` can appear anywhere inside a run while a
+ * run STARTING with `#` (i.e. preceded by whitespace) is never absorbed —
+ * mirroring `scanBareRestOfLine`/`scanFlowBareValue`/`scanFlowBareBracket`'s
+ * `prev_space` tracking char-for-char.
  *
  * `multiline_single`/`multiline_double` split the opener line (delimiter +
  * optional trailing `# comment`) out from the body/close so a `'''`/`"""`
@@ -307,22 +311,38 @@ module.exports = grammar({
     _ml_single_tail: _ => token(/([^']|'[^']|''[^'])*'''/),
     _ml_double_tail: _ => token(/([^"]|"[^"]|""[^"])*"""/),
 
-    // Bare string value: runs to end-of-line or a `#`, trailing space trimmed.
-    // Start char excludes structural/opener bytes so quoted/flow/typed forms win.
+    // Bare string value: runs to end-of-line or a whitespace-preceded `#`,
+    // trailing space trimmed. Modeled as whitespace-separated runs — the
+    // FIRST run's first char excludes structural/opener bytes so quoted/flow/
+    // typed forms win; every later run's first char excludes `#` (that would
+    // be a comment) but a `#` glued mid-run (no space before it, e.g.
+    // `v1#stable`) stays literal, same as `scanBareRestOfLine`. The separator
+    // between runs is horizontal whitespace ONLY (`[ \t]`, not `\s`) — `\s`
+    // matches `\n` too, which would let the token run onto the next line.
     bare_string: _ => token(
-      /[^\s#\[\]{}"':=][^\n#]*[^\s#]|[^\s#\[\]{}"':=]/,
+      seq(/[^\s#\[\]{}"':=][^\s]*/, repeat(/[ \t]+[^\s#][^\s]*/)),
     ),
 
-    // `: string` sink value: verbatim to end-of-line (or ` #`), with the opener
-    // bytes (`[ { " ' : =`) allowed as the FIRST char — so `x: string =
-    // [ 1 + 2 ]` captures the whole `[ 1 + 2 ]` as one string instead of flow.
-    // Only reachable in `_string_rhs`; the quoted forms precede it in that
-    // choice (and in definition order), so `: string = "x"` still wins a quote.
-    string_sink: _ => token(/[^\s#][^\n#]*[^\s#]|[^\s#]/),
+    // `: string` sink value: verbatim to end-of-line (or a whitespace-preceded
+    // `#`), with the opener bytes (`[ { " ' : =`) allowed as the FIRST char —
+    // so `x: string = [ 1 + 2 ]` captures the whole `[ 1 + 2 ]` as one string
+    // instead of flow. Only reachable in `_string_rhs`; the quoted forms
+    // precede it in that choice (and in definition order), so
+    // `: string = "x"` still wins a quote. Same glued-`#` run structure as
+    // `bare_string` (horizontal-only separator, so it can't cross a line),
+    // just with a permissive first char.
+    string_sink: _ => token(
+      seq(/[^\s#][^\s]*/, repeat(/[ \t]+[^\s#][^\s]*/)),
+    ),
 
-    // Bare flow value: runs to the next , ] } (spaces kept, trimmed).
+    // Bare flow value: runs to the next unglued `,`/`]`/`}`/whitespace-
+    // preceded `#` (spaces kept mid-run and between runs, trimmed at the
+    // edges) — same glued-`#` run structure as `bare_string`, mirroring
+    // `scanFlowBareValue`. Horizontal-only separator (`[ \t]`, not `\s`) so a
+    // single flow_bare token can't itself cross a line; spanning multiple
+    // lines across list elements is `_flow_gap`'s job, one level up.
     flow_bare: _ => token(
-      /[^\s,\[\]{}#"'][^,\[\]{}\n#]*[^\s,\[\]{}#]|[^\s,\[\]{}#"']/,
+      seq(/[^\s,\[\]{}#"'][^\s,\[\]{}]*/, repeat(/[ \t]+[^\s,\[\]{}#][^\s,\[\]{}]*/)),
     ),
 
     // `bracket_led_bare_string` / `flow_bracket_led_bare`: see the file-level
