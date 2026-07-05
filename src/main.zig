@@ -106,6 +106,10 @@ const CliActionOptions = union(CliAction) {
         /// When set, `file` is a host document (e.g. markdown) and edits apply
         /// to the embedded config of this archetype, spliced back in place.
         embed: ?fig.Embed.Type = null,
+        /// Set when `embed` couldn't be pinned by the extension (e.g. `.md`
+        /// implies SOME embedded region but not which archetype): the handler
+        /// sniffs the host content with `Embed.detect` (see `resolveEmbedType`).
+        detect_embed: bool = false,
     },
     set: struct {
         file: []const u8,
@@ -126,6 +130,9 @@ const CliActionOptions = union(CliAction) {
         /// embedded config of this archetype — creating the block (open-or-init)
         /// when the host has none.
         embed: ?fig.Embed.Type = null,
+        /// As in `edit`: set when `embed` needs a runtime content sniff
+        /// (`resolveEmbedType`) rather than being pinned by `--embed`.
+        detect_embed: bool = false,
     },
     insert: struct {
         file: []const u8,
@@ -144,6 +151,8 @@ const CliActionOptions = union(CliAction) {
         detect: bool = false,
         /// As in `edit`: when set, edit the embedded config of this archetype.
         embed: ?fig.Embed.Type = null,
+        /// As in `edit`: set when `embed` needs a runtime content sniff.
+        detect_embed: bool = false,
     },
     delete: struct {
         file: []const u8,
@@ -155,6 +164,8 @@ const CliActionOptions = union(CliAction) {
         format: Format,
         detect: bool = false,
         embed: ?fig.Embed.Type = null,
+        /// As in `edit`: set when `embed` needs a runtime content sniff.
+        detect_embed: bool = false,
     },
     get: struct {
         file: []const u8,
@@ -181,6 +192,9 @@ const CliActionOptions = union(CliAction) {
         /// When set, the input is extracted from a host document of this
         /// archetype (e.g. YAML frontmatter inside markdown) before parsing.
         embed: ?fig.Embed.Type = null,
+        /// As in `edit`: set when `embed` needs a runtime content sniff
+        /// (`resolveEmbedType`) rather than being pinned by `--embed`.
+        detect_embed: bool = false,
         /// When set, print the host *body* (the prose outside the fences) of the
         /// embed archetype instead of converting its content. Demonstrates the
         /// region's `body` span; ignored when there is no embed.
@@ -221,6 +235,8 @@ const CliActionOptions = union(CliAction) {
         /// As in `edit`: when set, `file` is a host document and the comment is
         /// applied to the embedded config of this archetype, spliced back.
         embed: ?fig.Embed.Type = null,
+        /// As in `edit`: set when `embed` needs a runtime content sniff.
+        detect_embed: bool = false,
     },
     check: struct {
         /// One or more files to validate. `-` reads stdin (single document).
@@ -266,6 +282,9 @@ const CliActionOptions = union(CliAction) {
         /// When set, `file` is a host document (e.g. markdown) and only its
         /// embedded region is reformatted, spliced back in place.
         embed: ?fig.Embed.Type = null,
+        /// As in `get`: set when `embed` needs a runtime content sniff
+        /// (`resolveEmbedTypeFromContent`) rather than being pinned by `--embed`.
+        detect_embed: bool = false,
     },
     convert: struct {
         /// The file to convert in place. `-` reads stdin — only valid with
@@ -289,14 +308,13 @@ const CliActionOptions = union(CliAction) {
         /// `from`/`detect` are unused in this mode; the archetypes fix both
         /// formats.
         to_embed: ?fig.Embed.Type = null,
-        /// The source archetype for embed-archetype mode: `--embed`, else the
-        /// file extension's default (e.g. `.md` ⇒ `FrontmatterYaml`), else —
+        /// The source archetype for embed-archetype mode: `--embed`, else —
         /// when `detect_embed` is set — sniffed from the content with
-        /// `Embed.detect`.
+        /// `Embed.detect` (the extension alone, e.g. `.md`, only tells us an
+        /// embed is likely present, never which archetype it is).
         embed: ?fig.Embed.Type = null,
-        /// Set when `embed` couldn't be pinned by `--embed`/the extension and
-        /// `to_embed` is set: the handler sniffs the host content with
-        /// `Embed.detect`.
+        /// Set when `embed` couldn't be pinned by `--embed` and `to_embed` is
+        /// set: the handler sniffs the host content with `Embed.detect`.
         detect_embed: bool = false,
         /// As in `get`: drop unknown/custom YAML tags instead of erroring,
         /// when converting away from YAML.
@@ -389,7 +407,9 @@ const Help = struct {
             \\  --key: edit the object key at path instead of the value
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
-            \\  .md/.markdown files: edits the YAML frontmatter in place
+            \\  .md/.markdown files: edits the frontmatter/endmatter in place —
+            \\    its archetype (YAML/JSON/fig frontmatter, YAML endmatter) is
+            \\    sniffed from the file, defaulting to YAML when none is found
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -413,7 +433,7 @@ const Help = struct {
             \\    the comments on items that survive (only new items are inserted,
             \\    only dropped ones removed; result order matches the arguments).
             \\  --embed <archetype>: target an embedded region of a host file —
-            \\    `frontmatter` (---/YAML, the .md default), `frontmatter-json`
+            \\    `frontmatter` (---/YAML), `frontmatter-json`
             \\    (;;;/JSON), `frontmatter-fig` (```fig fenced block), or
             \\    `endmatter` (trailing ```endmatter block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
@@ -423,7 +443,9 @@ const Help = struct {
             \\    in the target syntax too, so new keys work for strict JSON.
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
-            \\  .md/.markdown files: upserts the YAML frontmatter, creating it if absent.
+            \\  .md/.markdown files: upserts the frontmatter/endmatter, creating
+            \\    it (as YAML) if absent — the archetype is otherwise sniffed
+            \\    from the file, not assumed from the extension.
             \\
         , .{ binary_name, binary_name });
         try term.writer.flush();
@@ -442,7 +464,8 @@ const Help = struct {
             \\  value: a literal in the file's format (YAML/TOML/ZON verbatim); for
             \\    JSON it is quoted as a string, as with `edit`.
             \\  path format: dot syntax for keys, bracket syntax for indices.
-            \\  .md/.markdown files: edits the YAML frontmatter in place.
+            \\  .md/.markdown files: edits the frontmatter/endmatter in place —
+            \\    its archetype is sniffed from the file (YAML by default).
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -458,7 +481,8 @@ const Help = struct {
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\    [-] or [$] in place of an index means "the last item"
-            \\  .md/.markdown files: edits the YAML frontmatter in place.
+            \\  .md/.markdown files: edits the frontmatter/endmatter in place —
+            \\    its archetype is sniffed from the file (YAML by default).
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -480,7 +504,9 @@ const Help = struct {
             \\  <text> may span multiple lines (leading only): one comment line each.
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
-            \\  .md/.markdown files: comments the YAML frontmatter in place
+            \\  .md/.markdown files: comments the frontmatter/endmatter in
+            \\    place — its archetype is sniffed from the file (YAML by
+            \\    default).
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -524,13 +550,16 @@ const Help = struct {
             \\    in a flow value, indent/marker-count disagreement, ...).
             \\  --strict: treat any warning as an error (exit non-zero).
             \\  --embed <archetype>: read an embedded region of a host file —
-            \\    `frontmatter` (the .md default), `frontmatter-json`,
-            \\    `frontmatter-fig`, or `endmatter`.
+            \\    `frontmatter`, `frontmatter-json`, `frontmatter-fig`, or
+            \\    `endmatter`. Without this flag, a `.md`/`.markdown` file has
+            \\    its archetype sniffed from the content (falling back to
+            \\    `frontmatter`/YAML when none is found).
             \\  --body: print the host prose OUTSIDE the fences (the body span) instead
             \\    of the embed content; the whole file when there is no such region.
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
-            \\  .md/.markdown files: reads the YAML frontmatter
+            \\  .md/.markdown files: reads the frontmatter/endmatter, whichever
+            \\    archetype it turns out to be
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -552,7 +581,8 @@ const Help = struct {
             \\  -q, --quiet: suppress the per-file `ok` lines and fig authoring
             \\    warnings; errors still print.
             \\  reads stdin when <file> is `-`.
-            \\  .md/.markdown files: validates the YAML frontmatter.
+            \\  .md/.markdown files: validates the frontmatter/endmatter,
+            \\    whichever archetype it turns out to be (YAML by default).
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -585,11 +615,14 @@ const Help = struct {
             \\  -q, --quiet: suppress warnings on stderr.
             \\  --strict: treat any warning as an error (exit non-zero, no write).
             \\  --embed <archetype>: reformat an embedded region of a host file —
-            \\    `frontmatter` (the .md default), `frontmatter-json`,
-            \\    `frontmatter-fig`, or `endmatter` — instead of the whole file.
+            \\    `frontmatter`, `frontmatter-json`, `frontmatter-fig`, or
+            \\    `endmatter` — instead of the whole file. Without this flag, a
+            \\    `.md`/`.markdown` file has its archetype sniffed from the
+            \\    content (falling back to `frontmatter`/YAML when none is found).
             \\  reads stdin when <file> is `-`, but only with --dry-run/--diff:
             \\    there is nowhere to write an in-place result back to.
-            \\  .md/.markdown files: reformats the YAML frontmatter in place.
+            \\  .md/.markdown files: reformats the frontmatter/endmatter in
+            \\    place, whichever archetype it turns out to be.
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -616,8 +649,8 @@ const Help = struct {
             \\    to another's — e.g. turn YAML frontmatter into JSON frontmatter —
             \\    splicing the new fences and re-serialized content in place while
             \\    leaving the surrounding prose byte-identical. The source archetype
-            \\    is --embed, else the extension default (`.md` ⇒ frontmatter), else
-            \\    sniffed from the file's own fences.
+            \\    is --embed, else sniffed from the file's own fences (falling back
+            \\    to frontmatter/YAML when none is found).
             \\  --embed, --to-embed <archetype>: frontmatter (---/YAML), frontmatter-json
             \\    (;;;/JSON), frontmatter-fig (```fig fenced block), or endmatter
             \\    (trailing ```endmatter block).
@@ -735,7 +768,7 @@ pub fn main(init: std.process.Init) !void {
             defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
 
             const op: EditOp = if (opts.key) .replace_key else .replace_value;
-            if (opts.embed) |embed_type| {
+            if (try resolveEmbedType(io, init.arena.allocator(), input, opts.embed, opts.detect_embed)) |embed_type| {
                 try applyToEmbed(init.arena.allocator(), io, input, embed_type, opts.path, opts.replacement, op);
             } else switch (if (opts.detect) try detectFileFormat(io, init.arena.allocator(), opts.file) else opts.format) {
                 .json, .jsonc => |f| if (comptime build_options.lang_json) {
@@ -816,7 +849,7 @@ pub fn main(init: std.process.Init) !void {
                         try stderr_terminal.writer.flush();
                         std.process.exit(2);
                     }
-                    const seed: []const u8 = if (opts.embed != null) "" else emptyDocSeed(opts.format) orelse {
+                    const seed: []const u8 = if (opts.embed != null or opts.detect_embed) "" else emptyDocSeed(opts.format) orelse {
                         try stderr_terminal.writer.print("error: cannot create {s}: {s} has no empty-document form to seed a new file. Start from an existing file.\n", .{ opts.file, @tagName(opts.format) });
                         try stderr_terminal.writer.flush();
                         std.process.exit(2);
@@ -840,7 +873,8 @@ pub fn main(init: std.process.Init) !void {
             // behind — matching how it leaves an existing file untouched on
             // failure. A merely-missing parent map is no longer a failure: `set`
             // auto-vivifies it (see `Editor.set`).
-            applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, text, op) catch |err| {
+            const embed = try resolveEmbedType(io, a, input, opts.embed, opts.detect_embed);
+            applyStructuralEdit(a, io, input, resolved, embed, opts.path, text, op) catch |err| {
                 if (created) deleteCreatedFile(io, opts.file);
                 return err;
             };
@@ -865,8 +899,9 @@ pub fn main(init: std.process.Init) !void {
             }
             const parent = opts.path[0 .. opts.path.len - 1];
             const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+            const embed = try resolveEmbedType(io, a, input, opts.embed, opts.detect_embed);
             switch (opts.path[opts.path.len - 1]) {
-                .key => |key| try applyStructuralEdit(a, io, input, resolved, opts.embed, parent, opts.value, .{ .insert_key = key }),
+                .key => |key| try applyStructuralEdit(a, io, input, resolved, embed, parent, opts.value, .{ .insert_key = key }),
                 .index => |index| {
                     // The editor only prepends or appends; an addressable middle
                     // index has no primitive, so reject it rather than guess.
@@ -879,7 +914,7 @@ pub fn main(init: std.process.Init) !void {
                         try stderr_terminal.writer.flush();
                         std.process.exit(2);
                     };
-                    try applyStructuralEdit(a, io, input, resolved, opts.embed, parent, opts.value, op);
+                    try applyStructuralEdit(a, io, input, resolved, embed, parent, opts.value, op);
                 },
             }
         },
@@ -899,11 +934,12 @@ pub fn main(init: std.process.Init) !void {
                 std.process.exit(2);
             }
             const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
+            const embed = try resolveEmbedType(io, a, input, opts.embed, opts.detect_embed);
             // A trailing index removes that item from the parent sequence; a
             // trailing key deletes the mapping entry named by the full path.
             switch (opts.path[opts.path.len - 1]) {
-                .index => |index| try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path[0 .. opts.path.len - 1], "", .{ .remove_seq_item = index }),
-                .key => try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, "", .delete_key),
+                .index => |index| try applyStructuralEdit(a, io, input, resolved, embed, opts.path[0 .. opts.path.len - 1], "", .{ .remove_seq_item = index }),
+                .key => try applyStructuralEdit(a, io, input, resolved, embed, opts.path, "", .delete_key),
             }
         },
         .get => {
@@ -919,8 +955,8 @@ pub fn main(init: std.process.Init) !void {
             // `body` span) — the complement of extracting the embed content. With
             // no such region the whole file is the body.
             if (opts.body) {
-                const embed_type = opts.embed orelse fig.Embed.Type.FrontmatterYaml;
                 const content = try readAll(init.arena.allocator(), io, input);
+                const embed_type = resolveEmbedTypeFromContent(content, opts.embed, opts.detect_embed) orelse fig.Embed.Type.FrontmatterYaml;
                 if (fig.Embed.locateRegion(content, embed_type)) |region| {
                     try stdout_terminal.writer.writeAll(content[region.body.start..region.body.end]);
                 } else |err| switch (err) {
@@ -939,9 +975,20 @@ pub fn main(init: std.process.Init) !void {
             var from = opts.from;
             var to = opts.to;
 
-            const doc = if (opts.embed) |embed_type|
-                try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type)
-            else blk: {
+            const doc = if (try resolveEmbedType(io, init.arena.allocator(), input, opts.embed, opts.detect_embed)) |embed_type| blk_embed: {
+                // `embed_type` may have just been sniffed at runtime
+                // (`detect_embed`), in which case the parse-time
+                // placeholder `from`/`to` (the extension's guess, not the
+                // real archetype) needs correcting: the inner format
+                // always follows the archetype outright, and — same as
+                // the whole-file `detect` echo below — an unpinned
+                // output follows it too rather than silently defaulting
+                // to something else (e.g. `.yaml` for a `.md` file whose
+                // actual frontmatter turned out to be fig or JSON).
+                from = embedFormat(embed_type);
+                if (!opts.output_explicit) to = from;
+                break :blk_embed try parseEmbeddedFromFile(init.arena.allocator(), io, input, embed_type);
+            } else blk: {
                 // Read once so detection and parsing share the same bytes — a
                 // piped stdin can only be consumed a single time.
                 const content = try readAll(init.arena.allocator(), io, input);
@@ -1131,7 +1178,7 @@ pub fn main(init: std.process.Init) !void {
             const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
 
             if (opts.get) {
-                const comment = if (opts.embed) |embed_type|
+                const comment = if (try resolveEmbedType(io, a, input, opts.embed, opts.detect_embed)) |embed_type|
                     try getCommentFromEmbed(a, io, input, embed_type, opts.path, opts.inline_comment)
                 else switch (resolved) {
                     // Strict JSON has no comment syntax: there can be nothing to get.
@@ -1178,7 +1225,7 @@ pub fn main(init: std.process.Init) !void {
             else
                 (if (opts.inline_comment) .set_trailing_comment else .add_leading_comment);
 
-            if (opts.embed) |embed_type| {
+            if (try resolveEmbedType(io, a, input, opts.embed, opts.detect_embed)) |embed_type| {
                 try applyToEmbed(a, io, input, embed_type, opts.path, opts.text, op);
             } else switch (resolved) {
                 // Strict JSON has no comment syntax: fail with a clear message
@@ -1310,7 +1357,7 @@ pub fn main(init: std.process.Init) !void {
 
             // `--embed`: only the region between the fences is reformatted; the
             // rest of the host document is carried through byte-identical.
-            if (opts.embed) |embed_type| {
+            if (resolveEmbedTypeFromContent(content, opts.embed, opts.detect_embed)) |embed_type| {
                 const region = try fig.Embed.locateRegion(content, embed_type);
                 const inner = content[region.content.start..region.content.end];
                 const reformatted_inner = try reformatSlice(a, &stderr_terminal, opts.file, embedFormat(embed_type), inner, opts.serialize, opts.quiet, opts.strict);
@@ -1619,7 +1666,7 @@ fn checkOne(allocator: std.mem.Allocator, io: Io, file: []const u8, override: ?F
         format = f;
     } else if (detectLanguageFromFileEnding(file)) |d| {
         format = d.format;
-        embed = d.embed;
+        embed = resolveEmbedTypeFromContent(content, null, d.embed_detect);
     } else {
         format = try resolveFormatFromContent(allocator, content, file);
     }
@@ -2455,12 +2502,17 @@ fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegm
     return path_in_progress.toOwnedSlice(allocator);
 }
 
-/// Result of mapping a file extension to a parse strategy. `embed` is non-null
-/// when the file is a host document whose config lives in an embedded region;
-/// `format` then describes that region's inner format.
+/// Result of mapping a file extension to a parse strategy. `embed_detect` is
+/// set when the file is a host document whose config lives in an embedded
+/// region (currently only `.md`/`.markdown`) — but the extension alone can't
+/// say which archetype it is (YAML/JSON/fig frontmatter, YAML endmatter all
+/// use different fences), so the caller still has to sniff the actual bytes
+/// with `Embed.detect` (see `resolveEmbedType`/`resolveEmbedTypeFromContent`)
+/// rather than assuming one outright. `format` describes the whole-file parse
+/// strategy for the (rarer) case where there turns out to be no embed at all.
 const Detected = struct {
     format: Format,
-    embed: ?fig.Embed.Type = null,
+    embed_detect: bool = false,
 };
 
 /// Infer the parse strategy from a file's extension, or null when the extension
@@ -2470,23 +2522,28 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     const dot = std.mem.findLast(u8, file_path, ".");
     const ext = file_path[(dot orelse 0) + 1 .. file_path.len];
 
-    // Markdown carries YAML frontmatter by default.
+    // Markdown conventionally carries an embedded region (frontmatter, or
+    // endmatter), but which archetype it is still has to be sniffed from the
+    // actual bytes — a `` ```fig ``` ``-fenced or JSON frontmatter block (or a
+    // YAML endmatter fence) must not be mistaken for `---` YAML frontmatter
+    // just because the file ends in `.md`.
     if (std.mem.eql(u8, ext, "md") or std.mem.eql(u8, ext, "markdown")) {
-        return .{ .format = .yaml, .embed = .FrontmatterYaml };
+        return .{ .format = .yaml, .embed_detect = true };
     }
 
     // `.fig` is the authoring dialect's extension. (The canonical form
     // deliberately owns no extension; select it with `--input canonical`.)
-    if (std.mem.eql(u8, ext, "fig")) return .{ .format = .fig, .embed = null };
+    if (std.mem.eql(u8, ext, "fig")) return .{ .format = .fig };
 
     const format = std.meta.stringToEnum(Format, ext) orelse return null;
-    return .{ .format = format, .embed = null };
+    return .{ .format = format };
 }
 
 /// Map a `--embed <archetype>` flag value to its `Embed.Type`. Lets any
-/// embed-capable action target a region explicitly — not just the markdown-
-/// extension default of YAML frontmatter — so endmatter and JSON frontmatter are
-/// reachable. Returns null for an unknown name.
+/// embed-capable action target a region explicitly — overriding whatever
+/// `resolveEmbedType`/`resolveEmbedTypeFromContent` would otherwise sniff —
+/// so endmatter and JSON frontmatter are reachable. Returns null for an
+/// unknown name.
 fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
     if (std.mem.eql(u8, name, "frontmatter") or std.mem.eql(u8, name, "frontmatter-yaml"))
         return .FrontmatterYaml;
@@ -2503,13 +2560,47 @@ fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
 /// also requiring a redundant `--input`/`--output` (or, worse, silently
 /// keeping a same-named-extension guess that doesn't match the archetype —
 /// e.g. `--embed frontmatter-fig` on a `.md` file, whose extension alone
-/// defaults to YAML).
+/// says nothing about which archetype it actually is).
 fn embedFormat(t: fig.Embed.Type) Format {
     return switch (fig.Embed.innerFormat(t)) {
         .yaml => .yaml,
         .json => .json,
         .fig => .fig,
     };
+}
+
+/// Resolve the embed archetype an action should operate on, given
+/// already-read `content`. An explicit `embed` (a `--embed` flag, or a format
+/// pinned outright some other way) always wins. Otherwise, when the file's
+/// extension only implied "there's probably an embedded region here" without
+/// saying which archetype (`detect_embed` — today only `.md`/`.markdown`,
+/// via `Detected.embed_detect`), sniff the real bytes with `Embed.detect` so
+/// a `` ```fig ``` ``-fenced or JSON frontmatter block (or a YAML endmatter
+/// fence) isn't silently mistaken for `---` YAML frontmatter. Falls back to
+/// the conventional `FrontmatterYaml` default when nothing is found at all —
+/// e.g. a brand-new host file with no frontmatter yet — so `set`'s
+/// open-or-init still seeds the same archetype it always has. Returns `null`
+/// when this isn't an embed operation at all (no override, and the extension
+/// implies no embed).
+fn resolveEmbedTypeFromContent(content: []const u8, embed: ?fig.Embed.Type, detect_embed: bool) ?fig.Embed.Type {
+    if (embed) |e| return e;
+    if (!detect_embed) return null;
+    return fig.Embed.detect(content) orelse .FrontmatterYaml;
+}
+
+/// Same as `resolveEmbedTypeFromContent`, but reads `input` itself first, for
+/// call sites that haven't already buffered the file's bytes at the point
+/// they need to decide. This only performs that read when a sniff is
+/// actually needed (`embed == null and detect_embed`) — which today only
+/// happens for a real `.md`/`.markdown` path, never stdin (`-`), so the extra
+/// positional read is always safe: it's a second read of a regular, seekable
+/// file, not a second (and empty) read of a pipe.
+fn resolveEmbedType(io: Io, allocator: std.mem.Allocator, input: Io.File, embed: ?fig.Embed.Type, detect_embed: bool) !?fig.Embed.Type {
+    if (embed) |e| return e;
+    if (!detect_embed) return null;
+    const content = try readAll(allocator, io, input);
+    defer allocator.free(content);
+    return fig.Embed.detect(content) orelse .FrontmatterYaml;
 }
 
 const ArgError = error{ UnsupportedFileFormat, MissingEditArgument, MissingSetArgument, MissingInsertArgument, MissingDeleteArgument, MissingGetArgument, MissingCommentArgument, MissingCheckArgument, MissingFmtArgument, MissingConvertArgument, OutOfMemory, Overflow, InvalidCharacter, InvalidPath };
@@ -2584,7 +2675,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
-            .embed = if (ext) |d| d.embed else null,
+            .embed = null,
+            .detect_embed = if (ext) |d| d.embed_detect else false,
         } };
     } else if (std.mem.eql(u8, action_str, "set") or std.mem.eql(u8, action_str, "s")) {
         config.action = .set;
@@ -2629,7 +2721,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             const file_path = positionals.items[0];
             const path = try parsePath(allocator, positionals.items[1]);
             const ext = detectLanguageFromFileEnding(file_path);
-            const embed = embed_override orelse (if (ext) |d| d.embed else null);
+            const embed = embed_override;
             config.options = .{
                 .set = .{
                     .file = file_path,
@@ -2643,6 +2735,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     // is fixed by the archetype) or when the extension resolved it.
                     .detect = ext == null and embed == null,
                     .embed = embed,
+                    .detect_embed = embed == null and (if (ext) |d| d.embed_detect else false),
                 },
             };
         }
@@ -2678,7 +2771,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
-            .embed = if (ext) |d| d.embed else null,
+            .embed = null,
+            .detect_embed = if (ext) |d| d.embed_detect else false,
         } };
     } else if (std.mem.eql(u8, action_str, "delete") or std.mem.eql(u8, action_str, "d")) {
         config.action = .delete;
@@ -2705,7 +2799,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
-            .embed = if (ext) |d| d.embed else null,
+            .embed = null,
+            .detect_embed = if (ext) |d| d.embed_detect else false,
         } };
     } else if (std.mem.eql(u8, action_str, "comment") or std.mem.eql(u8, action_str, "c")) {
         config.action = .comment;
@@ -2762,7 +2857,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .requested_help = requested_help,
             .format = if (ext) |d| d.format else .json,
             .detect = !requested_help and ext == null,
-            .embed = if (ext) |d| d.embed else null,
+            .embed = null,
+            .detect_embed = if (ext) |d| d.embed_detect else false,
         } };
     } else if (std.mem.eql(u8, action_str, "get") or std.mem.eql(u8, action_str, "g")) {
         config.action = .get;
@@ -2923,15 +3019,17 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             detectLanguageFromFileEnding(file_path)
         else
             null;
-        // An explicit `--embed` archetype wins over the extension-inferred one.
-        const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+        // An explicit `--embed` archetype wins outright; otherwise, when the
+        // extension implies SOME embedded region (`.md`), the handler sniffs
+        // which archetype it actually is at runtime (`resolveEmbedType`).
+        const embed = embed_override;
         // No `--input` and an unrecognized extension ⇒ sniff the contents in the
         // handler. `.json` here is a placeholder `from`/`to`, overwritten once the
         // real format is known. An explicit `--embed` is never sniffed: its
         // archetype fixes the inner format outright (`embedFormat`), and that
         // wins over a same-named extension guess — e.g. `--embed frontmatter-fig`
-        // on a `.md` file (whose extension alone would default to YAML) must
-        // read/render the embed as fig, not YAML.
+        // on a `.md` file (whose extension alone says nothing about which
+        // archetype it actually is) must read/render the embed as fig, not YAML.
         const needs_detect = !requested_help and input_override == null and embed_override == null and detected_input == null;
         const input_format = input_override orelse
             (if (embed_override) |et| embedFormat(et) else null) orelse
@@ -2953,6 +3051,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .lax_tags = lax_tags,
             .lossless = lossless,
             .embed = embed,
+            .detect_embed = embed == null and (if (detected_input) |d| d.embed_detect else false),
             .body = body,
             .serialize = serialize,
             .quiet = quiet,
@@ -3103,8 +3202,10 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             detectLanguageFromFileEnding(file_path)
         else
             null;
-        // An explicit `--embed` archetype wins over the extension-inferred one.
-        const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+        // An explicit `--embed` archetype wins outright; otherwise, when the
+        // extension implies SOME embedded region (`.md`), the handler sniffs
+        // which archetype it actually is at runtime.
+        const embed = embed_override;
         const needs_detect = !requested_help and input_override == null and embed_override == null and detected_input == null;
         const from = input_override orelse
             (if (embed_override) |et| embedFormat(et) else null) orelse
@@ -3121,6 +3222,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             .dry_run = dry_run,
             .diff = diff_mode,
             .embed = embed,
+            .detect_embed = embed == null and (if (detected_input) |d| d.embed_detect else false),
         } };
     } else if (std.mem.eql(u8, action_str, "convert") or std.mem.eql(u8, action_str, "cv")) {
         config.action = .convert;
@@ -3257,8 +3359,11 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
 
         if (!requested_help and to_embed_override != null) {
             // Embed-archetype mode: `from`/`to`/`detect` are unused — the
-            // source and target archetypes fix both formats.
-            const embed = embed_override orelse (if (detected_input) |d| d.embed else null);
+            // source and target archetypes fix both formats. The source
+            // archetype is never pinned by the extension alone (`.md` only
+            // implies SOME embed, not which one) — an explicit `--embed`
+            // wins, else `detect_embed` sniffs it from the content at runtime.
+            const embed = embed_override;
             config.options = .{ .convert = .{
                 .file = file_path,
                 .requested_help = requested_help,
@@ -3281,7 +3386,7 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
             // `--to-embed` instead, unless they passed an explicit `--input`
             // that overrides the extension's guess entirely.
             if (!requested_help and input_override == null) {
-                if (detected_input) |d| if (d.embed != null) {
+                if (detected_input) |d| if (d.embed_detect) {
                     log.err("{s} is a host document (embedded config detected); use --to-embed <archetype> to convert its embedded region, or pass --input explicitly to force whole-file conversion.\n", .{file_path});
                     return ArgError.MissingConvertArgument;
                 };
@@ -3512,6 +3617,56 @@ test "embedTypeFromName maps archetype names" {
     try t.expectEqual(@as(?fig.Embed.Type, null), embedTypeFromName("bogus"));
 }
 
+test "detectLanguageFromFileEnding: .md/.markdown defer the archetype to a runtime sniff" {
+    const t = std.testing;
+    const md = detectLanguageFromFileEnding("post.md").?;
+    try t.expectEqual(Format.yaml, md.format);
+    try t.expect(md.embed_detect);
+
+    const markdown = detectLanguageFromFileEnding("post.markdown").?;
+    try t.expect(markdown.embed_detect);
+
+    // Other extensions imply no embed at all.
+    const yaml = detectLanguageFromFileEnding("f.yaml").?;
+    try t.expect(!yaml.embed_detect);
+
+    const fig_ext = detectLanguageFromFileEnding("f.fig").?;
+    try t.expect(!fig_ext.embed_detect);
+}
+
+test "resolveEmbedTypeFromContent: explicit override wins, else sniffs, else falls back to YAML" {
+    const t = std.testing;
+
+    // An explicit override always wins, regardless of content.
+    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), resolveEmbedTypeFromContent("anything", .EndmatterYaml, true));
+
+    // Not a detect_embed case at all (e.g. a plain .json file): no embed.
+    try t.expectEqual(@as(?fig.Embed.Type, null), resolveEmbedTypeFromContent("{}", null, false));
+
+    // detect_embed sniffs the real archetype from the bytes — this is the
+    // fig-frontmatter regression: a `.md` file whose actual content is a
+    // ```fig fenced block must resolve to FrontmatterFig, not be assumed to
+    // be YAML just because the extension is `.md`.
+    try t.expectEqual(
+        @as(?fig.Embed.Type, .FrontmatterFig),
+        resolveEmbedTypeFromContent("```fig\ntitle = hi\n```\nbody\n", null, true),
+    );
+    try t.expectEqual(
+        @as(?fig.Embed.Type, .FrontmatterJson),
+        resolveEmbedTypeFromContent(";;;\n{\"a\":1}\n;;;\nbody\n", null, true),
+    );
+    try t.expectEqual(
+        @as(?fig.Embed.Type, .FrontmatterYaml),
+        resolveEmbedTypeFromContent("---\na: 1\n---\nbody\n", null, true),
+    );
+
+    // Nothing detected at all (e.g. a brand-new/plain host file): falls back
+    // to the historical FrontmatterYaml default rather than `null`, so `set`'s
+    // open-or-init still seeds the same archetype it always has.
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), resolveEmbedTypeFromContent("just prose\n", null, true));
+    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), resolveEmbedTypeFromContent("", null, true));
+}
+
 test "parseConfig routes set, --seq, and --embed" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -3543,6 +3698,15 @@ test "parseConfig routes set, --seq, and --embed" {
     var fm = TestArgs{ .items = &.{ "fig", "set", "--embed", "frontmatter-fig", "post.md", "k", "v" } };
     const fmc = try parseConfig(a, &fm);
     try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), fmc.options.set.embed);
+
+    // No --embed on a `.md` file: the fix for the fig-frontmatter
+    // autodetection bug — `embed` stays null and `detect_embed` fires, so
+    // the handler sniffs the actual archetype from the file's bytes at
+    // runtime instead of the extension alone assuming YAML frontmatter.
+    var md = TestArgs{ .items = &.{ "fig", "set", "post.md", "k", "v" } };
+    const mdc = try parseConfig(a, &md);
+    try t.expectEqual(@as(?fig.Embed.Type, null), mdc.options.set.embed);
+    try t.expect(mdc.options.set.detect_embed);
 }
 
 test "parseConfig routes convert: whole-file mode, embed mode, and their guards" {
@@ -3575,13 +3739,14 @@ test "parseConfig routes convert: whole-file mode, embed mode, and their guards"
     try t.expectEqual(@as(?fig.Embed.Type, null), emc.options.convert.embed);
     try t.expect(emc.options.convert.detect_embed);
 
-    // Embed mode on a `.md` file: the extension default (FrontmatterYaml)
-    // fills `embed` even without an explicit `--embed`, so no runtime sniff
-    // is needed.
+    // Embed mode on a `.md` file: the extension alone only implies SOME
+    // embedded region, never which archetype — `embed` stays null and
+    // `detect_embed` fires so the handler sniffs the actual fences at
+    // runtime instead of assuming YAML frontmatter outright.
     var md = TestArgs{ .items = &.{ "fig", "convert", "--to-embed", "frontmatter-json", "post.md" } };
     const mdc = try parseConfig(a, &md);
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), mdc.options.convert.embed);
-    try t.expect(!mdc.options.convert.detect_embed);
+    try t.expectEqual(@as(?fig.Embed.Type, null), mdc.options.convert.embed);
+    try t.expect(mdc.options.convert.detect_embed);
 
     // Embed mode: explicit --embed overrides the extension default.
     var ov = TestArgs{ .items = &.{ "fig", "convert", "--embed", "endmatter", "--to-embed", "frontmatter-fig", "post.md" } };
