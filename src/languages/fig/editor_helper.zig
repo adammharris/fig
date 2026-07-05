@@ -101,16 +101,28 @@ pub fn figInsertKey(self: *FigEditor, parsed: Document, node: AST.Node, span: Sp
     if (isFlow(source, span))
         return figInsertFlowEntry(self, parsed, node, span, key_text, value_text);
 
-    // A parsed block mapping is never empty — `FigEmptyContainer` rejects an
-    // empty container at parse time — so there is always an existing child to
-    // anchor the insertion on and (for a non-root mapping) to copy a prefix
-    // from. Root keys always carry zero markers, so no lookup is needed there.
-    const prefix: []const u8 = if (is_root) "" else blk: {
-        const first_key = (try parsed.ast.firstChildKey(&node)).?;
-        break :blk linePrefix(source, parsed.span(first_key).start);
-    };
-    const last = (try parsed.ast.lastChild(&node)).?;
-    const insert_at = lineEndAfter(source, parsed.span(last).end -| 1);
+    // The only empty block mapping is the root of an empty (or comments-only)
+    // document — a childless *nested* block container is `FigEmptyContainer` at
+    // parse time — so seeding a fresh file's first key just appends at
+    // end-of-source with no marker prefix (root keys always carry zero markers).
+    // With a child present there is always one to anchor the insertion on and
+    // (for a non-root mapping) to copy a prefix from.
+    if (try parsed.ast.lastChild(&node)) |last| {
+        const prefix: []const u8 = if (is_root) "" else blk: {
+            const first_key = (try parsed.ast.firstChildKey(&node)).?;
+            break :blk linePrefix(source, parsed.span(first_key).start);
+        };
+        const insert_at = lineEndAfter(source, parsed.span(last).end -| 1);
+        return spliceKeyLine(self, insert_at, prefix, key_text, value_text);
+    }
+    return spliceKeyLine(self, source.len, "", key_text, value_text);
+}
+
+/// Splice a `<prefix>key = value` line into the block mapping source at
+/// `insert_at`, ensuring it starts on its own line. Shared by the has-children
+/// and empty-root arms of `figInsertKey`.
+fn spliceKeyLine(self: *FigEditor, insert_at: usize, prefix: []const u8, key_text: []const u8, value_text: []const u8) !void {
+    const source = self.source.items;
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(self.allocator);

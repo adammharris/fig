@@ -366,7 +366,7 @@ const Help = struct {
             \\  help: prints this text (default action)
             \\  version: prints version number
             \\  edit: edits part of file
-            \\  set: upsert a value (create the key, or the embed block, if absent)
+            \\  set: upsert a value (create the key, embed block, or file, if absent)
             \\  insert: add a new key or list item to a file
             \\  delete: remove a key or list item from a file
             \\  get: print a file or a specific part of a file to stdout
@@ -399,8 +399,16 @@ const Help = struct {
         try term.writer.print(
             \\Usage: {s} set [--embed <archetype>] <file> <path> <value>
             \\       {s} set [--embed <archetype>] --seq <file> <path> <item>...
-            \\  Upsert: replace the value at <path>, or create it when only the
-            \\    trailing key is absent — one verb for `edit`+`insert`.
+            \\  Upsert: replace the value at <path>, or create it when absent —
+            \\    one verb for `edit`+`insert`. Missing parent maps along <path>
+            \\    are auto-created (`mkdir -p`); a segment that is an existing
+            \\    non-map scalar is a type error and left untouched.
+            \\  When <file> itself does not exist, it is CREATED and seeded with
+            \\    <path>: <value>; `fig get <file>` then prints what was written.
+            \\    The format comes from the extension, so a new file needs a known
+            \\    one — .fig/.json/.jsonc/.yaml/.yml/.toml (or a .md host, via
+            \\    --embed). .zon/.json5 have no from-scratch seed and must already
+            \\    exist.
             \\  --seq: reconcile the sequence at <path> to exactly <item>..., keeping
             \\    the comments on items that survive (only new items are inserted,
             \\    only dropped ones removed; result order matches the arguments).
@@ -409,9 +417,7 @@ const Help = struct {
             \\    (;;;/JSON), `frontmatter-fig` (```fig fenced block), or
             \\    `endmatter` (trailing ```endmatter block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
-            \\    the bottom) and seeded with <path>: <value> — except
-            \\    `frontmatter-fig`, which cannot be created from nothing (fig has
-            \\    no empty-document syntax) and must already exist in the file.
+            \\    the bottom) and seeded with <path>: <value>.
             \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON
             \\    is quoted as a string, as with `edit`). A created key is rendered
             \\    in the target syntax too, so new keys work for strict JSON.
@@ -783,21 +789,61 @@ pub fn main(init: std.process.Init) !void {
                 return;
             }
             const a = init.arena.allocator();
-            const input = try getInput(io, opts.file, .read_write);
-            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
-
             if (opts.path.len == 0) {
                 try stderr_terminal.writer.print("error: set needs a path to the key (or, with --seq, the sequence) to upsert.\n", .{});
                 try stderr_terminal.writer.flush();
                 std.process.exit(2);
             }
+            // `set` upserts, so it may target a file that doesn't exist yet:
+            // create it and seed a minimal valid empty document (see
+            // `createSeededFile`/`emptyDocSeed`) so the editor lands the first
+            // key into a parseable buffer. The other structural actions keep the
+            // plain open — they edit what's already there and have nothing to
+            // seed into a blank file. Two cases refuse the create up front,
+            // before any file lands on disk:
+            //   - a freshly created file is empty, so its format can't be sniffed
+            //     (`--detect`): it must carry a known extension;
+            //   - a format with no empty-document form (`emptyDocSeed` == null,
+            //     e.g. fig) has nothing valid to seed.
+            // When targeting an embed, the host is seeded empty ("") and the
+            // embed machinery (`initRegion`) synthesizes the inner block itself.
+            var created = false;
+            const input = getInput(io, opts.file, .read_write) catch |err| switch (err) {
+                error.FileNotFound => blk: {
+                    if (std.mem.eql(u8, opts.file, "-")) return err;
+                    if (opts.detect) {
+                        try stderr_terminal.writer.print("error: cannot create {s}: an unrecognized extension gives no format to seed. Use a known extension (.json/.jsonc/.yaml/.toml/.zon) or an existing file.\n", .{opts.file});
+                        try stderr_terminal.writer.flush();
+                        std.process.exit(2);
+                    }
+                    const seed: []const u8 = if (opts.embed != null) "" else emptyDocSeed(opts.format) orelse {
+                        try stderr_terminal.writer.print("error: cannot create {s}: {s} has no empty-document form to seed a new file. Start from an existing file.\n", .{ opts.file, @tagName(opts.format) });
+                        try stderr_terminal.writer.flush();
+                        std.process.exit(2);
+                    };
+                    created = true;
+                    break :blk try createSeededFile(io, opts.file, seed);
+                },
+                else => return err,
+            };
+            defer if (!std.mem.eql(u8, opts.file, "-")) input.close(io);
+
             const resolved = if (opts.detect) try detectFileFormat(io, a, opts.file) else opts.format;
             // `--seq` reconciles the sequence at `path`; otherwise upsert a scalar.
             // Both flow through the shared structural-edit router, so the embed
             // path (which open-or-inits a missing block) is reused for free.
             const op: EditOp = if (opts.seq) .{ .set_sequence = opts.values } else .set;
             const text: []const u8 = if (opts.seq) "" else opts.value;
-            try applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, text, op);
+            // On a from-scratch create, roll the new file back if the edit fails
+            // (e.g. a path whose parent segment resolves to a scalar, which `set`
+            // refuses rather than clobber) so a failed `set` leaves no bare seed
+            // behind — matching how it leaves an existing file untouched on
+            // failure. A merely-missing parent map is no longer a failure: `set`
+            // auto-vivifies it (see `Editor.set`).
+            applyStructuralEdit(a, io, input, resolved, opts.embed, opts.path, text, op) catch |err| {
+                if (created) deleteCreatedFile(io, opts.file);
+                return err;
+            };
         },
         .insert => {
             const opts = config.options.insert;
@@ -2312,6 +2358,55 @@ fn getInput(io: Io, file_path: ?[]const u8, mode: std.Io.Dir.OpenFileOptions.Mod
     }
 }
 
+/// Create `file_path` for read+write and seed it with `seed` — the `set`
+/// action's "upsert into nothing" path (a `touch` folded into the existing
+/// upsert verb). Most editors can't parse a truly empty buffer, so the file is
+/// primed with a minimal valid empty document for its format (`{}` for JSON,
+/// `.{}` for ZON, nothing for YAML/TOML — see `emptyDocSeed`); the subsequent
+/// `set` then lands the first key into a parseable document, exactly as an
+/// absent embed block is seeded before its first key. Writing is positional and
+/// leaves the read cursor at 0, so `applyToFile`'s `readAll` reads the seed back.
+fn createSeededFile(io: Io, file_path: []const u8, seed: []const u8) !Io.File {
+    var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_path = try std.process.currentPath(io, &cwd_buf);
+    const dir = try std.Io.Dir.cwd().openDir(io, cwd_buf[0..cwd_path], .{});
+    defer dir.close(io);
+    const file = try dir.createFile(io, file_path, .{ .read = true });
+    if (seed.len > 0) try file.writePositionalAll(io, seed, 0);
+    return file;
+}
+
+/// Best-effort unlink of a file `set` just created, used to roll back a
+/// from-scratch create when the edit that followed it failed — so a failed
+/// `set` never leaves a bare seed document (`{}`, `.{}`, …) littering the tree.
+/// Silent on failure: this is cleanup on an already-failing path, and the edit
+/// error is what the user needs to see.
+fn deleteCreatedFile(io: Io, file_path: []const u8) void {
+    var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const cwd_path = std.process.currentPath(io, &cwd_buf) catch return;
+    const dir = std.Io.Dir.cwd().openDir(io, cwd_buf[0..cwd_path], .{}) catch return;
+    defer dir.close(io);
+    dir.deleteFile(io, file_path) catch {};
+}
+
+/// The minimal valid empty document for `format`, used to seed a file `set`
+/// creates from scratch before landing its first key. `null` means the format
+/// has no empty-document form to seed into — the non-editable/projection formats
+/// (XML/canonical/gron) — so a from-scratch `set` on it is refused before any
+/// file is created. fig, like YAML/TOML, seeds from an empty file: an empty fig
+/// document parses as an empty map (see `buildRoot`), so the first `set` lands
+/// its key into it. JSON5 shares JSON's `{}` seed even though its in-place edit
+/// is unsupported: the clearer `UnsupportedJson5Edit` error then fires at edit
+/// time rather than a confusing "cannot seed" here.
+fn emptyDocSeed(format: Format) ?[]const u8 {
+    return switch (format) {
+        .json, .jsonc, .json5 => "{}\n",
+        .yaml, .yml, .toml, .fig => "",
+        .zon => ".{}\n",
+        .xml, .canonical, .gron => null,
+    };
+}
+
 fn parsePath(allocator: std.mem.Allocator, path: []const u8) ![]fig.AST.PathSegment {
     const log = std.log.scoped(.parsePath);
     var path_in_progress: std.ArrayList(fig.AST.PathSegment) = .empty;
@@ -3371,6 +3466,40 @@ test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
     const sq = try jsonifyEdit(a, .{ .set_sequence = &items }, "");
     try t.expectEqualStrings("\"x\"", sq.op.set_sequence[0]);
     try t.expectEqualStrings("\"y\"", sq.op.set_sequence[1]);
+}
+
+test "emptyDocSeed: seedable formats round-trip a first `set`, others refuse" {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // The seed a from-scratch `set` writes must parse and accept the first key,
+    // reproducing on-disk `createSeededFile` + `applyStructuralEdit` in memory.
+    var path = [_]fig.AST.PathSegment{.{ .key = "hello" }};
+
+    // YAML: empty seed, bare value.
+    const yaml = try applyEdit(fig.Language.YAML, a, emptyDocSeed(.yaml).?, &path, "world", .set, fig.Language.YAML.default_type);
+    try t.expectEqualStrings("hello: world\n", yaml);
+
+    // JSON: `{}` seed, value requoted through the JSON path like the CLI does.
+    const jv = try jsonifyEdit(a, .set, "world");
+    const json = try applyEdit(fig.Language.JSON, a, emptyDocSeed(.json).?, &path, jv.text, jv.op, .JSON);
+    try t.expect(std.mem.indexOf(u8, json, "\"hello\"") != null);
+    try t.expect(std.mem.indexOf(u8, json, "\"world\"") != null);
+
+    // TOML: empty seed, value already a TOML literal.
+    const toml = try applyEdit(fig.Language.TOML, a, emptyDocSeed(.toml).?, &path, "\"world\"", .set, fig.Language.TOML.default_type);
+    try t.expectEqualStrings("hello = \"world\"\n", toml);
+
+    // fig: empty seed (an empty document parses as an empty map), bare value.
+    const figc = try applyEdit(fig.Language.FIG, a, emptyDocSeed(.fig).?, &path, "world", .set, fig.Language.FIG.default_type);
+    try t.expectEqualStrings("hello = world\n", figc);
+
+    // Projection/non-stored formats (gron, canonical, xml) have no empty-document
+    // form, so the create is refused before a file lands.
+    try t.expectEqual(@as(?[]const u8, null), emptyDocSeed(.gron));
+    try t.expectEqual(@as(?[]const u8, null), emptyDocSeed(.canonical));
 }
 
 test "embedTypeFromName maps archetype names" {

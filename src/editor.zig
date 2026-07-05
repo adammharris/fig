@@ -118,10 +118,15 @@ pub fn Editor(comptime Language: type) type {
         ///
         /// The path's last segment MUST name a key — `set` only ever *creates* a
         /// mapping entry, never a sequence item, so a path ending in an index is
-        /// rejected with `NotAMapping`. Only the trailing leaf is conjured: a
-        /// missing *intermediate* container (the parent mapping itself doesn't
-        /// exist) is not vivified, surfacing as `NotFound` from the insert just
-        /// as a bare `insertKey` would.
+        /// rejected with `NotAMapping`. Missing *intermediate* containers are
+        /// auto-vivified (`mkdir -p` for config): if the parent mapping doesn't
+        /// exist yet, `set` seeds it — and any of ITS missing ancestors, deepest
+        /// first — as an empty map, then lands the leaf. Vivification fires only
+        /// when an intermediate KEY is genuinely absent (`NotFound`); a segment
+        /// that resolves to a non-map scalar is a real type error (`NotAMapping`)
+        /// and is never clobbered. Seeds are flow `{}`; for the dotted-key formats
+        /// (fig/TOML) `fig fmt` canonicalizes the resulting `a = { b = { c = v }}`
+        /// chain to `a.b.c = v`.
         ///
         /// Delegates to `replaceValAtPath`, so the replace case inherits that
         /// op's YAML value reframing (inline↔block) and merge-key COW.
@@ -141,16 +146,35 @@ pub fn Editor(comptime Language: type) type {
                 // is logical (it just matched against decoded names), so render it
                 // into the format's key syntax before splicing. `insertKey`
                 // re-validates the parent (a mapping, or an empty/null root it
-                // promotes), so a non-mapping parent or missing intermediate still
-                // errors; surface the original replace error when the insert can't
-                // proceed. Falling back on any replace error (not just `NotFound`)
-                // is what lets `set` seed a freshly-created, still-empty document —
-                // where navigating to the key fails with `NotAMapping`.
+                // promotes), so a non-mapping parent still errors; surface the
+                // original replace error when the insert can't proceed. Falling
+                // back on any replace error (not just `NotFound`) is what lets
+                // `set` seed a freshly-created, still-empty document — where
+                // navigating to the key fails with `NotAMapping`.
                 const key_text = try self.formatInsertKey(path[path.len - 1].key);
                 defer self.allocator.free(key_text);
-                self.insertKey(path[0 .. path.len - 1], key_text, value_text) catch
-                    return replace_err;
+                self.insertKey(path[0 .. path.len - 1], key_text, value_text) catch |insert_err| {
+                    // The parent mapping itself is missing (an intermediate key
+                    // is absent — `NotFound`, NOT the `NotAMapping` of a scalar
+                    // standing where a map should be, which must never be
+                    // clobbered). Auto-vivify it as an empty map — recursing to
+                    // seed any missing ancestor deepest-first — then retry the
+                    // leaf insert into the now-existing parent.
+                    if (path.len >= 2 and insert_err == error.NotFound) {
+                        try self.set(path[0 .. path.len - 1], emptyMapLiteral());
+                        try self.insertKey(path[0 .. path.len - 1], key_text, value_text);
+                    } else return replace_err;
+                };
             };
+        }
+
+        /// The empty-map value literal `set` splices to auto-vivify a missing
+        /// parent. Every editable format accepts a flow `{}` as an empty mapping
+        /// value (fig/YAML flow map, JSON object, TOML inline table); ZON spells
+        /// it `.{}`. Reparse-validated at the splice site like any other value.
+        fn emptyMapLiteral() []const u8 {
+            if (comptime Language == Zon) return ".{}";
+            return "{}";
         }
 
         /// Render a logical mapping key into this format's key syntax for the
@@ -1842,12 +1866,39 @@ test "set rejects a path that does not end in a key" {
     try testing.expectError(error.NotAMapping, ed.set(&.{}, "9"));
 }
 
-test "set does not vivify a missing intermediate container" {
+test "set auto-vivifies missing intermediate containers" {
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
     var ed: Editor(Yaml) = .{ .allocator = testing.allocator, .format = .v1_2_2 };
     try ed.init("a: 1\n");
     defer ed.deinit();
-    // Parent `missing` does not exist: the insert surfaces NotFound, not a new
-    // nested table.
-    try testing.expectError(error.NotFound, ed.set(&.{ .{ .key = "missing" }, .{ .key = "leaf" } }, "2"));
+    // Parent `missing` does not exist: `set` seeds it as an empty map, then
+    // lands the leaf. The existing `a: 1` is untouched.
+    try ed.set(&.{ .{ .key = "missing" }, .{ .key = "leaf" } }, "2");
+    try testing.expect(std.mem.indexOf(u8, ed.source.items, "a: 1") != null);
+    const leaf = try ed.getParsed();
+    const v = try leaf.ast.getValByPath(&.{ .{ .key = "missing" }, .{ .key = "leaf" } });
+    try testing.expectEqualStrings("2", v.kind.number.raw);
+}
+
+test "set does not clobber a scalar standing where a parent map should be" {
+    if (comptime !build_options.lang_yaml) return error.SkipZigTest;
+    var ed: Editor(Yaml) = .{ .allocator = testing.allocator, .format = .v1_2_2 };
+    try ed.init("a: 1\n");
+    defer ed.deinit();
+    // `a` is a scalar, not a map: descending into it for `b` is a real type
+    // error (`NotAMapping`), not a missing key to vivify — `a: 1` stays intact.
+    try testing.expectError(error.NotAMapping, ed.set(&.{ .{ .key = "a" }, .{ .key = "b" } }, "2"));
+    try testing.expectEqualStrings("a: 1\n", ed.source.items);
+}
+
+test "fig set vivifies a nested path from an empty document" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    var ed: Editor(Fig) = .{ .allocator = testing.allocator, .format = .Fig };
+    try ed.init(""); // empty fig doc = empty root map (seedable from scratch)
+    defer ed.deinit();
+    try ed.set(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" } }, "hi");
+    // The seeded parents nest as flow maps; the leaf reads back through the path.
+    const parsed = try ed.getParsed();
+    const v = try parsed.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" } });
+    try testing.expectEqualStrings("hi", v.kind.string);
 }

@@ -1897,6 +1897,14 @@ fn scanFlowBareBracket(self: *Parser) []const u8 {
 // ── AST assembly (bottom-up, via AST.Builder) ────────────────────────────────
 
 fn buildRoot(self: *Parser, b: *AST.Builder) Error!AST.Node.Id {
+    // An empty (or comments-only) document leaves the root `undecided`. Fig has
+    // no bare-scalar root, and an empty mapping is the natural seed for a fresh
+    // file (`fig set new.fig k v` lands its first key into it), so coerce the
+    // root to an empty map rather than raising the `FigEmptyContainer` error a
+    // childless *nested* container still (correctly) does — the map/sequence
+    // ambiguity that error guards against only bites once a key or `*` names a
+    // real child, which the root here has none of.
+    if (self.root.kind == .undecided) self.root.kind = .mapping;
     var root_wrap: TNode = .{ .value = .{ .container = &self.root }, .span = Span.init(0, 0) };
     root_wrap.dangling = self.root_dangling;
     return self.buildNode(b, &root_wrap);
@@ -2034,6 +2042,22 @@ fn expectParse(input: []const u8, expected: AST) !void {
     var ast = try parseAbstract(testing.allocator, input, .Fig);
     defer ast.deinit();
     try testing.expect(expected.eql(ast));
+}
+
+test "empty document is an empty root map (seedable for a from-scratch `set`)" {
+    // No bare-scalar root and no map/sequence ambiguity to resolve (there are no
+    // children), so an empty file is the empty map `set new.fig k v` seeds into.
+    try expectParse("", .{ .allocator = testing.allocator, .root = 0, .nodes = &.{
+        .{ .id = 0, .kind = .{ .mapping = null } },
+    } });
+    // A comments-only / whitespace-only file is likewise an empty root map, not
+    // the `FigEmptyContainer` a childless *nested* container still raises.
+    try expectParse("# just a note\n", .{ .allocator = testing.allocator, .root = 0, .nodes = &.{
+        .{ .id = 0, .kind = .{ .mapping = null } },
+    } });
+    try expectParse("\n\n  \n", .{ .allocator = testing.allocator, .root = 0, .nodes = &.{
+        .{ .id = 0, .kind = .{ .mapping = null } },
+    } });
 }
 
 test "root map with a scalar assignment" {

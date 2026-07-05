@@ -225,25 +225,19 @@ pub const Initialized = struct { host: []u8, region: Region };
 /// blank line is inserted between fence and body, so the output matches the
 /// hand-rolled `---\n…\n---\n{body}` shape. The returned `host` is caller-owned.
 ///
-/// Fails with `error.FigCannotSeedEmptyDocument` for a fig-inner archetype
-/// (`FrontmatterFig`): unlike YAML/JSON, fig has no syntax for an empty
-/// document — a fig mapping must have at least one entry, full stop
-/// (`error.FigEmptyContainer` in the parser, everywhere, not just here) — so
-/// there is no seed this function could write that is both empty and valid.
-/// A fig-inner block can't be conjured from nothing; it must already contain
-/// its first key before further edits can target it.
 pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialized {
     const a = archetypeOf(t);
     const open_tok = a.open.tokens[0];
     const close_tok = a.close.tokens[0];
     // The empty inner document seeded between the fences. JSON gets a trailing
     // newline so the close fence stays on its own line after the flow-mapping
-    // insert (which preserves it); YAML's block insert emits its own newline, so
-    // its empty content needs none.
+    // insert (which preserves it); YAML's and fig's block inserts emit their own
+    // newline, so their empty content needs none. fig seeds empty like YAML: an
+    // empty fig document is a valid empty map (see `fig/parser.zig`'s `buildRoot`),
+    // so a subsequent set/insert lands the first key into it.
     const seed: []const u8 = switch (a.inner) {
-        .yaml => "",
+        .yaml, .fig => "",
         .json => "{}\n",
-        .fig => return error.FigCannotSeedEmptyDocument,
     };
 
     var host: std.ArrayList(u8) = .empty;
@@ -631,11 +625,16 @@ test "innerFormat reports each archetype's content format" {
     try testing.expectEqual(InnerFormat.fig, innerFormat(.FrontmatterFig));
 }
 
-test "initRegion: a fig-inner archetype cannot seed an empty document" {
-    // Unlike YAML/JSON, fig has no syntax for an empty document (a fig mapping
-    // must have at least one entry), so a brand-new ```fig``` block can't be
-    // conjured from nothing — it must already contain its first key.
-    try testing.expectError(error.FigCannotSeedEmptyDocument, initRegion(testing.allocator, "body text\n", .FrontmatterFig));
+test "initRegion: a fig-inner archetype seeds an empty block from nothing" {
+    // An empty fig document is a valid empty map (see `fig/parser.zig`), so a
+    // brand-new ```fig``` frontmatter block seeds empty (like YAML) and a
+    // subsequent set/insert lands its first key.
+    const init = try initRegion(testing.allocator, "body text\n", .FrontmatterFig);
+    defer testing.allocator.free(init.host);
+    try testing.expectEqualStrings("```fig\n```\nbody text\n", init.host);
+    // The seeded content is an empty span between the fences.
+    try testing.expectEqual(init.region.content.start, init.region.content.end);
+    try testing.expectEqualStrings("body text\n", init.host[init.region.body.start..init.region.body.end]);
 }
 
 test "extract: fig frontmatter with no host body" {
