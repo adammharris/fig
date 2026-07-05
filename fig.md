@@ -1,12 +1,10 @@
----
-title: fig
-author: adammharris
-created: 2026-05-08
-updated: 2026-06-23T17:03:45-06:00
-contents:
-  - "[VERSIONING](/VERSIONING.md)"
-  - "[CHANGELOG](/CHANGELOG.md)"
----
+```fig
+title = fig
+author = adammharris
+created = 2026-05-08
+updated = 2026-07-04T11:19:34-06:00
+contents = [[fig docs](docs/docs.md)]
+```
 
 # `fig`
 
@@ -21,11 +19,13 @@ It currently supports the following formats:
 - TOML (1.1 and 1.2)
 - ZON (Zig Object Notation) (read, write, but no editing yet)
 - XML (experimental, read-only)
-- `fig`, a native authoring dialect over the same AST (see `src/languages/fig/DESIGN.md`)
+- Fig, an in-house authoring dialect.
 
 ## Usage
 
-`fig` has a feature-complete C ABI as well as bindings in Rust and Typescript. Use `fig.Language.detect()` to discover the kind of format a document is. Use the language's parser (for example, `fig.Language.JSON.parse()`) to convert the document to an AST. Or use `fig.Embed.extract(allocator, content, .FrontmatterYaml)` to extract a document from a markdown file's frontmatter. Then, edit with `fig.Editor(fig.Language.YAML)` or convert with `document.ast.serialize(&writer, .<format>)`.
+`fig` has a feature-complete C ABI as well as bindings in Rust and Typescript. Use `fig.Language.detect()` to discover the kind of format a document is — including the fig dialect itself, when nothing stricter (JSON/ZON/XML/TOML) claims it and it isn't so plain that YAML would. Use the language's parser (for example, `fig.Language.JSON.parse()`) to convert the document to an AST. Or use `fig.Embed.extract(allocator, content, .FrontmatterYaml)` to extract a document from a markdown file's frontmatter — `fig.Embed.detect(content)` sniffs which archetype (YAML/JSON/fig frontmatter, YAML endmatter) a host document actually uses. Then, edit with `fig.Editor(fig.Language.YAML)` or convert with `document.ast.serialize(&writer, .<format>)`.
+
+The CLI mirrors both: `fig get`/`fig fmt`/etc. fall back to content-sniffing when a file's extension doesn't pin its format, and `fig convert <file> --output <format>` (or `--to-embed <archetype>` to rehouse a host document's embedded region — e.g. YAML frontmatter → JSON frontmatter — in place) converts a file from one format to another, in place, the cross-format twin of `fig fmt`. Run `fig convert --help` for the full flag set.
 
 There are no docs at the moment, but I have endeavored to make the code readable and well-organized. Don't be scared to take a peek! (Unless it is the YAML parser! 😵‍💫)
 
