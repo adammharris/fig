@@ -596,9 +596,14 @@ servers
 - **Coercion diagnostic.** Because sniffing reinterprets by shape, the diagnostics
   layer warns on the surprising cases (see "Coercion diagnostics"): a
   number/bool/null-looking token that fell to string, or an inline `#` that
-  truncated a bare value. Datetimes warn **quietly and only when ambiguous** (bare
-  `2026-07-01`), never on a full RFC-3339 timestamp with `T` and zone — to avoid
-  warn-fatigue. Strictness via warning, not by removing the ergonomic default.
+  truncated a bare value. A bare clock time warns **quietly** (`10:30` — the same
+  shape as a duration/ratio/score, with no unambiguous subset even at full
+  seconds precision); a bare *date* (`2026-07-01`) does not, since that shape is
+  the overwhelmingly common, deliberate hand-authored case (frontmatter dates,
+  deadlines, changelog entries) and warning on it was warn-fatigue rather than a
+  catch. A full RFC-3339 timestamp (`T`/zone present) is unambiguous either way
+  and always stays silent. Strictness via warning, not by removing the
+  ergonomic default.
 - **Bare strings by default**, including spaces: `title = My server`.
 - **Bare-string whitespace: interior kept, edges trimmed; quote to preserve
   edges.** A bare value is trimmed of leading and trailing whitespace but keeps
@@ -899,10 +904,16 @@ The sniffing cost, surfaced rather than removed:
 
 - a bare token that *looks* typed but fell to string, or the reverse (`Yes`, `007`,
   `12 monkeys`, `"true"`);
-- a bare **datetime** where the author may have meant text — but **quietly and only
-  when ambiguous** (`when = 2026-07-01` → date). A full RFC-3339 timestamp with `T`
-  and zone is unambiguous and stays silent, so legitimate dates don't cause
-  warn-fatigue;
+- a bare **clock time** where the author may have meant a duration/ratio/score
+  (`meet = 10:30`) — but **only the time shape**, and quietly. A bare *date*
+  (`day = 2026-07-01`) does **not** warn: in hand-authored config that shape is
+  almost always a deliberate date (frontmatter, deadlines, changelogs), so
+  flagging it was warn-fatigue on the common case rather than a catch. A bare
+  time has no comparable safe majority — `HH:MM[:SS[.frac]]` is exactly a
+  duration's/ratio's shape too, and neither seconds nor fractional precision
+  tell them apart, so there is no narrower unambiguous subset to carve out the
+  way the date/timestamp split does. A full RFC-3339 timestamp (`T` or zone
+  present) is unambiguous either way and always stays silent;
 - an inline `#` that silently truncated a bare value;
 - a **balanced `[…]`/`{…}` with trailing content** that fell to a bare string
   (`[80, 443] oops`) — the shape opens like a flow collection but its close is not
@@ -1316,8 +1327,9 @@ All of the following is **done**; build, tests, and `zig build semver-check`
   layer** — `Warning{code, offset}` collected during the pass and returned via
   `Report`/`parseWithReport` (valid alongside a failure too). Codes: the
   coercion set (`string_looks_like_literal` for `Yes`/`ON`/`TRUE`/`Null`,
-  `string_leading_zero` for `007`, `ambiguous_datetime` for a bare date/time —
-  a `T`-carrying timestamp stays silent), `flow_like_string` (balanced
+  `string_leading_zero` for `007`, `ambiguous_datetime` for a bare *time* only
+  (`10:30` — a bare date no longer warns, and a `T`/zone-carrying timestamp
+  stays silent), `flow_like_string` (balanced
   well-formed `[…]` + whitespace + trailing content only — glued links/globs
   never warn; well-formedness by speculative sub-parse of the prefix),
   `flow_missing_comma` (a bare flow value swallowing ` = `, the

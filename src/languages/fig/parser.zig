@@ -256,8 +256,19 @@ pub const Warning = struct {
         /// strings (`1.2.3`) and prose (`12 monkeys`) never warn. Coerce with
         /// `: float =` for the number, or quote to affirm the string.
         string_looks_like_number,
-        /// A bare date/time with no `T`+zone (`2026-07-01`) sniffed to a
-        /// datetime value; a full RFC-3339 timestamp never warns.
+        /// A bare clock time with no date (`10:30`) sniffed to a datetime
+        /// value. Narrower than it first looks: a bare *date* (`2026-07-01`)
+        /// no longer warns — that shape is the overwhelmingly common,
+        /// deliberate hand-authored case (frontmatter dates, deadlines,
+        /// changelog entries), so warning on it was noise, not signal. A bare
+        /// time has no such safe majority: `HH:MM[:SS]` is exactly the shape
+        /// of a duration, a ratio, or a sports score too, and neither seconds
+        /// nor fractional precision discriminate a clock time from those —
+        /// there is no unambiguous subset to carve out the way `T`/zone does
+        /// for dates. Any value with a `T`/space date-time separator
+        /// (`local_datetime`) or a zone (`offset_datetime`) already stays
+        /// silent — those separators aren't things prose/durations produce by
+        /// coincidence.
         ambiguous_datetime,
         /// A balanced, well-formed `[…]`/`{…}` separated from trailing content
         /// by whitespace (`[80, 443] x`) fell to a bare string. Glued shapes
@@ -279,7 +290,7 @@ pub const Warning = struct {
             .string_looks_like_literal => "this spells a boolean/null in other config languages, but fig literals are lowercase-only, so it stays the string it spells; quote it to make the string explicit, or lowercase it for the literal",
             .string_leading_zero => "a leading zero is not a number in fig, so the padding was kept as a string; quote it to make that explicit, or drop the zero for a number",
             .string_looks_like_number => "a trailing dot is not a valid number in fig, so this was kept as a string; write `: float =` to coerce it to a number, or quote it to affirm the string",
-            .ambiguous_datetime => "a bare date/time becomes a datetime value, not text; quote it if you meant a string",
+            .ambiguous_datetime => "a bare clock time becomes a datetime value, not text (also a duration/ratio shape); quote it if you meant a string",
             .flow_like_string => "this looks like a `[…]`/`{…}` flow value with trailing content, so the whole line was read as one bare string; remove the trailing content for a collection, or quote the value to affirm the string",
             .flow_missing_comma => "a bare flow value containing ` = ` usually means a missing comma between pairs; add the comma, or quote the value if it really is text",
             .indent_marker_mismatch => "indentation disagrees with the `>` marker count (convention: 2 spaces per level); meaning follows the count — fix whichever signal is wrong",
@@ -1424,12 +1435,16 @@ fn sniffToNodeWarned(self: *Parser, text: []const u8, offset: usize) Error!TNode
                 try self.warnAt(.string_looks_like_number, offset, end);
             }
         },
-        // Quietly, and only when ambiguous: a bare date or clock time reads
-        // as prose to some authors. A `T`-carrying timestamp is unambiguous
-        // (nobody types `T` mid-sentence) and stays silent — warn-fatigue is
-        // the failure mode this rule is calibrated against.
+        // Quietly, and only when ambiguous: a bare clock time reads as a
+        // duration/ratio/score as easily as a time-of-day. A bare *date*
+        // (`local_date`) does not warn — in hand-authored config it is
+        // overwhelmingly a deliberate date (frontmatter, deadlines, changelog
+        // entries), so flagging it was warn-fatigue on the common case, not a
+        // catch on the rare one. A `T`/zone-carrying timestamp
+        // (`local_datetime`/`offset_datetime`) is unambiguous (nobody types
+        // `T` or `+HH:MM` mid-sentence) and stays silent too.
         .extended => |e| switch (e.kind) {
-            .local_date, .local_time => try self.warnAt(.ambiguous_datetime, offset, end),
+            .local_time => try self.warnAt(.ambiguous_datetime, offset, end),
             else => {},
         },
         else => {},
@@ -2837,10 +2852,18 @@ test "coercion warns: literal lookalikes and leading zeros" {
     try expectWarnCodes("sig: float = 1.\n", &.{});
 }
 
-test "coercion warns: ambiguous datetime only" {
-    try expectWarnCodes("day = 2026-07-01\n", &.{.ambiguous_datetime});
-    // A full timestamp is unambiguous; prose containing a time never sniffs.
+test "coercion warns: ambiguous bare time only" {
+    // A bare date is the common, deliberate case (frontmatter, deadlines) —
+    // no warn.
+    try expectWarnCodes("day = 2026-07-01\n", &.{});
+    // A bare time collides with duration/ratio/score shapes — warns, with or
+    // without seconds (precision doesn't disambiguate it from those).
+    try expectWarnCodes("meet = 10:30\n", &.{.ambiguous_datetime});
+    try expectWarnCodes("split = 10:30:00\n", &.{.ambiguous_datetime});
+    // A `T`/zone-carrying timestamp is unambiguous; prose containing a time
+    // never sniffs (the whole token has to match, not a substring).
     try expectWarnCodes("when = 2026-07-01T12:00:00Z\n", &.{});
+    try expectWarnCodes("local = 2026-07-01T12:00:00\n", &.{});
     try expectWarnCodes("note = call mom at 3:30\n", &.{});
 }
 
