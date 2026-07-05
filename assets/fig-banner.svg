@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 224 122">
+  <defs>
+    <path id="f" d="M0,-40 C-1,-30 -8,-26 -16,-18 C-25,-9 -30,2 -30,12 C-30,29 -17,40 0,40 C17,40 30,29 30,12 C30,2 25,-9 16,-18 C8,-26 1,-30 0,-40 Z"/>
+  </defs>
+  <g transform="translate(50,66) scale(1.12)">
+    <path d="M0,-40 C1,-46 3,-50 8,-54" fill="none" stroke="#7A5A37" stroke-width="4.5" stroke-linecap="round"/>
+    <use href="#f" fill="#52355C"/>
+    <g transform="scale(0.84)"><use href="#f" fill="#F2E6D8"/></g>
+    <g transform="scale(0.70)"><use href="#f" fill="#D4576B"/></g>
+    <g fill="#F6EADC">
+      <circle cx="0" cy="-14" r="2.1"/><circle cx="-7" cy="-6" r="2.1"/><circle cx="7" cy="-6" r="2.1"/>
+      <circle cx="-13" cy="3" r="2.1"/><circle cx="0" cy="2" r="2.1"/><circle cx="13" cy="3" r="2.1"/>
+      <circle cx="-8" cy="11" r="2.1"/><circle cx="8" cy="11" r="2.1"/><circle cx="-15" cy="12" r="2.1"/>
+      <circle cx="15" cy="12" r="2.1"/><circle cx="0" cy="19" r="2.1"/><circle cx="-7" cy="24" r="2.1"/>
+      <circle cx="7" cy="24" r="2.1"/>
+    </g>
+  </g>
+  <text x="98" y="83" font-family="Iowan Old Style, Palatino, Georgia, serif" font-size="72" fill="#2C2130">fig</text>
+</svg>

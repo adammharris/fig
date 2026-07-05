@@ -8,10 +8,9 @@ contents = [[fig docs](docs/docs.md)]
 
 <h1 align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/fig-dark.svg">
-    <img src="assets/fig.svg" width="42" align="middle" alt="">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/fig-banner-dark.svg">
+    <img src="assets/fig-banner.svg" width="220" alt="fig">
   </picture>
-  <code>fig</code>
 </h1>
 
 `fig` is a Zig library for parsing and editing config files.
@@ -25,7 +24,7 @@ It currently supports the following formats:
 - TOML (1.1 and 1.2)
 - ZON (Zig Object Notation) (read, write, but no editing yet)
 - XML (experimental, read-only)
-- Fig, an in-house authoring dialect.
+- Fig (.figl), an in-house authoring dialect.
 
 ## Usage
 
@@ -108,8 +107,7 @@ console.log(parse('{"name":"fig"}', Format.Json)); // { name: "fig" }
 ## Planned features
 
 - Expand editor to include ZON
-- Publish Rust crate
-- Publish NPM package
+- Better ergonomics for the Typescript bindings
 
 ## Fine print
 
