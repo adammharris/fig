@@ -1291,8 +1291,10 @@ All of the following is **done**; build, tests, and `zig build semver-check`
 - **Canonical is explicit-only** — it owns **no file extension**. Select it with
   `--input canonical` / `--output canonical`. (It stays the AST oracle: still the
   round-trippable 1:1 encoding, just no longer auto-detected.)
-- **`.fig` now routes to the authoring dialect.** Its reader/printer aren't built
-  yet, so a `.fig` file (or `--input/--output fig`) errors with a clear message:
+- **`.figl` now routes to the authoring dialect.** (`.figl` is the canonical
+  extension; `.fig` remains accepted for back-compat.) Its reader/printer aren't
+  built yet, so a `.figl` file (or `--input/--output fig`) errors with a clear
+  message:
   *"the fig authoring dialect is not yet implemented (reserved; see DESIGN.md)."*
   The `get` path exits cleanly (`exit 2`, no stack trace); edit/set/check paths
   return `error.FigAuthoringNotImplemented`.
@@ -1310,7 +1312,7 @@ All of the following is **done**; build, tests, and `zig build semver-check`
   MINOR.
 - **Landed:** `src/languages/fig/` (reader + `fig fmt` printer), wired into `Language`,
   `AST.SerializeFormat`, and the CLI's `get` path (`--input/--output fig`,
-  `.fig` extension). **Also landed:** the `fig fmt` house-style heuristics
+  `.figl` extension — `.fig` still accepted). **Also landed:** the `fig fmt` house-style heuristics
   (spaced markers, fits-or-breaks flow budget, dotted-key collapse, root
   sections with the depth-2 header/hoist rule, `[]`/`+` append groups — see
   "What `fig fmt` normalizes"), the `+` continuation line, the closed-flow-value
@@ -1358,7 +1360,7 @@ text verbatim (depth + spaced-vs-glued style, no separate bookkeeping — fig's
 self-describing lines make this safe to splice after any existing child,
 scattered re-entered headers included); flow-object insert matches the
 object's own fig-inline (`=`) vs JSON (`:`) pair mode. `edit`/`set`/`insert`/
-`delete`/`comment` all work on `.fig` now.
+`delete`/`comment` all work on `.figl` now.
 
 **Landed: whole-container structural ops.** `deleteContainer`/`moveContainer`/
 `reorderContainers` — fig's twins of TOML's `deleteTable`/`moveTable`/

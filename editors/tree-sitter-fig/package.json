@@ -7,7 +7,7 @@
   "tree-sitter": [
     {
       "scope": "source.fig",
-      "file-types": ["fig"],
+      "file-types": ["figl", "fig"],
       "highlights": ["queries/highlights.scm"]
     }
   ],

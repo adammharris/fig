@@ -63,7 +63,8 @@ const max_size = Io.Limit.limited(10 * 1024 * 1024);
 // counterpart; the `get` handler intercepts it before the serializer dispatch.
 // `canonical` (formerly `native`) is the AST's 1:1 oracle encoding, selectable
 // only via `--input/--output canonical` — it owns no file extension. `fig` is
-// the human-facing authoring dialect: it owns `.fig`, has a reader + `fig fmt`
+// the human-facing authoring dialect: it owns `.figl` (with `.fig` still
+// accepted for back-compat), has a reader + `fig fmt`
 // printer (see `get`), and `Editor(fig.Language.FIG)` wires `edit`/`set`/
 // `insert`/`delete`/`comment` through the same span-splice engine as
 // TOML/YAML/ZON (see `fig/editor_helper.zig`, which also carries the
@@ -426,7 +427,7 @@ const Help = struct {
             \\  When <file> itself does not exist, it is CREATED and seeded with
             \\    <path>: <value>; `fig get <file>` then prints what was written.
             \\    The format comes from the extension, so a new file needs a known
-            \\    one — .fig/.json/.jsonc/.yaml/.yml/.toml (or a .md host, via
+            \\    one — .figl (.fig also accepted)/.json/.jsonc/.yaml/.yml/.toml (or a .md host, via
             \\    --embed). .zon/.json5 have no from-scratch seed and must already
             \\    exist.
             \\  --seq: reconcile the sequence at <path> to exactly <item>..., keeping
@@ -521,9 +522,10 @@ const Help = struct {
             \\  canonical: the AST's 1:1 oracle text encoding; usable as input or
             \\    output, e.g. to inspect how any document parses. (Owns no file
             \\    extension — select it explicitly.)
-            \\  fig: the human-facing authoring dialect (`.fig`); lossy at the
-            \\    edges (non-string keys, YAML refs) — use `canonical`/`--lossless`
-            \\    for those. `-o fig` prints in house style; use `fig fmt` to
+            \\  fig: the human-facing authoring dialect (`.figl`; `.fig` still
+            \\    accepted); lossy at the edges (non-string keys, YAML refs) —
+            \\    use `canonical`/`--lossless` for those. `-o fig` prints in
+            \\    house style; use `fig fmt` to
             \\    rewrite a file in place instead of printing to stdout.
             \\  gron: a line-oriented `path = value;` projection (greppable, and
             \\    reversible with `-i gron`); must be selected explicitly, never
@@ -592,7 +594,7 @@ const Help = struct {
         try term.writer.print(
             \\Usage: {s} fmt [--input <format>] [--dry-run | --diff] <file>
             \\  Reformat a file in place: parse then re-emit in the format's house
-            \\  style — `.fig`'s printer applies the style DESIGN.md describes
+            \\  style — `.figl`'s printer applies the style DESIGN.md describes
             \\  (spaced marker runs, `[]`/`+` list sigils, ...); other formats get
             \\  their own printer's canonical layout. Unlike `get`, the output
             \\  format always matches the input — reformatting never converts.
@@ -2531,8 +2533,10 @@ fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
         return .{ .format = .yaml, .embed_detect = true };
     }
 
-    // `.fig` is the authoring dialect's extension. (The canonical form
-    // deliberately owns no extension; select it with `--input canonical`.)
+    // `.figl` is the authoring dialect's canonical extension; `.fig` is
+    // still accepted for back-compat. (The canonical form deliberately owns
+    // no extension; select it with `--input canonical`.)
+    if (std.mem.eql(u8, ext, "figl")) return .{ .format = .fig };
     if (std.mem.eql(u8, ext, "fig")) return .{ .format = .fig };
 
     const format = std.meta.stringToEnum(Format, ext) orelse return null;
@@ -3630,7 +3634,13 @@ test "detectLanguageFromFileEnding: .md/.markdown defer the archetype to a runti
     const yaml = detectLanguageFromFileEnding("f.yaml").?;
     try t.expect(!yaml.embed_detect);
 
+    const figl_ext = detectLanguageFromFileEnding("f.figl").?;
+    try t.expectEqual(Format.fig, figl_ext.format);
+    try t.expect(!figl_ext.embed_detect);
+
+    // `.fig` remains accepted for back-compat.
     const fig_ext = detectLanguageFromFileEnding("f.fig").?;
+    try t.expectEqual(Format.fig, fig_ext.format);
     try t.expect(!fig_ext.embed_detect);
 }
 

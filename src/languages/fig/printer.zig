@@ -1461,7 +1461,7 @@ test "empty containers round-trip via = {} / = []" {
 
 test "empty document round-trips as empty output" {
     // An empty file parses to an empty root map, which emits zero sections — so
-    // it prints back to nothing, keeping `fig fmt new.fig` a no-op.
+    // it prints back to nothing, keeping `fig fmt new.figl` a no-op.
     try expectPrint("", "");
     // Comments-only stays comments-only (the dangling run re-anchors to root).
     try expectPrint("# just a note\n", "# just a note\n");

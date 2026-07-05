@@ -1,6 +1,7 @@
 # Editor support for fig
 
-Two artifacts that give the `.fig` authoring dialect syntax highlighting:
+Two artifacts that give the `.figl` authoring dialect syntax highlighting
+(`.fig` is also accepted for back-compat):
 
 | Dir | What it is |
 |---|---|
@@ -39,14 +40,14 @@ on purpose so Zed can build the grammar without running codegen.
 Sanity-check against the canonical feature dump (should print no `ERROR` nodes):
 
 ```sh
-npx tree-sitter parse ../../src/fig/testdata/kitchen_sink.fig.txt | grep -c ERROR
+npx tree-sitter parse ../../src/languages/fig/testdata/kitchen_sink.figl | grep -c ERROR
 ```
 
 To render highlighting in the terminal, add this directory to your
 `~/.config/tree-sitter/config.json` `parser-directories`, then:
 
 ```sh
-npx tree-sitter highlight some.fig
+npx tree-sitter highlight some.figl
 ```
 
 ## Loading the Zed extension
@@ -59,7 +60,7 @@ Zed builds grammars from git — there is no "live local grammar" mode — so:
    monorepo and the `editors/tree-sitter-fig` subdirectory.
 3. In Zed: command palette → **`zed: install dev extension`** → pick
    `editors/zed-fig`. (Requires Rust via rustup installed.)
-4. Open any `.fig` file.
+4. Open any `.figl` file.
 
 Iterating on the grammar afterward = re-commit, bump `rev`, re-run
 `zed: install dev extension`. The `highlights.scm` query under
@@ -90,7 +91,7 @@ ln -sf "$PWD/zig-out/bin/fig-lsp" ~/.local/bin/fig-lsp   # or anywhere on PATH
 
 The `[language_servers.fig-lsp]` table is already in `zed-fig/extension.toml`.
 When you `zed: install dev extension`, Zed compiles `zed-fig/src/lib.rs` to wasm
-(needs Rust + the wasm target; Zed adds it) and starts `fig-lsp` for `.fig`
+(needs Rust + the wasm target; Zed adds it) and starts `fig-lsp` for `.figl`
 files. Open a file with a mistake — e.g. `host: localhost` (should be `=`) — and
 you should see the teaching diagnostic inline.
 
@@ -110,7 +111,7 @@ def read():
     return json.loads(p.stdout.read(int(h[b"content-length"])))
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}); read()
 send({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":
-    {"uri":"file:///t.fig","languageId":"fig","version":1,"text":"a\n  > host: localhost\n"}}})
+    {"uri":"file:///t.figl","languageId":"fig","version":1,"text":"a\n  > host: localhost\n"}}})
 print(json.dumps(read(), indent=2))   # expect one FigForeignSyntaxColon diagnostic
 PY
 ```

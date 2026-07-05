@@ -1929,7 +1929,7 @@ fn scanFlowBareBracket(self: *Parser) []const u8 {
 fn buildRoot(self: *Parser, b: *AST.Builder) Error!AST.Node.Id {
     // An empty (or comments-only) document leaves the root `undecided`. Fig has
     // no bare-scalar root, and an empty mapping is the natural seed for a fresh
-    // file (`fig set new.fig k v` lands its first key into it), so coerce the
+    // file (`fig set new.figl k v` lands its first key into it), so coerce the
     // root to an empty map rather than raising the `FigEmptyContainer` error a
     // childless *nested* container still (correctly) does — the map/sequence
     // ambiguity that error guards against only bites once a key or `*` names a
@@ -2076,7 +2076,7 @@ fn expectParse(input: []const u8, expected: AST) !void {
 
 test "empty document is an empty root map (seedable for a from-scratch `set`)" {
     // No bare-scalar root and no map/sequence ambiguity to resolve (there are no
-    // children), so an empty file is the empty map `set new.fig k v` seeds into.
+    // children), so an empty file is the empty map `set new.figl k v` seeds into.
     try expectParse("", .{ .allocator = testing.allocator, .root = 0, .nodes = &.{
         .{ .id = 0, .kind = .{ .mapping = null } },
     } });
@@ -2770,7 +2770,7 @@ test "flow values are closed: no later dotted/header/index extension" {
 }
 
 test "full kitchen-sink file parses" {
-    const src = @embedFile("testdata/kitchen_sink.fig");
+    const src = @embedFile("testdata/kitchen_sink.figl");
     var ast = try parseAbstract(testing.allocator, src, .Fig);
     defer ast.deinit();
     try testing.expectEqualStrings("2", (try ast.getValByPath(&.{.{ .key = "version" }})).kind.number.raw);
@@ -2796,9 +2796,9 @@ test "diagnostic renders file:line:col, the source line, and a caret" {
     var report: Report = .{};
     defer testing.allocator.free(report.warnings);
     _ = parseWithReport(testing.allocator, src, .Fig, &report) catch {};
-    const rendered = try report.diag.?.renderAlloc(testing.allocator, src, "app.fig");
+    const rendered = try report.diag.?.renderAlloc(testing.allocator, src, "app.figl");
     defer testing.allocator.free(rendered);
-    try testing.expect(std.mem.startsWith(u8, rendered, "app.fig:1:"));
+    try testing.expect(std.mem.startsWith(u8, rendered, "app.figl:1:"));
     try testing.expect(std.mem.indexOf(u8, rendered, "error: `:` introduces a type, not a value") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "\n    key: value\n") != null);
     try testing.expect(std.mem.indexOf(u8, rendered, "^\n") != null);
