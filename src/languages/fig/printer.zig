@@ -567,7 +567,8 @@ fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?us
         .string => |s| return if (std.mem.indexOfScalar(u8, s, '\n') != null) null else scalarStringWidth(s, false, true),
         .extended => |e| return switch (e.kind) {
             .offset_datetime, .local_datetime, .local_date, .local_time => e.text.len,
-            // enum/non-finite need `: type =`; char has no flow spelling.
+            // enum/char/non-finite need a `: type =` annotation, which exists
+            // only in block position — so none is flow-eligible.
             else => null,
         },
         .alias, .keyvalue => return null,
@@ -800,6 +801,10 @@ fn writeTypeAnnotation(self: *Printer, id: AST.Node.Id) Error!bool {
                 try self.writer.writeAll(": enum");
                 return true;
             },
+            .char_literal => {
+                try self.writer.writeAll(": char");
+                return true;
+            },
             .number_special => {
                 try self.writer.writeAll(": float");
                 return true;
@@ -827,7 +832,7 @@ fn value(self: *Printer, id: AST.Node.Id, in_flow: bool) Error!void {
         } else {
             try self.writeBareOrQuoted(s, false, in_flow);
         },
-        .extended => |e| try self.writeExtended(e, in_flow),
+        .extended => |e| try self.writeExtended(e),
         .mapping, .sequence => try self.flowValue(id),
         .keyvalue => unreachable,
         .alias => return error.UnresolvedAlias,
@@ -874,24 +879,34 @@ fn flowValue(self: *Printer, id: AST.Node.Id) Error!void {
     }
 }
 
-fn writeExtended(self: *Printer, e: AST.Node.Kind.Extended, in_flow: bool) Error!void {
+fn writeExtended(self: *Printer, e: AST.Node.Kind.Extended) Error!void {
     switch (e.kind) {
         .offset_datetime, .local_datetime, .local_date, .local_time => try self.writer.writeAll(e.text),
         .enum_literal, .number_special => try self.writer.writeAll(e.text),
-        // A char literal has no fig spelling; it degrades to its decoded text.
-        .char_literal => {
-            const cp = std.fmt.parseInt(u21, e.text, 10) catch {
-                try self.writeBareOrQuoted(e.text, false, in_flow);
-                return;
-            };
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(cp, &buf) catch {
-                try self.writeBareOrQuoted(e.text, false, in_flow);
-                return;
-            };
-            try self.writeBareOrQuoted(buf[0..len], false, in_flow);
-        },
+        // A char literal renders as the ZON-style `'A'` atom, paired with the
+        // `: char =` annotation `writeTypeAnnotation` emits (char is never
+        // flow-eligible, so it always reaches here in annotated block position).
+        .char_literal => try writeCharLiteral(self.writer, e.text),
     }
+}
+
+/// Re-encode a `char_literal` from its stored decimal codepoint as `'A'`. Mirrors
+/// the ZON printer: common escapes and printable ASCII emit directly, anything
+/// else uses `'\u{...}'`. A codepoint that fails to parse (only if minted oddly by
+/// another format) falls back to its numeric text.
+fn writeCharLiteral(writer: *Writer, text: []const u8) Error!void {
+    const cp = std.fmt.parseInt(u21, text, 10) catch return writer.writeAll(text);
+    try writer.writeByte('\'');
+    switch (cp) {
+        '\'' => try writer.writeAll("\\'"),
+        '\\' => try writer.writeAll("\\\\"),
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        0x20...0x26, 0x28...0x5b, 0x5d...0x7e => try writer.writeByte(@intCast(cp)),
+        else => try writer.print("\\u{{{x}}}", .{cp}),
+    }
+    try writer.writeByte('\'');
 }
 
 /// A string containing newlines, in block value position: `'''` raw when the
@@ -1525,6 +1540,28 @@ test "round-trips through a second parse (and fmt is idempotent)" {
         \\> class: enum = minecraft
         \\> huge: float = inf
         \\> long-tail = a sufficiently long value that the values table cannot be rendered through inline flow
+    );
+}
+
+test "char literals print as `: char =` atoms and round-trip" {
+    // Each char re-emits as its ZON-style `'…'` literal beside a `: char`
+    // annotation — the explicit-typing form, never a flow value.
+    try expectPrint(
+        \\letter: char = 'A'
+        \\tab: char = '\t'
+        \\quote: char = '\''
+        \\emoji: char = '\u{1F600}'
+    ,
+        \\letter: char = 'A'
+        \\tab: char = '\t'
+        \\quote: char = '\''
+        \\emoji: char = '\u{1f600}'
+        \\
+    );
+    try expectRoundTrip(
+        \\letter: char = 'A'
+        \\newline: char = '\n'
+        \\emoji: char = '\u{1f600}'
     );
 }
 

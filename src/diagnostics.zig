@@ -237,18 +237,11 @@ fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
     switch (format) {
         // Canonical is the lossless oracle: every kind round-trips.
         .canonical => return null,
-        // fig natively represents every kind EXCEPT a char literal — its
-        // `codepoint` text degrades to a plain decoded string (see
-        // `src/languages/fig/printer.zig`'s `writeExtended`). Enum atoms and non-finite
-        // floats round-trip losslessly too, but only via an explicit `: enum`/
-        // `: float` annotation, which is a syntax choice, not a value loss.
-        .fig => switch (kind) {
-            .extended => |e| if (e.kind == .char_literal)
-                return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) }
-            else
-                return null,
-            else => return null,
-        },
+        // fig natively represents every kind. The `extended` scalars that lack a
+        // bare spelling (char, enum atom, non-finite float) round-trip losslessly
+        // via an explicit `: char`/`: enum`/`: float` annotation — a syntax choice,
+        // not a value loss (see `src/languages/fig/printer.zig`'s `writeExtended`).
+        .fig => return null,
         // Plain JSON / JSONC: no datetimes, enums, chars; non-finite floats quote.
         .json, .jsonc => switch (kind) {
             .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
@@ -295,10 +288,10 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
         .local_time,
         => "string",
         // A char literal's text is its codepoint: most printers emit it as a
-        // number; TOML as an integer.
+        // number; TOML as an integer. (fig never reaches here — it re-emits the
+        // char natively via `: char`, so `valueLoss(.fig, …)` returns null.)
         .char_literal => switch (format) {
             .toml => "integer",
-            .fig => "string",
             else => "number",
         },
         // Non-finite floats quote in plain JSON/JSONC; elsewhere they degrade to
@@ -416,6 +409,28 @@ test "non-finite float degrades to JSON but not JSON5" {
 
     const json5 = try analyzeBuilt(arena, Build.f, .json5, .{});
     try testing.expectEqual(@as(usize, 0), json5.len);
+}
+
+test "char literal is native to fig, degrades to a number elsewhere" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const Build = struct {
+        fn f(b: *AST.Builder) !AST.Node.Id {
+            return b.addExtended(.char_literal, "65"); // 'A'
+        }
+    };
+
+    // fig re-emits it via `: char =` — no loss.
+    const fig = try analyzeBuilt(arena, Build.f, .fig, .{});
+    try testing.expectEqual(@as(usize, 0), fig.len);
+
+    // JSON has no char; it collapses to the codepoint as a number.
+    const json = try analyzeBuilt(arena, Build.f, .json, .{});
+    try testing.expectEqual(@as(usize, 1), json.len);
+    try testing.expectEqual(Warning.Code.type_degraded, json[0].code);
+    try testing.expectEqualStrings("number", json[0].note);
 }
 
 test "lossless suppresses value warnings" {

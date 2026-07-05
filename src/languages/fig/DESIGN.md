@@ -447,7 +447,7 @@ learns *this rule*, not each author's taste). The decision procedure below is
   Falls back to `> *` block lines also when an element carries a comment
   (multi-line flow discards *interior* comments — the opener/closer trailing
   comment above is block-layer, not interior), is a multi-line string, or is an
-  enum/float atom with no flow spelling. **Lists of maps stay on the
+  enum/char/float atom with no flow spelling. **Lists of maps stay on the
   append-header / block path** — flow of maps is brace-heavy (see the A2 vs
   `[{…}]` stress test).
 - **Dotted keys:** a chain of single-child maps collapses into one dotted key
@@ -622,11 +622,19 @@ servers
   string, **authored explicit-typing-only:** `mode: enum = creative`. There is no
   bare value sigil, so `reviewer = @alice` is the *string* `"@alice"`, not a silent
   atom (see "Enum: explicit-only" for why the `@`-value-sigil idea was dropped).
+- **Char literal** — a single Unicode scalar (canonical `@char_literal "<codepoint>"`,
+  the value ZON authors as `'a'`), **authored explicit-typing-only:** `sep: char = ','`.
+  The `: char =` annotation is the disambiguator — it reads the RHS as a ZON-style
+  char literal (`'A'`, `'\t'`, `'\''`, `'\u{1F600}'`) rather than as a length-1
+  string, exactly the trick `: enum =`/`: float =` use. Stored as the decimal
+  codepoint (the cross-format `char_literal` invariant), so `fig fmt` re-emits the
+  `'…'` form and the value round-trips fig↔ZON↔canonical without loss. A **bare**
+  (unquoted) RHS or a multi-codepoint literal is a `FigTypeMismatch`. Reusing the
+  Zig char codec means escapes work for free.
 - **Numbers** as bare lexemes; datetimes (RFC-3339, self-identifying) sniff
   natively. **Non-finite floats (`inf`/`nan`) are explicit-typing-only** —
   `timeout: float = inf` — so bare `inf`/`nan` stay strings; `fig fmt` emits the
-  explicit form when the AST holds a `number_special`. Char literals degrade to
-  string.
+  explicit form when the AST holds a `number_special`.
 - **A number's value *is* its lexeme (normative, cross-implementation).** fig
   stores the source bytes of a number, not a decoded `f64`/`i64`: equality,
   round-trip, and canonical emission are all defined **over the source lexeme**,
@@ -827,8 +835,12 @@ the single-line quote rule:
   newline and runs until the close. (Stored as a `trailing` comment on the value;
   purely a lexer sequencing rule — see "AST fit".)
 
-Multiline *comments* are intentionally **not** added — block comments already
-degrade to a run of `#` lines, and comments don't need paste-fidelity.
+Multiline *comments* are intentionally **not** added (settled — see "Deferred /
+declined losslessness"). A `/* … */` block would fight the line-oriented model
+(where do depth `>` markers land on continuation lines?), and the loss it would
+avoid is small: a block comment's *content* already survives as a run of `#`
+lines; only the line-vs-block *style* flag degrades, and the AST documents that
+flag as a downgradeable hint. `#`-per-line stays the one comment form.
 
 ### Authoring-time diagnostics
 
@@ -949,22 +961,62 @@ The dialect stays *total* (nothing unrepresentable) without being *canonical* by
 inheriting the canonical form's escape sigils for the long tail:
 
 1. **Native** (the ergonomic 95%): null, bool, string, number, datetime, enum
-   literal (via `: enum =`), non-finite float (via `: float =`), sequence, mapping,
-   keyvalue, `#` line comments, inline flow collections (`[…]`/`{…}`, see "Flow
-   mode"), single/triple-quoted strings, and **explicit type annotations**
-   (`: int/float/string/bool =`) — persisted as `node_tags` type tags, lexeme kept
-   verbatim, so they round-trip through `fig fmt` (see "Explicit typing" and AST
-   fit #2).
+   literal (via `: enum =`), char literal (via `: char =`), non-finite float (via
+   `: float =`), sequence, mapping, keyvalue, `#` line comments, inline flow
+   collections (`[…]`/`{…}`, see "Flow mode"), single/triple-quoted strings, and
+   **explicit type annotations** (`: int/float/string/bool =`) — persisted as
+   `node_tags` type tags, lexeme kept verbatim, so they round-trip through `fig fmt`
+   (see "Explicit typing" and AST fit #2).
 2. **Degrade + warn** (the existing diagnostics layer already reports this
    class): block comment → `#` runs, YAML **custom** tags dropped (core type
-   tags map to `: type =` — see AST fit #2), aliases materialized, char literal →
-   string.
+   tags map to `: type =` — see AST fit #2), aliases materialized. These are
+   *deliberate* degrades, not gaps to close — see "Deferred / declined
+   losslessness" for the reasoning on each.
 3. **Inherited sigils / envelope** for the rest: `@extkind "text"`, `&`, `!`,
    `*`, `~i`/`~f`, non-string keys, scalar-root documents. `$fig-envelope`
    guarantees round-trip by construction.
 
 `fig fmt` bridges the surfaces: parse authoring text → AST → emit canonical for
 `strcmp`.
+
+### Deferred / declined losslessness
+
+The tier-2 degrades are choices, not oversights. As the dialect matures, each
+`extended` scalar that lacks a bare spelling *can* be promoted to tier 1 by the
+"explicit typing is the disambiguator" pattern — but only where the ergonomic
+win is worth a new type name. The current dispositions:
+
+- **Char literal — DONE (tier 1).** `: char = 'a'` promotes it exactly like
+  `: enum =` did for atoms: the annotation reclassifies a `'…'` RHS (a length-1
+  string bare) as a `char_literal`, stored as the decimal codepoint, re-emitted
+  as `'a'`. Reuses the Zig char codec, so escapes (`'\t'`, `'\u{1F600}'`) come
+  for free. Round-trips fig↔ZON↔canonical without loss. (See "Char literal".)
+- **Block comment style — DECLINED.** Kept as a tier-2 degrade on purpose. The
+  loss is only the line-vs-block *hint* (content is preserved as `#` runs), and a
+  `/* … */` construct is incompatible with prefix-count depth. Byte-faithful
+  `/* */` round-trips, if ever needed, belong in `$fig-envelope`, not the
+  authoring surface. (See "Comments".)
+- **YAML custom tags — DECLINED.** A `!foo` on a value is YAML-local metadata
+  with no cross-format meaning. The honest degrade is to **drop the tag and keep
+  the value at its real kind** (`!foo 42` stays the number `42`, not a string),
+  with a warning — never to stringify the value. A native fig spelling would be
+  complexity for a feature that doesn't cross formats; the `!` sigil in
+  tier-3/`$fig-envelope` already carries it verbatim for the rare lossless need.
+- **Anchors / aliases (`&`/`*`) — DEFERRED to a future point release.** The AST
+  already models this fully (the `alias` node kind, `node_anchors`/`anchors`
+  side-tables; canonical prints `&name`/`*name`), so the work is purely *surface
+  syntax* — `&name`/`*name` glued to names, which sit in usable space. Worth
+  doing eventually for large configs (Terraform/CI/infra) that share blocks.
+  Three things to settle first, written down so the deferral is cheap to pick up:
+  1. **Fundamentally format-limited.** Aliases survive losslessly only through
+     fig↔canonical↔YAML; every other target calls `materialize` (expand aliases
+     to copied subtrees), so JSON/TOML/ZON cannot carry sharing at all.
+  2. **Cycles.** A true cycle (`&a { self = *a }`) cannot be materialized —
+     infinite expansion. Decide the policy up front: detect and error cleanly
+     (recommended) rather than blow the stack.
+  3. **The `*` collision.** `*` is already the element marker in *key* position
+     (`> *`). An alias `*name` in *value* position looks unambiguous, but that
+     must be proven across flow mode and sequence tails before committing.
 
 ---
 
@@ -999,7 +1051,7 @@ keypath     ::= keyseg { "." keyseg }
 keyseg      ::= key { index }
 index       ::= "[" [ INT ] "]"                  (* [i] address existing · [] append (header-final only) *)
 key         ::= BAREKEY | STRING_SQ | STRING_DQ
-type        ::= "int" | "float" | "bool" | "string" | "enum"
+type        ::= "int" | "float" | "bool" | "string" | "enum" | "char"
              | "datetime" | "date" | "time" | BAREKEY      (* open set *)
 
 (* ─── Values (block RHS) — sniff bare tokens; committed forms error on failure ─── *)
@@ -1007,8 +1059,9 @@ value       ::= NULL | BOOL | NUMBER | DATETIME     (* sniffed bare tokens      
              | STRING_SQ | STRING_DQ | mlstring     (* committed: parse-fail = error  *)
              | flow          (* committed IFF matching close is terminal; balanced-then-trailing → BARESTRING *)
              | BARESTRING                            (* fallback — bare tokens & balanced-then-trailing *)
-(* enum atoms & inf/nan are NOT here — explicit-typing-only, recognized only when the
-   assignment carries ": enum =" / ": float =". Bare @x / inf → BARESTRING (a string). *)
+(* enum atoms, char literals & inf/nan are NOT here — explicit-typing-only, recognized only
+   when the assignment carries ": enum =" / ": char =" / ": float =". Bare @x / 'a' / inf →
+   BARESTRING (a string); a lone "'a'" is a length-1 string until ": char =" reclassifies it. *)
 
 (* ─── Flow mode (recursive; fig-inline ∪ pasted-JSON, NOT JSON5) ─── *)
 (* WS here also spans NL and "#" comments (JSONC); trailing "," allowed above.  *)
@@ -1301,8 +1354,11 @@ cascade delete is deliberately not implied).
 
 - **Separator split kept and now justified:** `:` introduces an optional type, `=`
   assigns (`key: type = value`). The split earns its keep.
-- **Char literals degrade to string** (a char is text; `'a'`→`"a"` surprises less
-  than `'a'`→`97`, and strings round-trip through more targets).
+- **Char literals are native (tier 1) via `: char = 'a'`** — promoted from the
+  earlier degrade-to-string by the same explicit-typing-is-the-disambiguator
+  pattern as enums, so they round-trip fig↔ZON↔canonical losslessly. (Superseded
+  the "degrade to string" decision; see "Char literal" and "Deferred / declined
+  losslessness".)
 - **Dangling comments:** depth-prefixed `#` line attaches to the next sibling; a
   trailing comment in an empty container attaches to the container.
 - **Enums explicit-only** (no value sigil; `x: enum = atom`), **`inf`/`nan`

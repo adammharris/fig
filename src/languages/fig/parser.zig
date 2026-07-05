@@ -131,7 +131,7 @@ pub fn describe(code: Error) []const u8 {
         error.FigEmptyContainer => "this container has no children; write an inline empty value instead: `key = {}` (map) or `key = []` (sequence)",
         error.FigInvalidValue => "missing value; write one after `=`, or `{}`/`[]` for an empty container",
         error.FigTypeMismatch => "the value does not satisfy its `: type` annotation; fix the value, or drop/correct the annotation",
-        error.FigUnknownType => "unknown type name; the built-in types are int, float, bool, string, enum, datetime, date, time",
+        error.FigUnknownType => "unknown type name; the built-in types are int, float, bool, string, enum, char, datetime, date, time",
         error.FigTrailingContent => "unexpected content after this line's value or header; quote the whole value if it is one string (a `#` comment needs a space before it)",
         error.FigQuotedTrailingContent => "this string ends at its matching quote, and the rest of the line is stray content; fig bare strings need no outer quotes — write `key = She said, \"Hey there!\"`, or escape the inner quotes: `\"She said, \\\"Hey there!\\\"\"`",
         error.FigDanglingContinuation => "`+` has no `[]` append header to re-run; move it directly after its `a.b[]` group, or repeat the header",
@@ -1540,6 +1540,21 @@ fn applyKnownType(self: *Parser, type_name: []const u8, text: []const u8) Error!
         if (text.len == 0) return error.FigTypeMismatch;
         return .{ .value = .{ .extended = .{ .kind = .enum_literal, .text = text } } };
     }
+    if (std.mem.eql(u8, type_name, "char")) {
+        // `: char = 'A'` — a single ZON-style char literal. The annotation is the
+        // disambiguator (like `enum`/`float`): it turns a `'…'` RHS, which is a
+        // length-1 string bare, into a `char_literal` extended scalar. Reusing the
+        // Zig char codec keeps escapes (`'\n'`, `'\u{1F600}'`) working for free.
+        // Stored as the decimal codepoint — the cross-format `char_literal`
+        // invariant (see AST `ExtKind.char_literal`) — allocated in the parse arena
+        // like `normalizeDecimal`, so the builder dupes it into the AST's strings.
+        const cp: u21 = switch (std.zig.string_literal.parseCharLiteral(text)) {
+            .success => |c| c,
+            .failure => return error.FigTypeMismatch,
+        };
+        const raw = try std.fmt.allocPrint(self.allocator, "{d}", .{cp});
+        return .{ .value = .{ .extended = .{ .kind = .char_literal, .text = raw } } };
+    }
     if (std.mem.eql(u8, type_name, "datetime") or std.mem.eql(u8, type_name, "date") or std.mem.eql(u8, type_name, "time")) {
         const k = datetime.classify(text, .{}) catch return error.FigTypeMismatch;
         const ext: tok.ExtKind = switch (k) {
@@ -2204,6 +2219,38 @@ test "explicit typing" {
 
 test "explicit typing rejects a mismatch" {
     try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "port: int = hello\n", .Fig));
+}
+
+test "char literal via explicit typing → char_literal codepoint" {
+    var ast = try parseAbstract(testing.allocator,
+        \\letter: char = 'A'
+        \\tab: char = '\t'
+        \\quote: char = '\''
+        \\emoji: char = '\u{1F600}'
+        \\hash: char = '#'
+    , .Fig);
+    defer ast.deinit();
+    // `: char =` reads a ZON-style char literal (escapes included) and stores the
+    // decimal Unicode codepoint — the cross-format `char_literal` invariant.
+    const cases = .{
+        .{ "letter", "65" }, // 'A'
+        .{ "tab", "9" }, // '\t'
+        .{ "quote", "39" }, // '\''
+        .{ "emoji", "128512" }, // '\u{1F600}'
+        .{ "hash", "35" }, // '#' — a `#` glued inside quotes is not a comment
+    };
+    inline for (cases) |c| {
+        const node = try ast.getValByPath(&.{.{ .key = c[0] }});
+        try testing.expect(node.kind.extended.kind == .char_literal);
+        try testing.expectEqualStrings(c[1], node.kind.extended.text);
+    }
+}
+
+test "char literal rejects a non-char lexeme" {
+    // A bare (unquoted) atom is not a char literal — quotes are the disambiguator.
+    try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "x: char = A\n", .Fig));
+    // Two codepoints in one literal is not a char.
+    try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "x: char = 'ab'\n", .Fig));
 }
 
 test "explicit typing coerces number lookalikes but keeps the verbatim lexeme + tag" {
