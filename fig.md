@@ -6,7 +6,13 @@ updated = 2026-07-04T11:19:34-06:00
 contents = [[fig docs](docs/docs.md)]
 ```
 
-# `fig`
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/fig-dark.svg">
+    <img src="assets/fig.svg" width="42" align="middle" alt="">
+  </picture>
+  <code>fig</code>
+</h1>
 
 `fig` is a Zig library for parsing and editing config files.
 
