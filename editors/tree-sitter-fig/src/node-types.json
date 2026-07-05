@@ -435,6 +435,36 @@
     }
   },
   {
+    "type": "multiline_double",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "multiline_single",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "comment",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "type",
     "named": true,
     "fields": {},
@@ -463,6 +493,14 @@
         }
       ]
     }
+  },
+  {
+    "type": "\"\"\"",
+    "named": false
+  },
+  {
+    "type": "'''",
+    "named": false
   },
   {
     "type": ",",
@@ -526,11 +564,11 @@
   },
   {
     "type": "datetime",
-    "named": false
+    "named": true
   },
   {
     "type": "datetime",
-    "named": true
+    "named": false
   },
   {
     "type": "enum",
@@ -550,14 +588,6 @@
   },
   {
     "type": "markers",
-    "named": true
-  },
-  {
-    "type": "multiline_double",
-    "named": true
-  },
-  {
-    "type": "multiline_single",
     "named": true
   },
   {

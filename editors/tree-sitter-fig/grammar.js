@@ -20,8 +20,12 @@
  *     treated as a comment, though fig keeps it in the value. This applies
  *     equally to the tail of a `bracket_led_bare_string`/`flow_bracket_led_bare`
  *     (see `src/scanner.c`).
- *   - a trailing comment on a `'''`/`"""` opener line is absorbed into the
- *     string body.
+ *
+ * `multiline_single`/`multiline_double` split the opener line (delimiter +
+ * optional trailing `# comment`) out from the body/close so a `'''`/`"""`
+ * opener-line comment highlights as a real `(comment)` node instead of being
+ * absorbed into the string — matching the Zig tokenizer's `scanTriple`,
+ * which carves the same `opener_comment` out before `body_start`.
  *
  * Balanced-then-trailing bare strings (DESIGN.md "Committed values"): a value
  * starting with `[`/`{` is normally flow, but when the balanced bracket group
@@ -273,10 +277,35 @@ module.exports = grammar({
     string_single: _ => token(/'[^'\n]*'/),           // raw, single-line
     string_double: _ => token(/"([^"\\\n]|\\.)*"/),   // escaped, single-line
 
-    // Triple-quoted, spanning newlines. Block-comment-style regex (no lazy quant):
-    // the inner alternation can never consume the closing triple.
-    multiline_single: _ => token(/'''([^']|'[^']|''[^'])*'''/),
-    multiline_double: _ => token(/"""([^"]|"[^"]|""[^"])*"""/),
+    // Triple-quoted, spanning newlines. The opener line (delimiter + optional
+    // trailing `# comment`) is split out from the body/close so the comment
+    // surfaces as a real `(comment)` node — mirroring the Zig tokenizer's
+    // `scanTriple`, where `body_start` begins only after that line's newline
+    // and a `#` found first is carved out as `opener_comment`, never body
+    // text. `_ml_opener_junk` mirrors that scan's tolerance for stray
+    // non-comment bytes on the opener line (silently skipped, never captured)
+    // so such input can't regress into an ERROR node here.
+    multiline_single: $ => seq(
+      "'''",
+      optional($._ml_opener_junk),
+      optional($.comment),
+      /\r?\n/,
+      $._ml_single_tail,
+    ),
+    multiline_double: $ => seq(
+      '"""',
+      optional($._ml_opener_junk),
+      optional($.comment),
+      /\r?\n/,
+      $._ml_double_tail,
+    ),
+    _ml_opener_junk: _ => token(/[^\n#]+/),
+    // Body + closing delimiter: same block-comment-style regex (no lazy
+    // quant, so the inner alternation can never consume the closing triple)
+    // the combined token used before the opener line was split out above —
+    // just missing its leading `'''`/`"""`, now matched separately.
+    _ml_single_tail: _ => token(/([^']|'[^']|''[^'])*'''/),
+    _ml_double_tail: _ => token(/([^"]|"[^"]|""[^"])*"""/),
 
     // Bare string value: runs to end-of-line or a `#`, trailing space trimmed.
     // Start char excludes structural/opener bytes so quoted/flow/typed forms win.

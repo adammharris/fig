@@ -378,3 +378,39 @@ contents = [
       (flow_array
         (flow_bare)
         (flow_bare)))))
+
+==================
+multi-line string opener-line comment highlights as a comment, not body
+==================
+
+plain = '''
+hi there
+'''
+script = '''# not part of the body
+line one
+line two
+'''
+note = """  # also not body
+line one
+"""
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (multiline_single))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (multiline_single
+      (comment)))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (multiline_double
+      (comment))))

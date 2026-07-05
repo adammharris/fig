@@ -1038,17 +1038,106 @@
       }
     },
     "multiline_single": {
-      "type": "TOKEN",
-      "content": {
-        "type": "PATTERN",
-        "value": "'''([^']|'[^']|''[^'])*'''"
-      }
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "'''"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_ml_opener_junk"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "comment"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "PATTERN",
+          "value": "\\r?\\n"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_ml_single_tail"
+        }
+      ]
     },
     "multiline_double": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "\"\"\""
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "_ml_opener_junk"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "comment"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "PATTERN",
+          "value": "\\r?\\n"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_ml_double_tail"
+        }
+      ]
+    },
+    "_ml_opener_junk": {
       "type": "TOKEN",
       "content": {
         "type": "PATTERN",
-        "value": "\"\"\"([^\"]|\"[^\"]|\"\"[^\"])*\"\"\""
+        "value": "[^\\n#]+"
+      }
+    },
+    "_ml_single_tail": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "([^']|'[^']|''[^'])*'''"
+      }
+    },
+    "_ml_double_tail": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PATTERN",
+        "value": "([^\"]|\"[^\"]|\"\"[^\"])*\"\"\""
       }
     },
     "bare_string": {
