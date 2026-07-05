@@ -81,7 +81,7 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
 
 /// The root is a map or a sequence (never a bare scalar in the fig dialect —
 /// see DESIGN.md). A root map is emitted as sections; a root sequence as
-/// zero-marker `-` elements.
+/// zero-marker `*` elements.
 fn root(self: *Printer, id: AST.Node.Id) Error!void {
     switch (self.ast.nodes[id].kind) {
         .mapping => {
@@ -556,8 +556,11 @@ fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?us
     }
     // A tag-annotated scalar needs `: type =`, which only exists in block
     // position — so it forces its container out of inline flow (same reason as
-    // enum_literal/number_special below).
-    if (self.kindTagOf(id) != null) return null;
+    // enum_literal/number_special below). A tag the printer DROPS (a `.string`
+    // tag on a value with no bare total-sink spelling — see `emittableKindTag`)
+    // doesn't count: the emitted document is untagged, so treating the node as
+    // tagged here would break fmt idempotence.
+    if (self.emittableKindTag(id) != null) return null;
     switch (self.ast.nodes[id].kind) {
         .null_ => return 4,
         .boolean => |b| return @as(usize, if (b) 4 else 5),
@@ -765,7 +768,23 @@ fn kindTagOf(self: *const Printer, id: AST.Node.Id) ?AST.Tag.KindTag {
 }
 
 fn isStringTagged(self: *const Printer, id: AST.Node.Id) bool {
-    return if (self.kindTagOf(id)) |k| k == .string else false;
+    return if (self.emittableKindTag(id)) |k| k == .string else false;
+}
+
+/// The kind tag `writeTypeAnnotation` will actually re-emit for `id`:
+/// `kindTagOf` minus any `.string` tag whose value the all-raw `: string` form
+/// cannot carry. The annotated RHS is read VERBATIM to end of line (the total
+/// sink), so quoting under the annotation would turn the quotes into content —
+/// a string value with no bare spelling (`isTotalSinkSafe` false: multiline,
+/// leading/trailing space, comment hazard) must DROP its tag and take the
+/// ordinary untagged quoted/multiline form instead of corrupting the value.
+fn emittableKindTag(self: *const Printer, id: AST.Node.Id) ?AST.Tag.KindTag {
+    const k = self.kindTagOf(id) orelse return null;
+    if (k == .string) switch (self.ast.nodes[id].kind) {
+        .string => |s| if (!isTotalSinkSafe(s)) return null,
+        else => {},
+    };
+    return k;
 }
 
 /// Write an explicit `: type` annotation for `id`, if it needs one. Two sources:
@@ -775,7 +794,7 @@ fn isStringTagged(self: *const Printer, id: AST.Node.Id) bool {
 /// whether an annotation was written (an annotated line needs ` = ` where a
 /// plain one has a space).
 fn writeTypeAnnotation(self: *Printer, id: AST.Node.Id) Error!bool {
-    if (self.kindTagOf(id)) |k| switch (k) {
+    if (self.emittableKindTag(id)) |k| switch (k) {
         .integer => {
             try self.writer.writeAll(": int");
             return true;
@@ -824,10 +843,13 @@ fn value(self: *Printer, id: AST.Node.Id, in_flow: bool) Error!void {
         .number => |n| try self.writer.writeAll(n.raw),
         .string => |s| if (!in_flow and std.mem.indexOfScalar(u8, s, '\n') != null) {
             try self.writeMultilineString(s);
-        } else if (!in_flow and self.isStringTagged(id) and isTotalSinkSafe(s)) {
-            // A `: string =`-tagged value re-emits BARE: the annotation is a
-            // total sink (sniffing off on re-read), so no quotes are needed even
-            // for a value that would otherwise commit to flow (`[ 1 + 2 ]`).
+        } else if (!in_flow and self.isStringTagged(id)) {
+            // A `: string =`-tagged value re-emits BARE: the annotated RHS is
+            // read verbatim (the total sink), so no quotes are needed even for
+            // a value that would otherwise commit to flow (`[ 1 + 2 ]`) or open
+            // a quote form (`"hello"` with the quotes as content).
+            // `isStringTagged` is already gated on `isTotalSinkSafe`, so the
+            // bare bytes re-parse to exactly this value.
             try self.writer.writeAll(s);
         } else {
             try self.writeBareOrQuoted(s, false, in_flow);
@@ -1701,8 +1723,90 @@ test "explicit type annotations round-trip (the : type surface + verbatim lexeme
     try expectRoundTrip("num: int = 3\nsig: float = 1.\nlead: int = 09\nstrs: string = [ 1 + 2 ]\n");
 }
 
-test "a : string value that can't go bare falls back to quoted, keeping the tag" {
-    // A leading space makes the total-sink bare form lossy (it would be trimmed),
-    // so the printer quotes — but the redundant `: string` annotation survives.
+test "a : string value containing quote characters round-trips bare" {
+    // Under the all-raw rule the RHS of `s: string = "hello"` is the
+    // seven-character string `"hello"` — and because the annotation re-reads
+    // the RHS verbatim, the printer re-emits exactly those bytes bare.
+    try expectPrint("s: string = \"hello\"\n", "s: string = \"hello\"\n");
+    try expectRoundTrip("s: string = \"hello\"\n");
+    // Same for a value that merely STARTS with a quote character.
     try expectPrint("s: string = \"  x\"\n", "s: string = \"  x\"\n");
+    try expectRoundTrip("s: string = \"  x\"\n");
+    // And a lone triple-quote opener: literal content, never a multiline form.
+    try expectPrint("s: string = '''\n", "s: string = '''\n");
+    try expectRoundTrip("s: string = '''\n");
+}
+
+/// Swap in a tags table with a `: string` kind tag on `id` — simulates a
+/// string-type assertion arriving from a surface fig itself can no longer
+/// produce for this value (a YAML `!!str`, a builder API), so the printer's
+/// drop-the-tag guard can be pinned.
+fn injectStringTag(ast: *AST, id: AST.Node.Id) !void {
+    const tags = try std.testing.allocator.alloc(?AST.Tag, ast.nodes.len);
+    @memset(tags, null);
+    tags[id] = .{ .kind = .string };
+    std.testing.allocator.free(ast.node_tags);
+    ast.node_tags = tags;
+}
+
+/// Print `ast`, assert the exact bytes, then re-parse and assert the value at
+/// key `s` is byte-identical to `want_value` and that a second print is
+/// byte-identical to the first (idempotence). `eql`/`tagsEql` can't be the
+/// harness here: dropping the tag is the CORRECT lossy step, so only the value
+/// and the emitted bytes are asserted.
+fn expectTagDropped(ast: *AST, expected: []const u8, want_value: []const u8) !void {
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print(&out.writer, ast, .{});
+    try std.testing.expectEqualStrings(expected, out.written());
+    var ast2 = try Parser.parseAbstract(std.testing.allocator, out.written(), .Fig);
+    defer ast2.deinit();
+    const v = try ast2.getValByPath(&.{.{ .key = "s" }});
+    try std.testing.expectEqualStrings(want_value, v.kind.string);
+    if (v.id < ast2.node_tags.len) try std.testing.expect(ast2.node_tags[v.id] == null);
+    var out2: Writer.Allocating = .init(std.testing.allocator);
+    defer out2.deinit();
+    try print(&out2.writer, &ast2, .{});
+    try std.testing.expectEqualStrings(out.written(), out2.written());
+}
+
+test "a string-tagged MULTILINE value drops the tag and uses the ordinary block form" {
+    // Raw `: string` text is single-line, so `s: string = '''…` would re-parse
+    // as the literal characters `'''`. The printer must never emit the
+    // annotation with a multiline value: tag dropped, ordinary `'''` block.
+    var ast = try Parser.parseAbstract(std.testing.allocator, "s = '''\na\nb\n'''\n", .Fig);
+    defer ast.deinit();
+    const v = try ast.getValByPath(&.{.{ .key = "s" }});
+    try std.testing.expectEqualStrings("a\nb", v.kind.string);
+    try injectStringTag(&ast, v.id);
+    try expectTagDropped(&ast, "s = '''\na\nb\n'''\n", "a\nb");
+}
+
+test "a string-tagged value with no bare spelling drops the tag and quotes normally" {
+    // Leading whitespace would be skipped by the raw scan, so bare emission
+    // under the annotation can't represent it — tag dropped, quoted untagged.
+    var ast = try Parser.parseAbstract(std.testing.allocator, "s = \"  x\"\n", .Fig);
+    defer ast.deinit();
+    const v = try ast.getValByPath(&.{.{ .key = "s" }});
+    try std.testing.expectEqualStrings("  x", v.kind.string);
+    try injectStringTag(&ast, v.id);
+    try expectTagDropped(&ast, "s = \"  x\"\n", "  x");
+}
+
+test "a string-tagged value that IS bare-representable keeps the tag when injected" {
+    // The same injection on a total-sink-safe value keeps the annotation and
+    // emits bare — including a value that starts with a quote character.
+    var ast = try Parser.parseAbstract(std.testing.allocator, "s = \"\\\"q\\\" and more\"\n", .Fig);
+    defer ast.deinit();
+    const v = try ast.getValByPath(&.{.{ .key = "s" }});
+    try std.testing.expectEqualStrings("\"q\" and more", v.kind.string);
+    try injectStringTag(&ast, v.id);
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print(&out.writer, &ast, .{});
+    try std.testing.expectEqualStrings("s: string = \"q\" and more\n", out.written());
+    var ast2 = try Parser.parseAbstract(std.testing.allocator, out.written(), .Fig);
+    defer ast2.deinit();
+    try std.testing.expect(ast.eql(ast2));
+    try std.testing.expect(ast.tagsEql(ast2));
 }

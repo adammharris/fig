@@ -54,8 +54,11 @@ pub const Error = error{
     FigDuplicateKey,
     /// `xs[i]` skipped ahead of the sequence's current length.
     FigIndexSkipped,
-    /// A non-final (or assignment) `[]` referenced an empty sequence.
+    /// A non-final `[]` referenced an empty sequence.
     FigEmptyAppendTarget,
+    /// An assignment-final `[]` (`xs[] = v`) — `[]` appends only as a header
+    /// (or as a mid-path "last element" step), never as an assignment target.
+    FigAppendAssignment,
     /// An assignment addressed an index that was already set.
     FigIndexAlreadySet,
     /// A header/element-opener container closed with zero children.
@@ -128,6 +131,7 @@ pub fn describe(code: Error) []const u8 {
         error.FigIndexSkipped => "sequence indices cannot skip ahead; write the earlier element first (even `[n] = null`)",
         error.FigIndexAlreadySet => "this index already has a value; address a new index, or use a header-final `[]` to append",
         error.FigEmptyAppendTarget => "a non-final `[]` means \"the last element\", but this sequence is empty; append one first with a header-final `[]`",
+        error.FigAppendAssignment => "a final `[]` appends a container via a header, never a `= value`; write `key[]` on its own line with `> field = value` lines below, or spell the next index out: `key[N] = value`",
         error.FigEmptyContainer => "this container has no children; write an inline empty value instead: `key = {}` (map) or `key = []` (sequence)",
         error.FigInvalidValue => "missing value; write one after `=`, or `{}`/`[]` for an empty container",
         error.FigTypeMismatch => "the value does not satisfy its `: type` annotation; fix the value, or drop/correct the annotation",
@@ -166,6 +170,7 @@ pub fn shortLabel(code: Error) []const u8 {
         error.FigIndexSkipped => "skipped index",
         error.FigIndexAlreadySet => "index already set",
         error.FigEmptyAppendTarget => "append target is empty",
+        error.FigAppendAssignment => "cannot assign to `[]`",
         error.FigEmptyContainer => "empty container",
         error.FigInvalidValue => "missing value",
         error.FigTypeMismatch => "type mismatch",
@@ -251,10 +256,12 @@ pub const Warning = struct {
         /// a string (the TOML leading-zero rule).
         string_leading_zero,
         /// A number-shaped token that no valid number spelling accepts — a
-        /// trailing-dot float (`1.`, `42.`) — fell to a string. Narrow by
-        /// design (only a clean integer + a single trailing `.`), so version
-        /// strings (`1.2.3`) and prose (`12 monkeys`) never warn. Coerce with
-        /// `: float =` for the number, or quote to affirm the string.
+        /// trailing-dot float (`1.`, `42.`) or a leading-dot float (`.5`,
+        /// `.25`) — fell to a string. Narrow by design (only a clean integer +
+        /// a single trailing `.`, or a single leading `.` + clean digits), so
+        /// version strings (`1.2.3`), prose (`12 monkeys`), and `.e5`/`..`
+        /// never warn. Write the missing zero (`0.5`, `1.0`) for the number,
+        /// or quote to affirm the string.
         string_looks_like_number,
         /// A bare clock time with no date (`10:30`) sniffed to a datetime
         /// value. Narrower than it first looks: a bare *date* (`2026-07-01`)
@@ -289,7 +296,7 @@ pub const Warning = struct {
         return switch (code) {
             .string_looks_like_literal => "this spells a boolean/null in other config languages, but fig literals are lowercase-only, so it stays the string it spells; quote it to make the string explicit, or lowercase it for the literal",
             .string_leading_zero => "a leading zero is not a number in fig, so the padding was kept as a string; quote it to make that explicit, or drop the zero for a number",
-            .string_looks_like_number => "a trailing dot is not a valid number in fig, so this was kept as a string; write `: float =` to coerce it to a number, or quote it to affirm the string",
+            .string_looks_like_number => "a bare leading or trailing dot is not a valid number in fig, so this was kept as a string; write the missing zero (`0.5`, `1.0`) for a number, or quote it to affirm the string",
             .ambiguous_datetime => "a bare clock time becomes a datetime value, not text (also a duration/ratio shape); quote it if you meant a string",
             .flow_like_string => "this looks like a `[…]`/`{…}` flow value with trailing content, so the whole line was read as one bare string; remove the trailing content for a collection, or quote the value to affirm the string",
             .flow_missing_comma => "a bare flow value containing ` = ` usually means a missing comma between pairs; add the comma, or quote the value if it really is text",
@@ -305,7 +312,7 @@ pub const Warning = struct {
         return switch (code) {
             .string_looks_like_literal => "looks like a boolean/null",
             .string_leading_zero => "leading zero",
-            .string_looks_like_number => "trailing dot",
+            .string_looks_like_number => "leading/trailing dot",
             .ambiguous_datetime => "ambiguous datetime",
             .flow_like_string => "looks like a flow value",
             .flow_missing_comma => "missing comma",
@@ -391,6 +398,11 @@ const PendingContainer = struct {
     /// Created by a flow value (`[…]`/`{…}`) — closed to later extension via
     /// dotted paths, headers, or indexing (the TOML inline-table rule).
     closed: bool = false,
+    /// Created by a header-final `[]` append (or a `+` re-run of one). Those
+    /// elements are pre-committed to map shape at birth, which would bypass
+    /// the `.undecided` → `FigEmptyContainer` check at frame close — this flag
+    /// lets the close path apply the same "no empty block containers" rule.
+    born_of_append: bool = false,
     mapping: Mapping = .{},
     sequence: Sequence = .{},
     /// Byte offsets (source order) of every LATER header line whose final path
@@ -829,6 +841,10 @@ fn closeFramesAbove(self: *Parser, depth: u32) Error!void {
     while (self.stack.items.len > 0 and self.stack.items[self.stack.items.len - 1].child_depth > depth) {
         const frame = self.stack.pop().?;
         if (frame.container.kind == .undecided) return error.FigEmptyContainer;
+        // A `[]`-appended element was pre-committed to map shape at birth, so
+        // the `.undecided` check above never sees it — but one that closes
+        // with zero entries is the same authoring mistake, and errors the same.
+        if (frame.container.born_of_append and frame.container.mapping.entries.items.len == 0) return error.FigEmptyContainer;
         if (self.pending_leading.items.len > 0) {
             var kept: std.ArrayList(PendingComment) = .empty;
             for (self.pending_leading.items) |pc| {
@@ -994,10 +1010,12 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
                     if (n > s.elements.items.len) return error.FigIndexSkipped;
                     try s.elements.append(self.allocator, try self.boxNode(value_node));
                 },
-                .append_or_last => {
-                    if (s.elements.items.len == 0) return error.FigEmptyAppendTarget;
-                    s.elements.items[s.elements.items.len - 1] = try self.boxNode(value_node);
-                },
+                // `xs[] = v` is not assignable: `[]` appends only as a header
+                // (or as a mid-path "last element" step) — a `= value` on it
+                // has no defined target, so it is a teaching error whether the
+                // sequence is empty or not. (`xs[N] = v` with N == the current
+                // length is the explicit-append spelling; see `.literal` above.)
+                .append_or_last => return error.FigAppendAssignment,
             }
         },
     }
@@ -1253,7 +1271,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
                 },
                 .append_or_last => {
                     const child = try self.allocator.create(PendingContainer);
-                    child.* = .{};
+                    child.* = .{ .born_of_append = true };
                     _ = try child.asMapping(); // append-created elements are always map-shaped
                     const el = try self.allocator.create(TNode);
                     el.* = .{ .value = .{ .container = child }, .span = Span.init(self.cur_line_start, self.cur_line_start) };
@@ -1299,28 +1317,33 @@ fn parseAssignedValue(self: *Parser, type_name: ?[]const u8) Error!TNode {
     return self.parseUntypedValue(false);
 }
 
-/// `force_string_bare`: set only for `: string =`, where a bare RHS is taken
-/// verbatim (sniffing off) and a committed (quote/flow) RHS is an error — a
-/// string annotation doesn't accept a collection.
+/// `force_string_bare`: set only for `: string =`, where the ENTIRE RHS is one
+/// raw text run — the annotation is a TOTAL SINK that selects the raw-text
+/// sub-parser (DESIGN.md "annotation selects the sub-parser"), turning off
+/// sniffing, flow commitment AND the quote forms. Quote characters are literal
+/// content (`x: string = "hi"` is the four-character string `"hi"`),
+/// backslashes are literal (no escape processing), and a `'''`/`"""` opener is
+/// content too — an author who wants escapes or multiline drops the annotation
+/// and quotes normally. The trailing-`#`-comment rule is exactly the bare
+/// rule (`scanBareRestOfLine`): a quote-led RHS behaves identically to a bare
+/// one.
 fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
+    if (force_string_bare) {
+        // So `x: string = [ 1 + 2 ]` is the string `[ 1 + 2 ]`, never a
+        // sequence — the quote-free escape hatch that needs no interior
+        // escaping. (`fig fmt` re-emits the value bare so the form round-trips,
+        // dropping the tag when the value has no bare spelling.)
+        const res = self.scanBareRestOfLine();
+        if (res.text.len == 0) return error.FigInvalidValue;
+        var node: TNode = .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) };
+        if (res.comment) |cm| node.trailing = .{ .text = cm };
+        return node;
+    }
     const c = self.peek() orelse return error.FigInvalidValue;
     switch (c) {
-        '\'' => return self.parseQuotedOrTriple('\'', force_string_bare),
-        '"' => return self.parseQuotedOrTriple('"', force_string_bare),
+        '\'' => return self.parseQuotedOrTriple('\''),
+        '"' => return self.parseQuotedOrTriple('"'),
         '[', '{' => {
-            if (force_string_bare) {
-                // A `: string` annotation is a TOTAL SINK: the annotation selects
-                // the raw-text sub-parser, turning off BOTH sniffing and flow
-                // commitment (DESIGN.md "annotation selects the sub-parser").
-                // So `x: string = [ 1 + 2 ]` is the string `[ 1 + 2 ]`, never a
-                // sequence — the quote-free escape hatch that needs no interior
-                // escaping. (`fig fmt` re-quotes it so the bare form round-trips.)
-                const res = self.scanBareRestOfLine();
-                if (res.text.len == 0) return error.FigInvalidValue;
-                var node: TNode = .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) };
-                if (res.comment) |cm| node.trailing = .{ .text = cm };
-                return node;
-            }
             // Commitment is decided by the shape of the WHOLE RHS, not just the
             // first char (DESIGN.md "Committed values"): a balanced `[…]`/`{…}`
             // with trailing content — a markdown link, glob, regex — was never
@@ -1363,18 +1386,14 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             const vstart = self.pos;
             const res = self.scanBareRestOfLine();
             if (res.text.len == 0) return error.FigInvalidValue;
-            var node: TNode = if (force_string_bare)
-                .{ .value = .{ .string = res.text }, .span = self.spanOf(res.text) }
-            else
-                try self.sniffToNodeWarned(res.text, vstart);
+            var node: TNode = try self.sniffToNodeWarned(res.text, vstart);
             if (res.comment) |cm| node.trailing = .{ .text = cm };
             return node;
         },
     }
 }
 
-fn parseQuotedOrTriple(self: *Parser, q: u8, force_string_bare: bool) Error!TNode {
-    _ = force_string_bare; // a quoted/multiline RHS is always a valid string
+fn parseQuotedOrTriple(self: *Parser, q: u8) Error!TNode {
     const start = self.pos;
     if (self.isTripleAt(self.pos, q)) {
         const r = if (q == '\'')
@@ -1431,7 +1450,7 @@ fn sniffToNodeWarned(self: *Parser, text: []const u8, offset: usize) Error!TNode
                 try self.warnAt(.string_looks_like_literal, offset, end);
             } else if (looksLikeLeadingZero(text)) {
                 try self.warnAt(.string_leading_zero, offset, end);
-            } else if (looksLikeTrailingDotNumber(text)) {
+            } else if (looksLikeTrailingDotNumber(text) or looksLikeLeadingDotNumber(text)) {
                 try self.warnAt(.string_looks_like_number, offset, end);
             }
         },
@@ -1510,6 +1529,19 @@ fn looksLikeTrailingDotNumber(text: []const u8) bool {
     const head = text[0 .. text.len - 1];
     const n = tok.sniffNumber(head) orelse return false;
     return n.kind == .integer;
+}
+
+/// `.5`-style: a single leading dot followed by clean digits only (`.5`,
+/// `.25`) — the shorthand-float habit no fig number spelling accepts (and
+/// `: float` does not coerce; the fix is writing the zero: `0.5`). As
+/// deliberately NARROW as the trailing-dot twin above: `.5.6`, `.e5`, `..`, a
+/// lone `.`, and a signed `-.5` never warn.
+fn looksLikeLeadingDotNumber(text: []const u8) bool {
+    if (text.len < 2 or text[0] != '.') return false;
+    for (text[1..]) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    return true;
 }
 
 /// Explicit typing (`key: type = value`): the annotation is checked and
@@ -2297,6 +2329,63 @@ test "explicit typing coerces number lookalikes but keeps the verbatim lexeme + 
     try testing.expect(ast.node_tags[e.id].?.kind == .string);
 }
 
+test ": string takes the ENTIRE RHS as raw text — quotes, backslashes, triple-quotes are content" {
+    var ast = try parseAbstract(testing.allocator,
+        \\a: string = "hello"
+        \\b: string = 42
+        \\c: string = a\nb
+        \\d: string = '''
+        \\e: string = 'single'
+        \\f: string = """
+    , .Fig);
+    defer ast.deinit();
+    // Quote characters are literal content: `a` is the SEVEN-character string
+    // `"hello"` — no quote form exists under the annotation.
+    try testing.expectEqualStrings("\"hello\"", (try ast.getValByPath(&.{.{ .key = "a" }})).kind.string);
+    // Sniffing is off: a number lexeme is the string of its digits (unchanged).
+    try testing.expectEqualStrings("42", (try ast.getValByPath(&.{.{ .key = "b" }})).kind.string);
+    // Backslashes are literal — no escape processing (`a\nb` is four characters).
+    try testing.expectEqualStrings("a\\nb", (try ast.getValByPath(&.{.{ .key = "c" }})).kind.string);
+    // A triple-quote opener is content too: no multiline form under the
+    // annotation (drop the annotation and quote normally for that).
+    try testing.expectEqualStrings("'''", (try ast.getValByPath(&.{.{ .key = "d" }})).kind.string);
+    try testing.expectEqualStrings("'single'", (try ast.getValByPath(&.{.{ .key = "e" }})).kind.string);
+    try testing.expectEqualStrings("\"\"\"", (try ast.getValByPath(&.{.{ .key = "f" }})).kind.string);
+    // Every one still records the `: string` tag.
+    inline for (.{ "a", "b", "c", "d", "e", "f" }) |k| {
+        const n = try ast.getValByPath(&.{.{ .key = k }});
+        try testing.expect(ast.node_tags[n.id].?.kind == .string);
+    }
+}
+
+test ": string quote-led RHS follows the BARE trailing-comment rule" {
+    // A quote-led raw RHS behaves identically to a bare one: ` # ` after
+    // whitespace opens a comment; a `#` glued to non-whitespace stays literal.
+    var ast = try parseAbstract(testing.allocator,
+        \\a: string = "hi" # note
+        \\b: string = "x"#y
+    , .Fig);
+    defer ast.deinit();
+    const a = try ast.getValByPath(&.{.{ .key = "a" }});
+    try testing.expectEqualStrings("\"hi\"", a.kind.string);
+    try testing.expectEqualStrings("note", ast.comments(a.id).trailing.?.text);
+    try testing.expectEqualStrings("\"x\"#y", (try ast.getValByPath(&.{.{ .key = "b" }})).kind.string);
+}
+
+test ": string = \"hello\" is equivalent to the escaped-quote untagged spelling" {
+    // The spec's §5.3 equivalence: `str: string = "hello"` ≡ `str = "\"hello\""`
+    // (same VALUE; the first additionally records the type tag).
+    var tagged = try parseAbstract(testing.allocator, "str: string = \"hello\"\n", .Fig);
+    defer tagged.deinit();
+    var quoted = try parseAbstract(testing.allocator, "str = \"\\\"hello\\\"\"\n", .Fig);
+    defer quoted.deinit();
+    const t = try tagged.getValByPath(&.{.{ .key = "str" }});
+    const q = try quoted.getValByPath(&.{.{ .key = "str" }});
+    try testing.expectEqualStrings("\"hello\"", t.kind.string);
+    try testing.expectEqualStrings(t.kind.string, q.kind.string);
+    try testing.expect(tagged.eql(quoted));
+}
+
 test "type-mismatch diagnostic anchors on the value span, not the trailing comment" {
     // A scalar-annotation failure (via `applyKnownType`, which runs AFTER the
     // line — incl. its comment — was scanned) must point at the VALUE, with a
@@ -2723,6 +2812,51 @@ test "+ continuation appends another element to the last [] header" {
     try testing.expectEqualStrings("CHANGELOG.md", (try ast.getValByPath(&.{ .{ .key = "replacements" }, .{ .index = 1 }, .{ .key = "file" } })).kind.string);
 }
 
+test "assignment-final [] is not assignable" {
+    // `[]` appends only as a header (or mid-path step); `xs[] = v` is the
+    // teaching error whether the sequence is empty…
+    try testing.expectError(error.FigAppendAssignment, parseAbstract(testing.allocator, "xs[] = 1\n", .Fig));
+    // …or already has elements (this used to silently REPLACE the last one).
+    try testing.expectError(error.FigAppendAssignment, parseAbstract(testing.allocator, "xs[0] = 1\nxs[] = 2\n", .Fig));
+    // The fixes the message names both work: the explicit next index appends…
+    var ast = try parseAbstract(testing.allocator, "xs[0] = 1\nxs[1] = 2\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "xs" }, .{ .index = 1 } })).kind.number.raw);
+    // …and a mid-path `[]` ("the last element") still navigates fine.
+    var mid = try parseAbstract(testing.allocator, "xs[]\n> a = 1\nxs[].b = 2\n", .Fig);
+    defer mid.deinit();
+    try testing.expectEqualStrings("2", (try mid.getValByPath(&.{ .{ .key = "xs" }, .{ .index = 0 }, .{ .key = "b" } })).kind.number.raw);
+}
+
+test "a non-final [] on an empty sequence is still the empty-append error" {
+    // The other `FigEmptyAppendTarget` site (mid-path navigation) is unaffected
+    // by the assignment-final ruling.
+    try testing.expectError(error.FigEmptyAppendTarget, parseAbstract(testing.allocator, "xs[].a = 1\n", .Fig));
+}
+
+test "an []-appended element that closes empty is an empty container" {
+    // Append-created elements are pre-committed to map shape at birth, but an
+    // element with zero entries errors like every other empty block container —
+    // closed by a following sibling line, at EOF, and with only a comment body.
+    try testing.expectError(error.FigEmptyContainer, parseAbstract(testing.allocator, "xs[]\nb = 1\n", .Fig));
+    try testing.expectError(error.FigEmptyContainer, parseAbstract(testing.allocator, "xs[]\n", .Fig));
+    try testing.expectError(error.FigEmptyContainer, parseAbstract(testing.allocator, "xs[]\n> # note\n", .Fig));
+    // A `+` re-run creates an element the same way — an empty one errors too.
+    try testing.expectError(error.FigEmptyContainer, parseAbstract(testing.allocator, "xs[]\n> a = 1\n+\n", .Fig));
+    // Every element getting fields keeps `[]` headers and `+` chains working.
+    var ast = try parseAbstract(testing.allocator, "xs[]\n> a = 1\n+\n> a = 2\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings("1", (try ast.getValByPath(&.{ .{ .key = "xs" }, .{ .index = 0 }, .{ .key = "a" } })).kind.number.raw);
+    try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "xs" }, .{ .index = 1 }, .{ .key = "a" } })).kind.number.raw);
+}
+
+test "content glued to a + is a key line, and + is not a bare-key char" {
+    // `isPlusLine` only claims a LONE `+`; anything glued falls through to the
+    // key path, where `+` cannot start (or appear in) a bare key.
+    try testing.expectError(error.FigBadKey, parseAbstract(testing.allocator, "xs[]\n> a = 1\n+glued = 2\n", .Fig));
+    try testing.expectError(error.FigBadKey, parseAbstract(testing.allocator, "+x\n", .Fig));
+}
+
 test "+ continuation equals a repeated [] header" {
     var plussed = try parseAbstract(testing.allocator, "xs[]\n> a = 1\n+\n> a = 2\n", .Fig);
     defer plussed.deinit();
@@ -2844,12 +2978,29 @@ test "coercion warns: literal lookalikes and leading zeros" {
     try expectWarnCodes("ver = 1.2.3\n", &.{});
     // The real literals, prose, quotes, and annotations never warn.
     try expectWarnCodes("ok = true\nn = null\nx = 0\nhex = 0xFF\n", &.{});
-    try expectWarnCodes("real = 1.0\ndot = .5\n", &.{});
+    try expectWarnCodes("real = 1.0\n", &.{});
     try expectWarnCodes("movie = 12 monkeys\ntitle = Yes Prime Minister\n", &.{});
     try expectWarnCodes("flag = \"true\"\n", &.{});
     try expectWarnCodes("norway: string = Yes\n", &.{});
     // A `: float` coercion silences the trailing-dot warn (the author opted in).
     try expectWarnCodes("sig: float = 1.\n", &.{});
+}
+
+test "leading-dot number lookalike falls to a string and warns" {
+    // `.5` is still the string it spells — the warn surfaces the surprise.
+    try expectWarnCodes("dot = .5\n", &.{.string_looks_like_number});
+    try expectWarnCodes("q = .25\n", &.{.string_looks_like_number});
+    var ast = try parseAbstract(testing.allocator, "dot = .5\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings(".5", (try ast.getValByPath(&.{.{ .key = "dot" }})).kind.string);
+    // As narrow as the trailing-dot detector: only a single `.` + clean digits.
+    try expectWarnCodes("v = .5.6\n", &.{});
+    try expectWarnCodes("e = .e5\n", &.{});
+    try expectWarnCodes("d = ..\n", &.{});
+    try expectWarnCodes("s = -.5\n", &.{});
+    // `: float` does NOT coerce a leading dot (no fig number spelling has one) —
+    // the warn's advice must therefore be "write the zero", not `: float =`.
+    try testing.expectError(error.FigTypeMismatch, parseAbstract(testing.allocator, "x: float = .5\n", .Fig));
 }
 
 test "coercion warns: ambiguous bare time only" {

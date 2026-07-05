@@ -2,7 +2,7 @@
 zig-out/*
 .zed
 .DS_STORE
-spec.md
+/spec.md
 bindings/rust/target/
 bindings/rust/fig/zig/
 .diaryx
@@ -17,3 +17,4 @@ bindings/rust/fig-macros/LICENSE-APACHE
 src/languages/yaml/spec-1.1-tag-repository.md
 src/languages/yaml/spec-1.1.md
 *.wasm
+src/languages/yaml/spec.md
