@@ -1,0 +1,29 @@
+{
+  "$schema": "https://zed.dev/schema/icon_themes/v0.3.0.json",
+  "name": "Fig Icons",
+  "author": "Adam Harris <amh421@icloud.com>",
+  "themes": [
+    {
+      "name": "Fig Icons Light",
+      "appearance": "light",
+      "file_suffixes": {
+        "figl": "fig",
+        "fig": "fig"
+      },
+      "file_icons": {
+        "fig": { "path": "./icons/fig-light.svg" }
+      }
+    },
+    {
+      "name": "Fig Icons Dark",
+      "appearance": "dark",
+      "file_suffixes": {
+        "figl": "fig",
+        "fig": "fig"
+      },
+      "file_icons": {
+        "fig": { "path": "./icons/fig-dark.svg" }
+      }
+    }
+  ]
+}
