@@ -17,7 +17,7 @@ repository = "https://github.com/adammharris/fig"
 [grammars.fig]
 repository = "file:///Users/adamharris/Documents/fig"
 path = "editors/tree-sitter-fig"
-rev = "e18c36c9bee2b15ac2f12db674be28311d324f2d"
+rev = "30e697cfffda8752a19f7774578f24c4a6f8f951"
 
 # The language server. `name` is cosmetic; `languages` must match the `name` in
 # languages/fig/config.toml. Zed launches the binary returned by

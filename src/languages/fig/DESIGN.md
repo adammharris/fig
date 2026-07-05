@@ -1017,6 +1017,34 @@ win is worth a new type name. The current dispositions:
   3. **The `*` collision.** `*` is already the element marker in *key* position
      (`> *`). An alias `*name` in *value* position looks unambiguous, but that
      must be proven across flow mode and sequence tails before committing.
+- **JSON-spelling preservation (`@json`) — DEFERRED to a point release.** Implicit
+  JSON-in-flow (`pasted = {"x": 1}`) is normalized to fig-inline on `fig fmt`
+  (`{ x = 1 }`) — the right default for hand-authored config, but it means a
+  pasted JSON blob can't be kept verbatim-as-JSON. The wanted feature is to
+  *preserve the JSON spelling*, and the key design realization is that this is a
+  **rendering directive, not a data type.** A `json`-marked node is already a
+  plain `mapping`/`sequence`; a type tag answers "*what* is this value?", a
+  directive answers "*how* is it spelled?" — orthogonal axes. So it does **not**
+  belong in `node_tags` (type assertions, e.g. `: int =`). Its home is a **new
+  directive axis**:
+  - An `@name` marker in the annotation slot, *before* an optional type and
+    combinable with it: `val: @json = {"k": "v"}` (a container) and
+    `val: @json string = "…"` (a scalar's spelling). `@` keeps directives visibly
+    distinct from type names, and opens a namespace (`@json` first; future
+    `@block`/`@flow`/… style hints could follow).
+  - A `node_directives` side-table parallel to `node_comments`/`node_tags`,
+    excluded from `eql` (it is trivia, like comments), plus parser recognition of
+    `@name` and per-printer honor-or-drop.
+  - fig-local by nature: every non-fig format drops it (a render hint has no
+    cross-format meaning), so it round-trips through fig + canonical only — the
+    same disposition as a dropped tag, NOT carried by `$fig-envelope` until the
+    reference-layer envelope work lands.
+
+  Open questions to settle first: what `@json` means on a **scalar** (JSON string
+  quoting/escapes vs. a no-op), and whether it **validates** JSON-representability
+  (string keys, JSON-legal number lexemes — no `0xFF`/datetime) or is a pure
+  spelling directive that best-effort-renders. A whole annotation axis is more
+  than this round warrants; the reasoning is captured so it is cheap to pick up.
 
 ---
 
