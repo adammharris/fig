@@ -1,20 +1,30 @@
 const Printer = @This();
 const std = @import("std");
 const AST = @import("../../ast/ast.zig");
+const width = @import("../../util/util.zig").width;
 const Writer = std.Io.Writer;
 
-/// Prints a given document in YAML block format.
+/// Prints a document in YAML block style, using default serialize options.
 pub fn print(writer: *Writer, ast: *const AST) Writer.Error!void {
+    return printWith(writer, ast, .{});
+}
+
+/// Prints a document in YAML block style. A short collection value inlines as
+/// flow (`[a, b]`, `{ k: v }`) when the whole line fits `opts.width` and the
+/// collection carries no comments; otherwise it stays block. The AST records no
+/// flow-vs-block memory (no CST), so this is a pure width heuristic, not a replay
+/// of the source's own choice.
+pub fn printWith(writer: *Writer, ast: *const AST, opts: AST.SerializeOptions) Writer.Error!void {
     // Document-level leading comments (those bound to the root) sit at column 0
     // above everything else.
     try leadingComments(writer, ast, ast.leadingCommentAnchor(ast.root), 0);
-    try printNode(writer, ast, ast.root, 0);
+    try printNode(writer, ast, ast.root, 0, opts);
     // End-of-document comments dangling off the root, at column 0.
     try danglingComments(writer, ast, ast.root, 0);
     try writer.flush();
 }
 
-pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize) Writer.Error!void {
+pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, opts: AST.SerializeOptions) Writer.Error!void {
     const node = ast.nodes[id];
     switch (node.kind) {
         .null_ => try writer.writeAll("null\n"),
@@ -40,9 +50,9 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
             try printScalar(writer, value);
             try writer.writeByte('\n');
         },
-        .sequence => |first_child| try printSequence(writer, ast, first_child, depth),
-        .mapping => |first_child| try printMapping(writer, ast, first_child, depth),
-        .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth, false),
+        .sequence => |first_child| try printSequence(writer, ast, first_child, depth, opts),
+        .mapping => |first_child| try printMapping(writer, ast, first_child, depth, opts),
+        .keyvalue => |kv| try printKeyValue(writer, ast, kv, depth, false, opts),
         .alias => |name| {
             try writer.writeByte('*');
             try writer.writeAll(name);
@@ -51,7 +61,7 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
     }
 }
 
-fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Writer.Error!void {
+fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize, opts: AST.SerializeOptions) Writer.Error!void {
     if (first_child == null) {
         try writer.writeAll("[]\n");
         return;
@@ -66,10 +76,13 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
         try leadingComments(writer, document, seqItemLeadAnchor(document, id), depth);
         try writeIndent(writer, depth);
         switch (item.kind) {
+            // Sequence items stay block even when short: `- uses: x` reads far
+            // better than `- { uses: x }`, and that idiom dominates config files.
+            // Flow inlining is reserved for mapping *values* (`key: [a, b]`).
             .mapping => |child| {
                 try writer.writeAll("- ");
                 if (child) |first_pair| {
-                    try printSequenceMapping(writer, document, first_pair, depth);
+                    try printSequenceMapping(writer, document, first_pair, depth, opts);
                 } else {
                     try writer.writeAll("{}\n");
                 }
@@ -80,7 +93,7 @@ fn printSequence(writer: *Writer, document: *const AST, first_child: ?AST.Node.I
                     try writer.writeAll("[]\n");
                 } else {
                     try writer.writeByte('\n');
-                    try printSequence(writer, document, child, depth + 1);
+                    try printSequence(writer, document, child, depth + 1, opts);
                 }
             },
             else => {
@@ -106,7 +119,7 @@ fn seqItemLeadAnchor(ast: *const AST, id: AST.Node.Id) AST.Node.Id {
     };
 }
 
-fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize) Writer.Error!void {
+fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id, depth: usize, opts: AST.SerializeOptions) Writer.Error!void {
     if (first_child == null) {
         try writer.writeAll("{}\n");
         return;
@@ -115,35 +128,44 @@ fn printMapping(writer: *Writer, document: *const AST, first_child: ?AST.Node.Id
     var current_id = first_child;
     while (current_id) |id| {
         try leadingComments(writer, document, document.leadingCommentAnchor(id), depth);
-        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth, false);
+        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth, false, opts);
         current_id = document.nodes[id].next_sibling;
     }
 }
 
-fn printSequenceMapping(writer: *Writer, document: *const AST, first_pair: AST.Node.Id, depth: usize) Writer.Error!void {
+fn printSequenceMapping(writer: *Writer, document: *const AST, first_pair: AST.Node.Id, depth: usize, opts: AST.SerializeOptions) Writer.Error!void {
     // Every pair sits one level deeper than the sequence: the `- ` prefix already
     // occupies that level's two columns. The first pair is written right after the
     // `- `, so its own leading indent is suppressed (`skip_indent`) — but its base
     // depth is still `depth + 1`, so a nested block value (mapping/sequence) indents
     // relative to the key's real column, not the sequence's. Passing `0` here would
     // emit nested children a level too shallow, turning them into siblings.
-    try printKeyValue(writer, document, document.nodes[first_pair].kind.keyvalue, depth + 1, true);
+    try printKeyValue(writer, document, document.nodes[first_pair].kind.keyvalue, depth + 1, true, opts);
 
     var current_id = document.nodes[first_pair].next_sibling;
     while (current_id) |id| {
         try leadingComments(writer, document, document.leadingCommentAnchor(id), depth + 1);
-        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth + 1, false);
+        try printKeyValue(writer, document, document.nodes[id].kind.keyvalue, depth + 1, false, opts);
         current_id = document.nodes[id].next_sibling;
     }
 }
 
-fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usize, skip_indent: bool) Writer.Error!void {
+fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usize, skip_indent: bool, opts: AST.SerializeOptions) Writer.Error!void {
     const value = document.nodes[kv.value];
     if (!skip_indent) try writeIndent(writer, depth);
     try writeProps(writer, document, kv.key); // `&k key:` / `!!str key:`
     try printScalar(writer, document.nodes[kv.key].kind.string);
+    // Columns already on the value's line — indent, key (with props), and `: ` —
+    // the budget the flow form must fit within.
+    const value_prefix = 2 * depth + keyCols(document, kv.key) + 2;
     switch (value.kind) {
         .mapping => |child| {
+            if (child != null and flowFits(document, kv.value, value_prefix, opts)) {
+                try writer.writeAll(": ");
+                try writeFlow(writer, document, kv.value);
+                try writer.writeByte('\n');
+                return;
+            }
             try writer.writeByte(':');
             try writePropsAfterColon(writer, document, kv.value); // `: &a` before the block
             if (child == null) {
@@ -152,10 +174,16 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
                 // A comment on the `key:` line rides here, above the block value.
                 try trailingComment(writer, document, kv.value);
                 try writer.writeByte('\n');
-                try printMapping(writer, document, child, depth + 1);
+                try printMapping(writer, document, child, depth + 1, opts);
             }
         },
         .sequence => |child| {
+            if (child != null and flowFits(document, kv.value, value_prefix, opts)) {
+                try writer.writeAll(": ");
+                try writeFlow(writer, document, kv.value);
+                try writer.writeByte('\n');
+                return;
+            }
             try writer.writeByte(':');
             try writePropsAfterColon(writer, document, kv.value);
             if (child == null) {
@@ -164,7 +192,7 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
                 try trailingComment(writer, document, kv.value);
                 try writer.writeByte('\n');
                 // Indentless: a sequence value's dashes sit at the key's column.
-                try printSequence(writer, document, child, depth);
+                try printSequence(writer, document, child, depth, opts);
             }
         },
         else => {
@@ -178,6 +206,145 @@ fn printKeyValue(writer: *Writer, document: *const AST, kv: anytype, depth: usiz
             }
         },
     }
+}
+
+// ── Flow (inline) collections ───────────────────────────────────────────────
+// A collection value/element may render inline (`[a, b]` / `{ k: v }`) instead
+// of as block lines when it fits the width budget and carries no comments. The
+// width is measured by rendering the real flow form (see `util.width`), so the
+// fit test can never drift from the bytes emitted.
+
+/// Whether the collection at `id` may render as flow starting at column
+/// `prefix`, within `opts.width`.
+fn flowFits(ast: *const AST, id: AST.Node.Id, prefix: usize, opts: AST.SerializeOptions) bool {
+    if (!flowEligible(ast, id)) return false;
+    const w = width.rendered(writeFlow, .{ ast, id }) orelse return false;
+    return prefix + w <= opts.width;
+}
+
+/// True when `id`'s whole subtree can render as flow with no loss: nothing in it
+/// carries a comment (flow has nowhere to put one) or an anchor/tag property, and
+/// every leaf has a flow spelling (no multi-line strings, aliases, or extended
+/// scalars — those need block position).
+fn flowEligible(ast: *const AST, id: AST.Node.Id) bool {
+    if (!ast.comments(id).isEmpty()) return false;
+    if (hasProps(ast, id)) return false;
+    return switch (ast.nodes[id].kind) {
+        .null_, .boolean, .number => true,
+        .string => |s| std.mem.indexOfScalar(u8, s, '\n') == null,
+        .extended, .alias, .keyvalue => false,
+        .sequence => |first| {
+            var cur = first;
+            while (cur) |el| : (cur = ast.nodes[el].next_sibling) {
+                // A list of mappings reads far better as block `- key: value`
+                // lines than as `[{ ... }, { ... }]`; keep it block. Lists of
+                // scalars (or of sequences) still inline.
+                if (ast.nodes[el].kind == .mapping) return false;
+                if (!flowEligible(ast, el)) return false;
+            }
+            return true;
+        },
+        .mapping => |first| {
+            var cur = first;
+            while (cur) |kv_id| : (cur = ast.nodes[kv_id].next_sibling) {
+                if (!ast.comments(kv_id).isEmpty()) return false;
+                const kv = ast.nodes[kv_id].kind.keyvalue;
+                if (!ast.comments(kv.key).isEmpty()) return false;
+                const key = ast.nodes[kv.key];
+                if (key.kind != .string or std.mem.indexOfScalar(u8, key.kind.string, '\n') != null) return false;
+                // A mapping directly nested in a mapping is too much structure
+                // for one flow line; keep it block (matches the fig printer).
+                if (ast.nodes[kv.value].kind == .mapping) return false;
+                if (!flowEligible(ast, kv.value)) return false;
+            }
+            return true;
+        },
+    };
+}
+
+fn hasProps(ast: *const AST, id: AST.Node.Id) bool {
+    if (id < ast.node_anchors.len and ast.node_anchors[id] != null) return true;
+    if (id < ast.node_tags.len and ast.node_tags[id] != null) return true;
+    return false;
+}
+
+/// Rendered width of a key (its anchor/tag props plus the key scalar), the
+/// left-hand columns of a `key: value` line.
+fn keyCols(ast: *const AST, key_id: AST.Node.Id) usize {
+    return width.rendered(writeKeyLead, .{ ast, key_id }) orelse 0;
+}
+
+fn writeKeyLead(writer: *Writer, ast: *const AST, key_id: AST.Node.Id) Writer.Error!void {
+    try writeProps(writer, ast, key_id);
+    try printScalar(writer, ast.nodes[key_id].kind.string);
+}
+
+/// Emit `id` as inline flow. Assumes `flowEligible(ast, id)`, so every node has a
+/// flow spelling and the only possible error is the writer's.
+fn writeFlow(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!void {
+    switch (ast.nodes[id].kind) {
+        .null_ => try writer.writeAll("null"),
+        .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
+        .number => |n| try writer.writeAll(n.raw),
+        .string => |s| try printFlowScalar(writer, s),
+        .sequence => |first| {
+            if (first == null) {
+                try writer.writeAll("[]");
+                return;
+            }
+            try writer.writeByte('[');
+            var cur = first;
+            var i: usize = 0;
+            while (cur) |el| : ({
+                cur = ast.nodes[el].next_sibling;
+                i += 1;
+            }) {
+                if (i > 0) try writer.writeAll(", ");
+                try writeFlow(writer, ast, el);
+            }
+            try writer.writeByte(']');
+        },
+        .mapping => |first| {
+            if (first == null) {
+                try writer.writeAll("{}");
+                return;
+            }
+            try writer.writeAll("{ ");
+            var cur = first;
+            var i: usize = 0;
+            while (cur) |kv_id| : ({
+                cur = ast.nodes[kv_id].next_sibling;
+                i += 1;
+            }) {
+                if (i > 0) try writer.writeAll(", ");
+                const kv = ast.nodes[kv_id].kind.keyvalue;
+                try printFlowScalar(writer, ast.nodes[kv.key].kind.string);
+                try writer.writeAll(": ");
+                try writeFlow(writer, ast, kv.value);
+            }
+            try writer.writeAll(" }");
+        },
+        .extended, .alias, .keyvalue => unreachable,
+    }
+}
+
+/// Like `printScalar`, but also single-quotes a plain scalar carrying a flow
+/// indicator (`,` `[` `]` `{` `}`), which would otherwise close or split the
+/// surrounding flow collection.
+fn printFlowScalar(writer: *Writer, raw: []const u8) Writer.Error!void {
+    if (!hasControlChar(raw) and !needsQuoting(raw) and containsFlowIndicator(raw)) {
+        try writeSingleQuoted(writer, raw);
+    } else {
+        try printScalar(writer, raw);
+    }
+}
+
+fn containsFlowIndicator(s: []const u8) bool {
+    for (s) |c| switch (c) {
+        ',', '[', ']', '{', '}' => return true,
+        else => {},
+    };
+    return false;
 }
 
 fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writer.Error!void {
@@ -546,12 +713,10 @@ test "prints YAML document" {
     defer output.deinit();
 
     try print(&output.writer, &doc);
+    // The short, comment-free `tags` sequence inlines as flow within the width.
     try std.testing.expectEqualSlices(u8,
         \\name: Ada
-        \\tags:
-        \\- zig
-        \\- true
-        \\- null
+        \\tags: [zig, true, null]
         \\
     , output.written());
 }
@@ -565,6 +730,8 @@ test "yaml printer: nested block value on a sequence item's first pair indents u
     // The nested mapping AND a nested sequence both hang off the FIRST pair of a
     // sequence-item mapping — the case that previously emitted children a level too
     // shallow, collapsing them into siblings (`outer: null` + `inner: 1`).
+    // Rendered with width 0 to force block layout (the short `outer` value would
+    // otherwise inline as flow), so the under-key indentation is what's tested.
     const inner = try b.addMapping(&.{.{ .key = try b.addString("inner"), .value = try b.addInt(1) }});
     const item0 = try b.addMapping(&.{.{ .key = try b.addString("outer"), .value = inner }});
     const item1 = try b.addMapping(&.{.{ .key = try b.addString("last"), .value = try b.addInt(3) }});
@@ -576,7 +743,7 @@ test "yaml printer: nested block value on a sequence item's first pair indents u
 
     var out: Writer.Allocating = .init(a);
     defer out.deinit();
-    try print(&out.writer, &ast);
+    try printWith(&out.writer, &ast, .{ .width = 0 });
     try std.testing.expectEqualStrings(
         \\audience:
         \\- outer:
@@ -593,6 +760,8 @@ test "yaml printer: nested sequence on a sequence item's first pair indents unde
 
     // { audience: [ { outer: [1, 2] } ] } — a nested indentless sequence whose
     // dashes must sit at the key's column, not escape to the parent sequence's.
+    // Rendered with width 0 to force block layout (this small a structure would
+    // otherwise inline as flow), so the indentless-sequence indent is under test.
     const nums = try b.addSequence(&.{ try b.addInt(1), try b.addInt(2) });
     const item0 = try b.addMapping(&.{.{ .key = try b.addString("outer"), .value = nums }});
     const seq = try b.addSequence(&.{item0});
@@ -603,7 +772,7 @@ test "yaml printer: nested sequence on a sequence item's first pair indents unde
 
     var out: Writer.Allocating = .init(a);
     defer out.deinit();
-    try print(&out.writer, &ast);
+    try printWith(&out.writer, &ast, .{ .width = 0 });
     try std.testing.expectEqualStrings(
         \\audience:
         \\- outer:
@@ -611,6 +780,66 @@ test "yaml printer: nested sequence on a sequence item's first pair indents unde
         \\  - 2
         \\
     , out.written());
+}
+
+/// Parse `src` as YAML and re-emit it with default options, asserting the exact
+/// output. Covers the flow (inline collection) layout decisions end to end.
+fn expectRoundTrip(src: []const u8, expected: []const u8) !void {
+    const Parser = @import("parser.zig");
+    const doc = try Parser.parse(std.testing.allocator, src, .v1_2_2);
+    defer doc.deinit(std.testing.allocator);
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print(&out.writer, &doc.ast);
+    try std.testing.expectEqualStrings(expected, out.written());
+}
+
+test "yaml flow: short comment-free mapping values inline; sequence items stay block" {
+    // A short sequence value and a short mapping value both inline.
+    try expectRoundTrip("branches:\n- main\n", "branches: [main]\n");
+    try expectRoundTrip(
+        "concurrency:\n  group: ci\n  cancel: true\n",
+        "concurrency: { group: ci, cancel: true }\n",
+    );
+    // Sequence-item mappings do NOT inline — `- uses: x`, not `- { uses: x }`.
+    try expectRoundTrip("steps:\n- uses: checkout\n", "steps:\n- uses: checkout\n");
+}
+
+test "yaml flow: a comment or overflow keeps a collection block" {
+    // A comment anywhere in the subtree disqualifies flow (nowhere to put it).
+    try expectRoundTrip("nums:\n# note\n- 1\n- 2\n", "nums:\n# note\n- 1\n- 2\n");
+    // A value past the width budget stays block.
+    const long = "x" ** 90;
+    try expectRoundTrip(
+        "items:\n- " ++ long ++ "\n",
+        "items:\n- " ++ long ++ "\n",
+    );
+}
+
+test "yaml flow: a flow indicator in a scalar forces quoting" {
+    // `${{ github.ref }}` carries `{`/`}`, which would break the flow map — so the
+    // value is single-quoted (it was safe bare in block position).
+    try expectRoundTrip(
+        "concurrency:\n  group: ci-${{ github.ref }}\n  x: 1\n",
+        "concurrency: { group: 'ci-${{ github.ref }}', x: 1 }\n",
+    );
+}
+
+test "yaml flow: output is idempotent (reparse + reprint is a fixed point)" {
+    const Parser = @import("parser.zig");
+    const src = "on:\n  push:\n    branches: [main]\nconcurrency: { group: ci, cancel: true }\n";
+    const doc = try Parser.parse(std.testing.allocator, src, .v1_2_2);
+    defer doc.deinit(std.testing.allocator);
+    var first: Writer.Allocating = .init(std.testing.allocator);
+    defer first.deinit();
+    try print(&first.writer, &doc.ast);
+
+    const doc2 = try Parser.parse(std.testing.allocator, first.written(), .v1_2_2);
+    defer doc2.deinit(std.testing.allocator);
+    var second: Writer.Allocating = .init(std.testing.allocator);
+    defer second.deinit();
+    try print(&second.writer, &doc2.ast);
+    try std.testing.expectEqualStrings(first.written(), second.written());
 }
 
 /// Build `{ s: value }`, serialize it, and return the owned YAML (caller frees).

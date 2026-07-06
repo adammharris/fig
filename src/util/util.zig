@@ -5,12 +5,14 @@ pub const Unicode = @import("unicode.zig");
 pub const json_string = @import("json_string.zig");
 pub const ascii = @import("ascii.zig");
 pub const datetime = @import("datetime.zig");
+pub const width = @import("width.zig");
 
 test {
     _ = json_string;
     _ = ascii;
     _ = datetime;
     _ = Unicode;
+    _ = width;
 }
 
 /// Like std.mem.eql, but also works if type has a `.eql` function defined.

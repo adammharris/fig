@@ -32,6 +32,7 @@
 const Printer = @This();
 const std = @import("std");
 const AST = @import("../../ast/ast.zig");
+const width = @import("../../util/util.zig").width;
 const Writer = std.Io.Writer;
 
 /// TOML cannot represent a YAML alias (materialize expands them first), a null,
@@ -306,24 +307,18 @@ fn fitsInline(ctx: *Ctx, ast: *const AST, kv_id: AST.Node.Id) bool {
 
 // ── Width / comment measurement ─────────────────────────────────────────────
 // The inline-layout decision measures a value's rendered width by printing it to
-// a discarding writer with the very functions that emit the real output, so the
-// estimate can never drift from what's actually written.
+// a discarding writer with the very functions that emit the real output (see
+// `util.width`), so the estimate can never drift from what's actually written.
 
 /// Rendered byte width of a value's inline form, or null if it can't be inlined
 /// (a `null`/alias inside makes `writeInline` error).
 fn inlineByteLen(ast: *const AST, id: AST.Node.Id) ?usize {
-    var buf: [256]u8 = undefined;
-    var disc = std.Io.Writer.Discarding.init(&buf);
-    writeInline(&disc.writer, ast, id) catch return null;
-    return @intCast(disc.fullCount());
+    return width.rendered(writeInline, .{ ast, id });
 }
 
 /// Rendered byte width of a key (bare or quoted), or null for a non-string key.
 fn keyByteLen(ast: *const AST, key_id: AST.Node.Id) ?usize {
-    var buf: [128]u8 = undefined;
-    var disc = std.Io.Writer.Discarding.init(&buf);
-    writeKey(&disc.writer, ast, key_id) catch return null;
-    return @intCast(disc.fullCount());
+    return width.rendered(writeKey, .{ ast, key_id });
 }
 
 /// A mid-order table/AoT child may demote to dotted keys / an inline array
@@ -341,10 +336,7 @@ fn demotable(ast: *const AST, kv_id: AST.Node.Id) bool {
 
 /// Rendered byte width of a dotted path, or null for a non-string segment.
 fn pathByteLen(path: *const Path) ?usize {
-    var buf: [128]u8 = undefined;
-    var disc = std.Io.Writer.Discarding.init(&buf);
-    writePath(&disc.writer, path) catch return null;
-    return @intCast(disc.fullCount());
+    return width.rendered(writePath, .{path});
 }
 
 fn nodeHasComments(ast: *const AST, id: AST.Node.Id) bool {

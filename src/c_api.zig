@@ -3196,7 +3196,7 @@ test "value c abi builds and serializes to multiple formats" {
     // Same value, different format — the borrowed bytes are refreshed in place.
     if (comptime build_options.lang_yaml) {
         try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.yaml), &ptr, &len));
-        try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
+        try std.testing.expectEqualStrings("name: fig\nnums: [1, 2]\n", ptr[0..len]);
     }
 }
 
@@ -3349,7 +3349,7 @@ test "fig_document_serialize converts JSON to YAML" {
     var ptr: [*c]const u8 = undefined;
     var len: usize = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_document_serialize(out_doc, @intFromEnum(FigFormat.yaml), null, &ptr, &len));
-    try std.testing.expectEqualStrings("name: fig\nnums:\n- 1\n- 2\n", ptr[0..len]);
+    try std.testing.expectEqualStrings("name: fig\nnums: [1, 2]\n", ptr[0..len]);
 
     // Same handle, re-serialize to TOML — the borrowed bytes refresh in place.
     if (comptime build_options.lang_toml) {
