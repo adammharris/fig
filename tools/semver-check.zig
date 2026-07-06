@@ -1,8 +1,8 @@
 //! Dev tool: C ABI **diff** against the last released tag, turned into a SemVer
 //! verdict. Where `abi-check.zig` proves the header and implementation agree at a
-//! single point in time, this tool compares the *current* `include/fig.h` against
-//! the header as it existed at the most recent `v*` git tag and classifies the
-//! delta:
+//! single point in time, this tool compares the *current* header (passed as this
+//! tool's first argument) against the header as it existed at the most recent
+//! `v*` git tag and classifies the delta:
 //!
 //!   * a removed function, or a changed signature (return type / parameter list)
 //!     -> MAJOR (breaking)
@@ -23,9 +23,12 @@
 //! waived for it.)
 //!
 //! Baseline discovery is automatic: `git describe --tags --abbrev=0 --match 'v*'`
-//! finds the most recent release reachable from HEAD, and `git show <tag>:include/
-//! fig.h` reads that release's header. With no git / no tags (e.g. a source
-//! tarball), the tool prints a note and exits 0 rather than breaking the build.
+//! finds the most recent release reachable from HEAD, and `git show <tag>:<path>`
+//! reads that release's header — trying the header's current repo path first,
+//! then its pre-move path (`include/fig.h`, moved to `bindings/c/include/fig.h`),
+//! since older tags predating a header relocation only have it at the old path.
+//! With no git / no tags (e.g. a source tarball), the tool prints a note and
+//! exits 0 rather than breaking the build.
 //!
 //! Coverage: the exported function surface (names + normalized signatures) AND
 //! the `typedef struct/enum` surface — struct field layout (order, type, array
@@ -138,11 +141,22 @@ pub fn main(init: std.process.Init) !void {
     };
     const tag_trimmed = std.mem.trim(u8, tag, " \t\r\n");
 
-    const baseline_spec = try std.fmt.allocPrint(arena, "{s}:include/fig.h", .{tag_trimmed});
-    const baseline_header = runGit(arena, io, init.gpa, repo_root, &.{ "show", baseline_spec }) orelse {
+    // Try the header's current repo path first, then its pre-move path — a tag
+    // cut before a header relocation (e.g. include/fig.h -> bindings/c/include/
+    // fig.h) only has it at the old one.
+    const header_paths = [_][]const u8{ "bindings/c/include/fig.h", "include/fig.h" };
+    var baseline_header_opt: ?[]u8 = null;
+    for (header_paths) |p| {
+        const spec = try std.fmt.allocPrint(arena, "{s}:{s}", .{ tag_trimmed, p });
+        if (runGit(arena, io, init.gpa, repo_root, &.{ "show", spec })) |h| {
+            baseline_header_opt = h;
+            break;
+        }
+    }
+    const baseline_header = baseline_header_opt orelse {
         std.debug.print(
-            "semver-check: could not read include/fig.h at {s} — skipping diff.\n",
-            .{tag_trimmed},
+            "semver-check: could not read the header at {s} (tried {s} and {s}) — skipping diff.\n",
+            .{ tag_trimmed, header_paths[0], header_paths[1] },
         );
         return;
     };

@@ -3,8 +3,9 @@ name: Homebrew
 # 1. build separate macOS binaries (arm64, x86_64) and
 # 2. separate Linux binaries (x86_64, aarch64), both with the pinned Zig
 # toolchain, and attach them to this repo's GitHub Release, then
-# 3. render Formula/fig.rb (this repo's template — see that file) with the
-# release's version + checksums and push it to the tap repo.
+# 3. render the formula (inlined below, in the `bump-formula` job — there is no
+# separate Formula/fig.rb template file in this repo, only in the tap repo it
+# gets pushed to) with the release's version + checksums, and push it there.
 #
 # Per-arch (not universal/lipo'd) binaries: smaller downloads per user, and it
 # keeps macOS and Linux symmetric — both platforms resolve arch the same way
@@ -87,8 +88,12 @@ jobs:
     # Downloads the four tarballs the jobs above just attached to this tag's
     # Release and hashes them — cheaper and less brittle than passing checksums
     # between jobs via artifacts, and it's what mislav/bump-homebrew-formula-action
-    # did under the hood for the single-URL case this replaces.
-    - name: Compute checksums and render Formula/fig.rb
+    # did under the hood for the single-URL case this replaces. The formula body
+    # is inlined here (rather than a checked-in Formula/fig.rb template rendered
+    # via `sed`) since this repo is not itself the tap — the only place a
+    # formula file belongs is the tap repo below, so there is no reason to keep a
+    # second copy here just to template it.
+    - name: Compute checksums and render the Homebrew formula
       run: |
         version="${GITHUB_REF_NAME#v}"
         base="https://github.com/adammharris/fig/releases/download/${GITHUB_REF_NAME}"
@@ -96,13 +101,44 @@ jobs:
         mac_x64_sha=$(curl -sL "$base/fig-macos-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
         linux_x64_sha=$(curl -sL "$base/fig-linux-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
         linux_arm64_sha=$(curl -sL "$base/fig-linux-aarch64.tar.gz" | sha256sum | cut -d' ' -f1)
-        sed \
-          -e "s/__VERSION__/$version/g" \
-          -e "s/__MAC_ARM64_SHA256__/$mac_arm64_sha/" \
-          -e "s/__MAC_X86_64_SHA256__/$mac_x64_sha/" \
-          -e "s/__LINUX_X86_64_SHA256__/$linux_x64_sha/" \
-          -e "s/__LINUX_AARCH64_SHA256__/$linux_arm64_sha/" \
-          Formula/fig.rb > /tmp/fig.rb
+        cat > /tmp/fig.rb <<RUBY
+        class Fig < Formula
+          desc "Parse, edit, and convert config files while preserving comments. Supports JSON, YAML, TOML, and more."
+          homepage "https://github.com/adammharris/fig"
+          version "$version"
+          license "MIT OR Apache-2.0"
+
+          on_macos do
+            on_arm do
+              url "https://github.com/adammharris/fig/releases/download/v$version/fig-macos-arm64.tar.gz"
+              sha256 "$mac_arm64_sha"
+            end
+            on_intel do
+              url "https://github.com/adammharris/fig/releases/download/v$version/fig-macos-x86_64.tar.gz"
+              sha256 "$mac_x64_sha"
+            end
+          end
+
+          on_linux do
+            on_arm do
+              url "https://github.com/adammharris/fig/releases/download/v$version/fig-linux-aarch64.tar.gz"
+              sha256 "$linux_arm64_sha"
+            end
+            on_intel do
+              url "https://github.com/adammharris/fig/releases/download/v$version/fig-linux-x86_64.tar.gz"
+              sha256 "$linux_x64_sha"
+            end
+          end
+
+          def install
+            bin.install "fig"
+          end
+
+          test do
+            assert_match version.to_s, shell_output("#{bin}/fig --version")
+          end
+        end
+        RUBY
     - name: Push to the tap
       env: { COMMITTER_TOKEN: '${{ secrets.HOMEBREW_TAP_TOKEN }}' }
       run: |

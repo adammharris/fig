@@ -85,7 +85,7 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
-        source_root.join("include/fig.h").display()
+        source_root.join("bindings/c/include/fig.h").display()
     );
 }
 

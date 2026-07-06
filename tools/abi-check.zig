@@ -1,5 +1,5 @@
 //! Dev tool: C ABI symbol diff. Cross-checks that every `export fn fig_*` in
-//! src/c_api.zig has a matching prototype in include/fig.h, and vice versa —
+//! src/c_api.zig has a matching prototype in bindings/c/include/fig.h, and vice versa —
 //! catching a symbol that is exported but undocumented (a caller cannot find it)
 //! or declared but unimplemented (a dangling prototype). This is the check that
 //! catches drift like `fig_alloc`/`fig_free` being exported without a header

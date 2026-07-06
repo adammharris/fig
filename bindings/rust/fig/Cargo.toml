@@ -26,7 +26,7 @@ include = [
     "zig/build.zig",
     "zig/build.zig.zon",
     "zig/src/**/*",
-    "zig/include/**/*",
+    "zig/bindings/c/include/**/*",
     # Vendored in by `zig build vendor-rust` from the repo root (git-ignored here).
     "LICENSE-MIT",
     "LICENSE-APACHE",

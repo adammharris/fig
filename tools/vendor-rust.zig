@@ -19,7 +19,7 @@ const Dir = std.Io.Dir;
 // Zig source rooted at src/c_api.zig, and the public header. testdata/, tools/,
 // and the other bindings are not needed to build the static library.
 const files = [_][]const u8{ "build.zig", "build.zig.zon" };
-const trees = [_][]const u8{ "src", "include" };
+const trees = [_][]const u8{ "src", "bindings/c/include" };
 
 // Dual license, single source of truth at the repo root. crates.io takes the
 // SPDX `license` field, but a published crate should also carry the license

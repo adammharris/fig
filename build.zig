@@ -6,7 +6,7 @@ const std = @import("std");
 const version = std.SemanticVersion.parse(@import("build.zig.zon").version) catch
     @compileError("invalid `.version` in build.zig.zon");
 
-/// The binary C ABI contract version (see `FIG_ABI_VERSION` in include/fig.h).
+/// The binary C ABI contract version (see `FIG_ABI_VERSION` in bindings/c/include/fig.h).
 /// Canonical source of truth — surfaced to the C ABI as `fig_abi_version()` and
 /// pinned to the header macro by `zig build abi-check`. A monotonic counter,
 /// bumped ONLY on a breaking ABI change (which fig's forward-compat policy makes
@@ -60,12 +60,12 @@ pub fn build(b: *std.Build) void {
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one
     // canonical package version — and split into the components the ABI's
     // packed-integer/string accessors need. `zig build abi-check` separately
-    // asserts that include/fig.h's FIG_VERSION_* macros match this same source.
+    // asserts that bindings/c/include/fig.h's FIG_VERSION_* macros match this same source.
     options.addOption(u8, "version_major", @intCast(version.major));
     options.addOption(u8, "version_minor", @intCast(version.minor));
     options.addOption(u8, "version_patch", @intCast(version.patch));
     // The binary C ABI contract version, surfaced through `fig_abi_version()`.
-    // `zig build abi-check` asserts include/fig.h's FIG_ABI_VERSION matches this.
+    // `zig build abi-check` asserts bindings/c/include/fig.h's FIG_ABI_VERSION matches this.
     options.addOption(u8, "abi_version", abi_version);
 
     // Build the options module once and share the single instance across every
@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
     gen_json5_step.dependOn(&gen_json5_run.step);
 
     // ABI surface check: keep the C ABI implementation (src/c_api.zig), the
-    // public header (include/fig.h), and the built library in agreement.
+    // public header (bindings/c/include/fig.h), and the built library in agreement.
     //   * tools/abi-check.zig diffs the exported `fig_*` symbols against the
     //     header prototypes (both directions), failing on any mismatch — this is
     //     what catches a symbol exported without a header declaration.
@@ -305,7 +305,7 @@ pub fn build(b: *std.Build) void {
     });
     const abi_check_run = b.addRunArtifact(abi_check);
     // Passed as file args so the run is cache-keyed on the files it inspects.
-    abi_check_run.addFileArg(b.path("include/fig.h"));
+    abi_check_run.addFileArg(b.path("bindings/c/include/fig.h"));
     abi_check_run.addFileArg(b.path("src/c_api.zig"));
     // The canonical version (from build.zig.zon) so the tool can assert that
     // fig.h's FIG_VERSION_* macros have not drifted from it.
@@ -319,7 +319,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true }),
     });
     abi_probe_c.root_module.addCSourceFile(.{ .file = b.path("tools/abi_probe.c") });
-    abi_probe_c.root_module.addIncludePath(b.path("include"));
+    abi_probe_c.root_module.addIncludePath(b.path("bindings/c/include"));
     abi_probe_c.root_module.linkLibrary(c_lib);
 
     const abi_probe_cpp = b.addExecutable(.{
@@ -327,7 +327,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true }),
     });
     abi_probe_cpp.root_module.addCSourceFile(.{ .file = b.path("tools/abi_probe.cpp") });
-    abi_probe_cpp.root_module.addIncludePath(b.path("include"));
+    abi_probe_cpp.root_module.addIncludePath(b.path("bindings/c/include"));
     abi_probe_cpp.root_module.linkLibrary(c_lib);
 
     const abi_check_step = b.step("abi-check", "Check the C ABI surface: symbol diff + C/C++ header probe");
@@ -351,7 +351,7 @@ pub fn build(b: *std.Build) void {
     });
     const semver_check_run = b.addRunArtifact(semver_check);
     // Cache-key on the header it inspects; the baseline comes from git at run time.
-    semver_check_run.addFileArg(b.path("include/fig.h"));
+    semver_check_run.addFileArg(b.path("bindings/c/include/fig.h"));
     semver_check_run.addArg(b.fmt("{d}.{d}.{d}", .{ version.major, version.minor, version.patch }));
     semver_check_run.addArg(b.pathFromRoot("."));
     // git state isn't a declared input, so never serve this from cache.

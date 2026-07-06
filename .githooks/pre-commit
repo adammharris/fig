@@ -17,7 +17,7 @@ staged=$(git diff --cached --name-only --diff-filter=ACM)
 
 # C ABI symbol/header consistency when the implementation or header is staged.
 case "$staged" in
-    *src/c_api.zig* | *include/fig.h*)
+    *src/c_api.zig* | *bindings/c/include/fig.h*)
         printf 'pre-commit: C ABI files staged — running abi-check\n'
         ( cd "$root" && zig build abi-check ) || {
             printf 'pre-commit: abi-check failed; commit aborted (use --no-verify to bypass)\n' >&2
