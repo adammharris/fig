@@ -6,6 +6,7 @@ const Writer = std.Io.Writer;
 
 pub const Parser = @import("parser.zig");
 pub const Tokenizer = @import("tokenizer.zig");
+pub const Printer = @import("printer.zig");
 
 pub const Type = enum {
     /// XML 1.0 (Fifth Edition). The only version fig targets — XML 1.1 differs
@@ -13,11 +14,14 @@ pub const Type = enum {
     XML_1_0,
 };
 
-/// XML is currently READER-ONLY: it parses into the shared AST (so XML converts
-/// *into* JSON/YAML/TOML/ZON), but has no writer yet. It is deliberately NOT an
-/// `AST.SerializeFormat` member, so `ast.serialize` never routes here. The
-/// `print` decl below exists only to satisfy the `Language` interface
-/// (`language.zig:validate` requires it) and always errors.
+/// XML reads into the shared AST (so XML converts *into* JSON/YAML/TOML/ZON)
+/// and writes back out via `Printer` — the documented inverse mapping described
+/// in `printer.zig`'s header (root is a one-entry mapping, `@`-keys are
+/// attributes, `#text` is text content, repeated children round-trip through a
+/// `sequence`). It IS an `AST.SerializeFormat` member (`.xml`), so `ast.serialize`
+/// routes here like every other format; unlike the others it currently has no
+/// in-place (span-splicing) editor — `fig edit`/`fig comment` on an XML file
+/// still error (`UnsupportedXmlEdit`), a separate, larger feature.
 pub const Language = struct {
     pub const Type = xml.Type;
     pub const Parser = xml.Parser;
@@ -27,12 +31,8 @@ pub const Language = struct {
         return xml.Parser.parse(parser.allocator, input, format);
     }
 
-    /// Reader-only: XML serialization is not implemented. Never reached in
-    /// practice (XML is not a `SerializeFormat`); present for interface parity.
     pub fn print(writer: *Writer, ast: *const AST) !void {
-        _ = writer;
-        _ = ast;
-        return error.WriteUnsupported;
+        return xml.Printer.print(writer, ast, .{});
     }
 };
 
@@ -42,4 +42,5 @@ pub const Language = struct {
 test {
     _ = @import("tokenizer.zig");
     _ = @import("parser.zig");
+    _ = @import("printer.zig");
 }

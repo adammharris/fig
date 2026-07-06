@@ -274,6 +274,17 @@ fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
             }
             return null;
         },
+        // XML has no number/boolean/datetime/enum/char primitive of its own —
+        // every one of these collapses to plain element/attribute text the
+        // moment it leaves the AST (see `languages/xml/printer.zig`'s
+        // `writeScalarValue`). `null`/`string`/`mapping`/`sequence` all have a
+        // direct, lossless XML shape (empty element, text-only element,
+        // nested element, repeated elements).
+        .xml => switch (kind) {
+            .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
+            .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            else => return null,
+        },
     }
 }
 
@@ -288,15 +299,17 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
         .local_time,
         => "string",
         // A char literal's text is its codepoint: most printers emit it as a
-        // number; TOML as an integer. (fig never reaches here — it re-emits the
-        // char natively via `: char`, so `valueLoss(.fig, …)` returns null.)
+        // number; TOML as an integer; XML as plain text (it has no number type
+        // at all). (fig never reaches here — it re-emits the char natively via
+        // `: char`, so `valueLoss(.fig, …)` returns null.)
         .char_literal => switch (format) {
             .toml => "integer",
+            .xml => "string",
             else => "number",
         },
         // Non-finite floats quote in plain JSON/JSONC; elsewhere they degrade to
-        // a plain string scalar (YAML/ZON — JSON5 keeps them natively, handled
-        // before this is reached).
+        // a plain string scalar (YAML/ZON/XML — JSON5 keeps them natively,
+        // handled before this is reached).
         .number_special => switch (format) {
             .json, .jsonc => "quoted string",
             else => "string",
@@ -312,21 +325,24 @@ fn dropNote(kind: AST.Node.Kind) []const u8 {
 }
 
 /// Whether `format` emits comments at all in this mode. Plain JSON never does;
-/// JSON5/JSONC/ZON only in pretty (multi-line) output; YAML/TOML/canonical always.
+/// JSON5/JSONC/ZON only in pretty (multi-line) output; YAML/TOML/canonical
+/// always. XML never does — the reader has no comment syntax, so an XML-sourced
+/// AST never carries any, and the printer emits none.
 fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
-        .json => false,
+        .json, .xml => false,
         .json5, .jsonc, .zon => pretty,
         .yaml, .toml, .canonical, .fig => true,
     };
 }
 
 /// Whether `format` has block-comment syntax (`/* … */`). Only the JSON5 family
-/// and canonical do; YAML/TOML/ZON/fig degrade a block comment to a line run.
+/// and canonical do; YAML/TOML/ZON/fig degrade a block comment to a line run;
+/// XML has no comments at all (moot — `commentsEmitted` already excludes it).
 fn blockComments(format: Format) bool {
     return switch (format) {
         .json5, .jsonc, .canonical => true,
-        .json, .yaml, .toml, .zon, .fig => false,
+        .json, .yaml, .toml, .zon, .fig, .xml => false,
     };
 }
 

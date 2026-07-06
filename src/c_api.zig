@@ -25,6 +25,7 @@ const TomlType = if (build_options.lang_toml) @import("languages/toml/toml.zig")
 const TomlLang = if (build_options.lang_toml) @import("languages/toml/toml.zig").Language else void;
 const ZonParser = if (build_options.lang_zon) @import("languages/zon/parser.zig") else void;
 const ZonType = if (build_options.lang_zon) @import("languages/zon/zon.zig").Type else void;
+const ZonLang = if (build_options.lang_zon) @import("languages/zon/zon.zig").Language else void;
 const XmlParser = if (build_options.lang_xml) @import("languages/xml/parser.zig") else void;
 const XmlType = if (build_options.lang_xml) @import("languages/xml/xml.zig").Type else void;
 const FigDialectParser = if (build_options.lang_fig) @import("languages/fig/parser.zig") else void;
@@ -139,10 +140,10 @@ pub const FigCapability = enum(u32) {
 
 /// Report what `fig` can do with `format` in THIS build as a bitmask of
 /// `FigCapability` (read | edit | serialize). Reflects both the format's inherent
-/// support (XML is reader-only; ZON parses and serializes but is not editable)
-/// and build-time gating: a format compiled out reports 0, as does an unknown
-/// `format` value. JSON/JSONC/JSON5 are always fully supported. Lets a host pick a
-/// working format up front instead of probing via `unsupported_format` returns.
+/// support (XML has no in-place editor yet — see `languages/xml/xml.zig`) and
+/// build-time gating: a format compiled out reports 0, as does an unknown
+/// `format` value. JSON/JSONC/JSON5 are always fully supported. Lets a host pick
+/// a working format up front instead of probing via `unsupported_format` returns.
 pub export fn fig_format_capabilities(format: c_int) u32 {
     const read = @intFromEnum(FigCapability.read);
     const edit = @intFromEnum(FigCapability.edit);
@@ -154,8 +155,8 @@ pub export fn fig_format_capabilities(format: c_int) u32 {
         => if (comptime build_options.lang_json) read | edit | serialize else 0,
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) read | edit | serialize else 0,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) read | edit | serialize else 0,
-        @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | serialize else 0,
-        @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read else 0,
+        @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read | serialize else 0,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) read | edit | serialize else 0,
         else => 0,
     };
@@ -748,11 +749,11 @@ pub const FigEditor = opaque {};
 
 // The editor backends, shared by the document editor and the embed editor: a
 // tagged union with one variant per editable language COMPILED INTO THIS BUILD
-// (json/yaml/toml/fig; zon/xml are not editable). The type is assembled from
+// (json/yaml/toml/fig/zon; xml is not editable). The type is assembled from
 // only the enabled languages — rather than carrying `void` placeholder fields —
 // so the `inline else` switches over `handle.inner` stay valid: every variant
 // has a real `Editor` payload to act on. Building it from a list (instead of
-// enumerating the 2^4 enable combinations by hand) is what keeps adding a gate
+// enumerating the 2^5 enable combinations by hand) is what keeps adding a gate
 // cheap.
 const editor_variants = blk: {
     const Variant = struct { name: [:0]const u8, Lang: type };
@@ -761,6 +762,7 @@ const editor_variants = blk: {
     if (build_options.lang_yaml) variants = variants ++ &[_]Variant{.{ .name = "yaml", .Lang = YamlLang }};
     if (build_options.lang_toml) variants = variants ++ &[_]Variant{.{ .name = "toml", .Lang = TomlLang }};
     if (build_options.lang_fig) variants = variants ++ &[_]Variant{.{ .name = "fig", .Lang = FigDialectLang }};
+    if (build_options.lang_zon) variants = variants ++ &[_]Variant{.{ .name = "zon", .Lang = ZonLang }};
     break :blk variants;
 };
 
@@ -826,6 +828,7 @@ pub export fn fig_editor_create(
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else return .unsupported_format,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else return .unsupported_format,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else return .unsupported_format,
+        @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else return .unsupported_format,
         else => return .unsupported_format,
     };
 
@@ -846,8 +849,9 @@ pub export fn fig_editor_create(
         .json5 => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator, .format = .JSON5 } } else unreachable,
         .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         .fig => if (comptime build_options.lang_fig) .{ .fig = .{ .allocator = allocator } } else unreachable,
-        // Filtered out by the format switch above; editing these is not yet wired.
-        .zon, .xml => unreachable,
+        .zon => if (comptime build_options.lang_zon) .{ .zon = .{ .allocator = allocator } } else unreachable,
+        // Filtered out by the format switch above; XML editing is not yet wired.
+        .xml => unreachable,
     };
 
     switch (handle.inner) {
@@ -1953,6 +1957,7 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
         @intFromEnum(FigFormat.yaml) => if (comptime build_options.lang_yaml) .yaml else null,
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else null,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else null,
+        @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) .xml else null,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else null,
         else => null,
     };
@@ -1960,11 +1965,21 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
 
 /// Translate the canonical serialize error set onto `FigStatus`. Exhaustive over
 /// `AST.SerializeError`: a representability failure (alias/null/non-string key in
-/// a format that cannot hold it) maps to `unsupported_format`; the writer's only
+/// a format that cannot hold it, or one of XML's own shape requirements — see
+/// `languages/xml/printer.zig`) maps to `unsupported_format`; the writer's only
 /// other failure is allocation, surfaced as `WriteFailed`.
 fn serializeStatus(err: AST.SerializeError) FigStatus {
     return switch (err) {
-        error.UnresolvedAlias, error.NullUnsupported, error.NonStringKey, error.FormatDisabled, error.NestingTooDeep => .unsupported_format,
+        error.UnresolvedAlias,
+        error.NullUnsupported,
+        error.NonStringKey,
+        error.FormatDisabled,
+        error.NestingTooDeep,
+        error.RootNotSingleElement,
+        error.NestedSequenceUnsupported,
+        error.InvalidElementName,
+        error.NonScalarValue,
+        => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };
 }
@@ -2299,11 +2314,15 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             .yaml => .yaml,
             .toml => .toml,
             .zon => .zon,
-            // Neither has a `Lossless.Target` counterpart: `.canonical` is never
-            // yielded by `serializeFormatOf` (not a member of the C ABI's
-            // `FigFormat`), and `.fig` has no envelope encoding of its own yet.
-            // Both fall through to decode-only (no envelope on output).
-            .canonical, .fig => null,
+            // None of these has a `Lossless.Target` counterpart: `.canonical` is
+            // never yielded by `serializeFormatOf` (not a member of the C ABI's
+            // `FigFormat`), `.fig` has no envelope encoding of its own yet, and
+            // XML has no type-carrying envelope to encode into — every scalar
+            // becomes element/attribute text regardless (see
+            // `languages/xml/printer.zig`), so an envelope couldn't preserve
+            // anything an envelope-free print doesn't already lose. All three
+            // fall through to decode-only (no envelope on output).
+            .canonical, .fig, .xml => null,
         };
         const decoded = try arena.create(AST);
         decoded.* = try Lossless.decode(arena, base_ast);
@@ -3404,6 +3423,23 @@ test "fig_editor_create edits the fig authoring dialect" {
     try std.testing.expectEqualStrings("title = old\nport = 9090\n", ptr[0..len]);
 }
 
+test "fig_editor_create edits ZON through the C ABI" {
+    if (comptime !build_options.lang_zon) return error.SkipZigTest;
+    const src = ".{ .title = \"old\", .port = 8080 }";
+    var ed: ?*FigEditor = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_create(src.ptr, src.len, @intFromEnum(FigFormat.zon), &ed));
+    defer fig_editor_destroy(ed);
+
+    const path = [_]FigPathSegment{keySeg("port")};
+    const repl = "9090";
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_replace_val(ed, &path, 1, repl.ptr, repl.len));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_editor_source(ed, &ptr, &len));
+    try std.testing.expectEqualStrings(".{ .title = \"old\", .port = 9090 }", ptr[0..len]);
+}
+
 test "fig_document_serialize materializes the YAML reference layer when leaving YAML" {
     if (comptime !build_options.lang_json) return error.SkipZigTest;
     if (comptime !build_options.lang_yaml) return error.SkipZigTest;
@@ -3501,11 +3537,11 @@ test "fig_format_capabilities reports the per-format matrix" {
         fig_format_capabilities(@intFromEnum(FigFormat.toml)),
     );
     try std.testing.expectEqual(
-        if (build_options.lang_zon) read | serialize else 0, // no edit
+        if (build_options.lang_zon) read | edit | serialize else 0,
         fig_format_capabilities(@intFromEnum(FigFormat.zon)),
     );
     try std.testing.expectEqual(
-        if (build_options.lang_xml) read else 0, // reader-only
+        if (build_options.lang_xml) read | serialize else 0, // no in-place editor yet
         fig_format_capabilities(@intFromEnum(FigFormat.xml)),
     );
     try std.testing.expectEqual(

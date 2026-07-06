@@ -239,12 +239,15 @@ fn isSpace(c: u8) bool {
 }
 
 /// XML NameStartChar, ASCII subset plus any high byte (so UTF-8 names pass
-/// through without strict Unicode-class validation — deferred).
-fn isNameStart(c: u8) bool {
+/// through without strict Unicode-class validation — deferred). `pub`: the
+/// printer (`printer.zig`) reuses this exact grammar to validate a mapping key
+/// before emitting it as an element/attribute name, so the reader's and
+/// writer's notion of "valid Name" can never drift apart.
+pub fn isNameStart(c: u8) bool {
     return (c >= 'A' and c <= 'Z') or (c >= 'a' and c <= 'z') or c == '_' or c == ':' or c >= 0x80;
 }
 
-fn isNameChar(c: u8) bool {
+pub fn isNameChar(c: u8) bool {
     return isNameStart(c) or (c >= '0' and c <= '9') or c == '-' or c == '.';
 }
 

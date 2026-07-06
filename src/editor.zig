@@ -19,11 +19,16 @@ const log = std.log.scoped(.editor);
 const toml_edit = @import("languages/toml/editor_helper.zig");
 const yaml_edit = @import("languages/yaml/editor_helper.zig");
 const fig_edit = @import("languages/fig/editor_helper.zig");
+const zon_edit = @import("languages/zon/editor_helper.zig");
 // Language tags used by the comptime branches above.
 const Toml = @import("languages/toml/toml.zig").Language;
 const Yaml = @import("languages/yaml/yaml.zig").Language;
 const Fig = @import("languages/fig/fig.zig").Language;
-// Used only for the comptime comment-marker choice (ZON uses `//`, like Zig).
+// ZON's editing needs are small parameter swaps (comment marker, key/value
+// separator, key-quoting rule, container shape) rather than the structural
+// logic TOML/YAML/Fig delegate out — so, like JSON, it has no dedicated
+// per-op helpers here; only `zon_edit.appendZonFieldName` (the ZON dotted-key
+// quoting rule, shared with the printer's) lives in its editor_helper module.
 const Zon = @import("languages/zon/zon.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
@@ -37,6 +42,12 @@ pub fn Editor(comptime Language: type) type {
         // `#`. Plain JSON has no comments, but `.slashes` is harmless there since
         // no `//` line can exist.
         const comment_style: CommentStyle = if (Language == json.Language or Language == Zon) .slashes else .hash;
+
+        // The mapping key/value separator spliced by the generic flow-entry
+        // insert helpers (`insertFlowMapEntry`/`insertFlowEntry`). Every editable
+        // format but ZON writes `key: value`; ZON's struct-field syntax is
+        // `.key = value`.
+        const kv_sep: []const u8 = if (Language == Zon) " = " else ": ";
 
         allocator: std.mem.Allocator,
         source: std.ArrayList(u8) = .empty,
@@ -179,14 +190,22 @@ pub fn Editor(comptime Language: type) type {
 
         /// Render a logical mapping key into this format's key syntax for the
         /// `set` insert branch. Strict-JSON-family keys must be quoted and escaped
-        /// (`b` → `"b"`); YAML/TOML/ZON splice the key verbatim, as `insertKey`'s
-        /// other callers do. Always returns an owned slice (the caller frees it).
+        /// (`b` → `"b"`); YAML/TOML splice the key verbatim, as `insertKey`'s other
+        /// callers do. ZON's struct-field syntax always carries a leading `.`
+        /// (`b` → `.b`, quoted as `.@"has space"` when not a bare identifier).
+        /// Always returns an owned slice (the caller frees it).
         fn formatInsertKey(self: *Self, key: []const u8) ![]u8 {
             if (comptime Language == json.Language) {
                 var w = std.Io.Writer.Allocating.init(self.allocator);
                 defer w.deinit();
                 try json_string.writeQuoted(&w.writer, key);
                 return self.allocator.dupe(u8, w.written());
+            }
+            if (comptime Language == Zon) {
+                var out: std.ArrayList(u8) = .empty;
+                defer out.deinit(self.allocator);
+                try zon_edit.appendFieldName(&out, self.allocator, key);
+                return out.toOwnedSlice(self.allocator);
             }
             return self.allocator.dupe(u8, key);
         }
@@ -520,7 +539,7 @@ pub fn Editor(comptime Language: type) type {
             const span = parsed.span(node);
             const source = self.source.items;
             if (isFlow(source, span)) {
-                try self.prependFlowItem(span, node.kind.sequence != null, value_text);
+                try self.prependFlowItem(parsed, node, span, node.kind.sequence != null, value_text);
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
@@ -1100,6 +1119,19 @@ pub fn Editor(comptime Language: type) type {
             const source = self.source.items;
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
+            // ZON has no bare `key: value` document form (unlike YAML/JSON5,
+            // whose root can be a keyless top-level mapping): a `null` value —
+            // root or nested — promotes in place to a flow `.{ key = value }`
+            // container, so this needs no `is_root`/descend distinction.
+            if (comptime Language == Zon) {
+                try out.appendSlice(self.allocator, ".{ ");
+                try out.appendSlice(self.allocator, key_text);
+                try out.appendSlice(self.allocator, kv_sep);
+                try out.appendSlice(self.allocator, value_text);
+                try out.appendSlice(self.allocator, " }");
+                try self.replaceAtSpan(null_span, out.items);
+                return;
+            }
             if (is_root) {
                 // Empty document: the whole source becomes a single entry.
                 try out.appendSlice(self.allocator, key_text);
@@ -1136,32 +1168,54 @@ pub fn Editor(comptime Language: type) type {
                 // member by a newline. Splice after the last member's value so the
                 // new entry lands on its own line, not jammed before the brace.
                 if (std.mem.indexOfScalar(u8, source[last_end..close], '\n') != null) {
+                    // Column of the key's line, not the key node's own span start:
+                    // for ZON the key span covers only the bare identifier after
+                    // its leading `.` (the dot is a separate token), so anchoring
+                    // on the span would misindent by one column. Every other
+                    // format's key span already starts at that line's first
+                    // content byte, so this is equivalent for them.
                     const key_node = (try parsed.ast.firstChildKey(&node)).?;
-                    const col = columnOf(source, parsed.span(key_node).start);
+                    const col = columnOf(source, firstNonSpace(source, lineStartBefore(source, parsed.span(key_node).start)));
                     var out: std.ArrayList(u8) = .empty;
                     defer out.deinit(self.allocator);
                     try out.appendSlice(self.allocator, ",\n");
                     try out.appendNTimes(self.allocator, ' ', col);
                     try out.appendSlice(self.allocator, key_text);
-                    try out.appendSlice(self.allocator, ": ");
+                    try out.appendSlice(self.allocator, kv_sep);
                     try out.appendSlice(self.allocator, value_text);
                     try self.replaceAtSpan(Span.init(last_end, last_end), out.items);
                     return;
                 }
+                // Single-line layout: splice right after the last member's own
+                // value — NOT right before the closing brace (`span.end - 1`),
+                // which would land inside any padding space before `}` (`{ a: 1
+                // }` -> `{ a: 1 , b: 2}`, swallowing the closing pad and leaving
+                // none before the new entry). Landing at `last_end` keeps any such
+                // padding after the new entry instead.
+                var out: std.ArrayList(u8) = .empty;
+                defer out.deinit(self.allocator);
+                try out.appendSlice(self.allocator, ", ");
+                try out.appendSlice(self.allocator, key_text);
+                try out.appendSlice(self.allocator, kv_sep);
+                try out.appendSlice(self.allocator, value_text);
+                try self.replaceAtSpan(Span.init(last_end, last_end), out.items);
+                return;
             }
-            return self.insertFlowEntry(span, non_empty, key_text, value_text);
+            return self.insertFlowEntry(span, key_text, value_text);
         }
 
-        fn insertFlowEntry(self: *Self, span: Span, non_empty: bool, key_text: []const u8, value_text: []const u8) !void {
+        /// Insert the first entry into an EMPTY flow mapping (`{}` / ZON's
+        /// `.{}`): a tight `{key: value}` splice, unpadded — matching how
+        /// `insertFlowItem`'s empty-array case and the pre-existing JSON/YAML
+        /// empty-flow-map tests already splice (no space added around a
+        /// freshly-created single member).
+        fn insertFlowEntry(self: *Self, span: Span, key_text: []const u8, value_text: []const u8) !void {
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
-            const at = if (non_empty) blk: {
-                try out.appendSlice(self.allocator, ", ");
-                break :blk span.end - 1; // before the closing '}'
-            } else span.start + 1; // just after '{'
             try out.appendSlice(self.allocator, key_text);
-            try out.appendSlice(self.allocator, ": ");
+            try out.appendSlice(self.allocator, kv_sep);
             try out.appendSlice(self.allocator, value_text);
+            const at = flowOpenEnd(self.source.items, span); // just after '{' (or ZON's '.{')
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 
@@ -1194,16 +1248,25 @@ pub fn Editor(comptime Language: type) type {
                 return;
             }
             try out.appendSlice(self.allocator, value_text);
-            const at = span.start + 1; // just after '['
+            const at = flowOpenEnd(self.source.items, span); // just after '[' (or ZON's '.{')
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 
-        fn prependFlowItem(self: *Self, span: Span, non_empty: bool, value_text: []const u8) !void {
+        fn prependFlowItem(self: *Self, parsed: Document, node: AST.Node, span: Span, non_empty: bool, value_text: []const u8) !void {
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
             try out.appendSlice(self.allocator, value_text);
-            if (non_empty) try out.appendSlice(self.allocator, ", ");
-            const at = span.start + 1; // just after '['
+            // Splice right before the CURRENT first item's own span — not
+            // `flowOpenEnd` — so any padding space between the delimiter and that
+            // item (`[ a, b ]`) stays between the delimiter and the newly
+            // prepended item rather than being swallowed against it (`[0,  a,
+            // b]`, an extra space where the old padding and the new separator
+            // collided).
+            const at = if (non_empty) blk: {
+                try out.appendSlice(self.allocator, ", ");
+                const first = (try parsed.ast.child(&node)).?;
+                break :blk parsed.span(first).start;
+            } else flowOpenEnd(self.source.items, span); // just after '[' (or ZON's '.{')
             try self.replaceAtSpan(Span.init(at, at), out.items);
         }
 
@@ -1331,10 +1394,23 @@ fn dashColumn(source: []const u8, item_content_start: usize) usize {
 }
 
 /// Whether the container at `span` is written in flow style (`{...}`/`[...]`).
-/// The AST records no flow/block flag, so we sniff the first content byte.
+/// The AST records no flow/block flag, so we sniff the first content byte. ZON
+/// has no other container shape — every struct/array literal opens `.{` (its
+/// node span starts at the `.`, not the brace) — so it is unconditionally flow.
 pub fn isFlow(source: []const u8, span: Span) bool {
     const i = firstNonSpace(source, span.start);
-    return i < source.len and (source[i] == '{' or source[i] == '[');
+    if (i >= source.len) return false;
+    if (source[i] == '{' or source[i] == '[') return true;
+    return source[i] == '.' and i + 1 < source.len and source[i + 1] == '{';
+}
+
+/// Byte index just past a flow container's opening delimiter (`{`, `[`, or
+/// ZON's two-byte `.{`). Used to splice the first entry/item into an empty
+/// container, where `span.start` alone isn't past the delimiter for ZON.
+pub fn flowOpenEnd(source: []const u8, span: Span) usize {
+    const i = firstNonSpace(source, span.start);
+    if (i < source.len and source[i] == '.') return i + 2; // '.' + '{'
+    return i + 1;
 }
 
 /// Comment syntax for the owned-comment scan: `#` line comments (YAML/TOML) vs

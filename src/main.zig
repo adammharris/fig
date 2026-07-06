@@ -515,7 +515,7 @@ const Help = struct {
 
     fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|json5|yaml|toml|zon|canonical|fig|gron] [--output json|json5|yaml|toml|zon|canonical|fig|gron] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon|xml|canonical|fig|gron] [--output json|json5|yaml|toml|zon|xml|canonical|fig|gron] <file> [path]
             \\  -i, --input: input format of file (defaults to the file extension,
             \\    then to sniffing the file's contents if the extension is unknown)
             \\  -o, --output:   output format (defaults to the input format)
@@ -527,6 +527,13 @@ const Help = struct {
             \\    use `canonical`/`--lossless` for those. `-o fig` prints in
             \\    house style; use `fig fmt` to
             \\    rewrite a file in place instead of printing to stdout.
+            \\  xml: config-oriented, not a general XML tool — an element becomes
+            \\    a mapping, `@name` attributes and `#text` mixed content fold
+            \\    into it, repeated children become an array. `-o xml` requires
+            \\    the document to have exactly one root key; every scalar
+            \\    (numbers, booleans, ...) prints as plain text, since XML has no
+            \\    other type. Compiled in only with `-Dxml=true` (opt-in, off by
+            \\    default). No in-place editor yet (`edit`/`comment` reject it).
             \\  gron: a line-oriented `path = value;` projection (greppable, and
             \\    reversible with `-i gron`); must be selected explicitly, never
             \\    sniffed. Fidelity matches JSON (drops comments/anchors).
@@ -644,7 +651,10 @@ const Help = struct {
             \\    whose extension implies an embedded region (`.md`/`.markdown`) is
             \\    rejected here — use embed-archetype mode, or pass --input to force
             \\    whole-file conversion anyway.
-            \\  -i, --input, -o, --output: json, json5, yaml, toml, zon, canonical, fig.
+            \\  -i, --input, -o, --output: json, json5, yaml, toml, zon, xml, canonical,
+            \\    fig. `-o xml` requires the document to convert to have exactly one
+            \\    root key (see `get --help`'s `xml:` entry); xml is compiled in only
+            \\    with `-Dxml=true`.
             \\
             \\  Embed-archetype mode (--to-embed): rehouse a host document's
             \\    embedded region from one archetype's fence-and-content convention
@@ -1024,15 +1034,6 @@ pub fn main(init: std.process.Init) !void {
                 break :blk parsed;
             };
 
-            // XML is reader-only: a `--from`/detected source but never a `--to`
-            // target. Checked after detection so a sniffed-or-echoed `to` is caught
-            // too, keeping the serialize switches below total.
-            if (to == .xml) {
-                try stderr_terminal.writer.print("error: XML output is not yet supported (reader-only); XML may only be a `--from` source.\n", .{});
-                try stderr_terminal.writer.flush();
-                return error.UnsupportedOutputFormat;
-            }
-
             // Converting YAML to a non-YAML format resolves the reference layer
             // first (aliases → copies, merges → flattened, tags applied/dropped).
             // YAML→YAML keeps it intact for round-trip; JSON never has it.
@@ -1075,8 +1076,11 @@ pub fn main(init: std.process.Init) !void {
                     // (non-string key, YAML alias, scalar root) is the
                     // documented "no authoring spelling" gap — fall to
                     // `canonical`/`--lossless` with a different `--to` instead.
-                    .canonical, .fig => null,
-                    .xml => unreachable, // rejected up front (reader-only)
+                    // XML has no envelope of its own either: every scalar
+                    // collapses to element/attribute text regardless (see
+                    // `languages/xml/printer.zig`), so an envelope couldn't
+                    // preserve anything a plain print doesn't already lose.
+                    .canonical, .fig, .xml => null,
                 };
                 const decoded = try init.arena.allocator().create(fig.AST);
                 decoded.* = try fig.Lossless.decode(init.arena.allocator(), base_ast);
@@ -1109,7 +1113,7 @@ pub fn main(init: std.process.Init) !void {
                 .zon => .zon,
                 .canonical => .canonical,
                 .fig => .fig,
-                .xml => unreachable, // rejected up front (reader-only)
+                .xml => .xml,
                 .gron => unreachable, // handled by the early return above
             };
 
@@ -1885,11 +1889,6 @@ fn reformatSlice(
     quiet: bool,
     strict: bool,
 ) !([]u8) {
-    if (format == .xml) {
-        try term.writer.print("error: cannot format XML (reader-only; no printer).\n", .{});
-        try term.writer.flush();
-        return error.UnsupportedXmlFmt;
-    }
     if (format == .gron) {
         try term.writer.print("error: cannot format gron (a CLI projection, not a stored document format).\n", .{});
         try term.writer.flush();
@@ -1921,7 +1920,8 @@ fn reformatSlice(
         .zon => .zon,
         .canonical => .canonical,
         .fig => .fig,
-        .xml, .gron => unreachable, // rejected up front above
+        .xml => .xml,
+        .gron => unreachable, // rejected up front above
     };
 
     if (!quiet or strict) {
@@ -1986,11 +1986,6 @@ fn convertSlice(
     quiet: bool,
     strict: bool,
 ) !([]u8) {
-    if (to == .xml) {
-        try term.writer.print("error: cannot convert to XML (reader-only; no printer).\n", .{});
-        try term.writer.flush();
-        return error.UnsupportedXmlFmt;
-    }
     if (to == .gron) {
         try term.writer.print("error: cannot convert to gron (a CLI projection, not a stored document format).\n", .{});
         try term.writer.flush();
@@ -2033,8 +2028,9 @@ fn convertSlice(
             .yaml, .yml => .yaml,
             .toml => .toml,
             .zon => .zon,
-            .canonical, .fig => null,
-            .xml => unreachable, // rejected up front (reader-only)
+            // XML has no envelope of its own — see the matching comment on the
+            // `.get` action's twin switch above.
+            .canonical, .fig, .xml => null,
         };
         const decoded = try allocator.create(fig.AST);
         decoded.* = try fig.Lossless.decode(allocator, base_ast);
@@ -2053,7 +2049,8 @@ fn convertSlice(
         .zon => .zon,
         .canonical => .canonical,
         .fig => .fig,
-        .xml, .gron => unreachable, // rejected up front above
+        .xml => .xml,
+        .gron => unreachable, // rejected up front above
     };
 
     if (!quiet or strict) {
@@ -2992,6 +2989,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     output_override = .toml;
                 } else if (std.mem.eql(u8, fmt, "zon")) {
                     output_override = .zon;
+                } else if (std.mem.eql(u8, fmt, "xml")) {
+                    output_override = .xml;
                 } else if (std.mem.eql(u8, fmt, "canonical")) {
                     output_override = .canonical;
                 } else if (std.mem.eql(u8, fmt, "fig")) {

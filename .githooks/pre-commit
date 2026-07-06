@@ -38,3 +38,17 @@ case "$staged" in
         }
         ;;
 esac
+
+# .figl sources are the source of truth for build.zig.zon and the
+# .github/workflows/*.yml files (see tools/sync-figl.zig): catch a hand-edited
+# generated file, or a .figl edit whose regeneration wasn't committed, before
+# it lands. Fix with `zig build sync-figl` and stage the result.
+case "$staged" in
+    *.figl | *build.zig.zon* | *.github/workflows/ci.yml* | *.github/workflows/homebrew.yml* | *.github/workflows/release.yml*)
+        printf 'pre-commit: figl source or generated file staged — running check-figl\n'
+        ( cd "$root" && zig build check-figl ) || {
+            printf 'pre-commit: check-figl failed; run `zig build sync-figl` and stage the result (use --no-verify to bypass)\n' >&2
+            exit 1
+        }
+        ;;
+esac

@@ -17,14 +17,17 @@ const YamlPrinter = if (build_options.lang_yaml) @import("../languages/yaml/prin
 const TomlPrinter = if (build_options.lang_toml) @import("../languages/toml/printer.zig") else void;
 const ZonPrinter = if (build_options.lang_zon) @import("../languages/zon/printer.zig") else void;
 const FigPrinter = if (build_options.lang_fig) @import("../languages/fig/printer.zig") else void;
+const XmlPrinter = if (build_options.lang_xml) @import("../languages/xml/printer.zig") else void;
 // The canonical form is the AST's own 1:1 encoding — always compiled in (no
 // language gate), so it needs no `void` fallback or comptime guard below.
 const CanonicalPrinter = @import("../canonical/printer.zig");
 
 /// The canonical output format families. `canonical` (formerly `native`) is the
 /// AST's own 1:1 oracle encoding; `fig` is the human-facing authoring dialect
-/// (lossy at the edges — see src/languages/fig/DESIGN.md).
-pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, canonical, fig };
+/// (lossy at the edges — see src/languages/fig/DESIGN.md). `xml` requires its
+/// AST root to be a one-entry mapping (see `languages/xml/printer.zig`'s
+/// header) — anything else is `RootNotSingleElement`, not a silent fallback.
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, xml, canonical, fig };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -77,9 +80,13 @@ fn commentView(self: *const AST, options: SerializeOptions, buf: *AST) *const AS
 pub const SerializeError = Writer.Error || error{
     UnresolvedAlias, // a YAML `*alias` reached a non-YAML printer (materialize first)
     NullUnsupported, // a `null` reached a format with no null type (TOML)
-    NonStringKey, // a mapping key was not a string (TOML, ZON)
+    NonStringKey, // a mapping key was not a string (TOML, ZON, XML)
     FormatDisabled, // the target format was compiled out of this build
     NestingTooDeep, // container nesting exceeded the canonical printer's depth guard
+    RootNotSingleElement, // XML: the AST root was not a one-entry mapping
+    NestedSequenceUnsupported, // XML: a sequence with no element name to expand under
+    InvalidElementName, // XML: a mapping key is not a valid XML `Name`
+    NonScalarValue, // XML: an `@`-attribute or `#text` entry held a mapping/sequence
 };
 
 /// Render the whole AST to `writer` in the given format, using default options.
@@ -99,6 +106,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printWith(writer, ast, options) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .canonical => CanonicalPrinter.print(writer, ast),
         .fig => if (comptime build_options.lang_fig) FigPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
@@ -120,6 +128,7 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .xml => if (comptime build_options.lang_xml) XmlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .canonical => CanonicalPrinter.printNode(writer, ast, id, 0),
         .fig => if (comptime build_options.lang_fig) FigPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
     };

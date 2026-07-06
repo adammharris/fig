@@ -11,6 +11,6 @@
         "src",
         "fig.md",
         "LICENSE-MIT",
-        "LICENSE-APACHE"
+        "LICENSE-APACHE",
     },
 }

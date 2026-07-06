@@ -1,0 +1,159 @@
+name = Release (npm + crates.io)
+
+# Publish the npm package and the crates.io crate. There is no Zig package step:
+# Zig has no central registry — consumers `zig fetch` this repo at a git tag, so
+# pushing the tag *is* the Zig release. The Homebrew CLI release is a separate
+# workflow (homebrew.yml).
+#
+# DISABLED FOR NOW: runs only via manual `workflow_dispatch`. Re-enable automatic
+# tag releases by uncommenting the `push.tags` trigger below. The crate carries
+# the `license`, `description`, and `readme` crates.io needs (the README and
+# license text are vendored in from the repo root by the `vendor-rust` step that
+# runs before `cargo publish`).
+#
+# Required repository secrets (when enabled):
+# NPM_TOKEN             — npm automation token with publish rights
+# CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights
+on
+> workflow_dispatch = {}
+> push.tags = [v*.*.*]
+
+permissions.contents = read
+
+jobs.crate
+> name = Publish crate (crates.io)
+> runs-on = ubuntu-latest
+
+jobs.crate.steps[]
+> uses = actions/checkout@v4
++
+> # build.rs compiles the core, and `vendor-rust` bundles the Zig source into
+> # the published crate.
+> uses = mlugg/setup-zig@v2
+> with.version = 0.16.0
++
+> uses = dtolnay/rust-toolchain@stable
++
+> name = Verify tag matches the canonical version
+> if = github.ref_type == 'tag'
+> run = '''
+canonical=$(grep -E '^\s*\.version\s*=' build.zig.zon | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+tag="${GITHUB_REF_NAME#v}"
+if [ "$canonical" != "$tag" ]; then
+  echo "::error::tag $GITHUB_REF_NAME ($tag) != build.zig.zon version ($canonical)"
+  exit 1
+fi
+echo "version $canonical matches tag $GITHUB_REF_NAME"
+
+'''
++
+> run = cargo test --workspace --locked
+> working-directory = bindings/rust
++
+> # Vendors the Zig source into the fig crate AND fans the root LICENSE files
+> # out into both crate dirs — must run before either publish so the license
+> # text is present in each packaged tarball.
+> name = Vendor the Zig source and licenses into the crates
+> run = zig build vendor-rust
++
+> # Publishes are idempotent: re-running the release for a version that's
+> # already on crates.io is a no-op, but auth/permission/network failures
+> # still fail the job. crates.io reports a duplicate as "already uploaded"
+> # / "already exists"; only that exact signal is swallowed.
+> # fig-macros must be on crates.io before fig.
+> name = Publish fig-macros
+> working-directory = bindings/rust
+> env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
+> run = '''
+if out=$(cargo publish -p fig-macros 2>&1); then
+  echo "$out"
+else
+  echo "$out"
+  if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
+    echo "::notice::fig-macros version already on crates.io — skipping"
+  else
+    exit 1
+  fi
+fi
+
+'''
++
+> name = Publish fig
+> working-directory = bindings/rust
+> env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
+> run = '''
+if out=$(cargo publish -p fig 2>&1); then
+  echo "$out"
+else
+  echo "$out"
+  if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
+    echo "::notice::fig version already on crates.io — skipping"
+  else
+    exit 1
+  fi
+fi
+
+'''
+
+jobs.npm
+> name = Publish package (npm)
+> runs-on = ubuntu-latest
+
+jobs.npm.steps[]
+> uses = actions/checkout@v4
++
+> uses = mlugg/setup-zig@v2
+> with.version = 0.16.0
++
+> uses = actions/setup-node@v4
+> with
+> > # Node 24+: the test suite uses `using` (explicit resource management),
+> > # which only parses under `--experimental-transform-types` type
+> > # stripping on Node 24 and later.
+> > node-version = 24
+> > registry-url = https://registry.npmjs.org
+> > cache = npm
+> > cache-dependency-path = bindings/typescript/package-lock.json
++
+> name = Verify tag matches the package version
+> if = github.ref_type == 'tag'
+> run = '''
+pkg=$(node -p "require('./bindings/typescript/package.json').version")
+tag="${GITHUB_REF_NAME#v}"
+if [ "$pkg" != "$tag" ]; then
+  echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
+  exit 1
+fi
+echo "version $pkg matches tag $GITHUB_REF_NAME"
+
+'''
++
+> run = npm ci
+> working-directory = bindings/typescript
++
+> run = npm run build
+> working-directory = bindings/typescript
++
+> run = npm test
+> working-directory = bindings/typescript
++
+> # Idempotent like the crate publishes: npm reports a duplicate version as
+> # E403 "cannot publish over the previously published versions" — only that
+> # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
+> # (a different E403, e.g. "Forbidden"/"do not have permission") still fails.
+> name = Publish to npm
+> working-directory = bindings/typescript
+> env.NODE_AUTH_TOKEN = ${{ secrets.NPM_TOKEN }}
+> run = '''
+if out=$(npm publish --access public 2>&1); then
+  echo "$out"
+else
+  echo "$out"
+  if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
+    echo "::notice::npm version already published — skipping"
+  else
+    exit 1
+  fi
+fi
+
+'''

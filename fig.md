@@ -2,7 +2,7 @@
 title = fig
 author = adammharris
 created = 2026-05-08
-updated = 2026-07-04T11:19:34-06:00
+updated = 2026-07-05T21:46:34-06:00
 contents = [[fig docs](docs/docs.md)]
 ```
 
@@ -22,92 +22,30 @@ It currently supports the following formats:
 - YAML (1.2.2 and 1.1)
 - JSON (strict, JSONC, JSON5)
 - TOML (1.1 and 1.2)
-- ZON (Zig Object Notation) (read, write, but no editing yet)
-- XML (experimental, read-only)
-- Fig (.figl), an in-house authoring dialect.
+- ZON (Zig Object Notation)
+- XML (experimental, not included by default)
+- Fig (.figl), an in-house authoring dialect authored by yours truly!
 
-## Usage
+And you can use `fig` in the following programming languages:
 
-`fig` has a feature-complete C ABI as well as bindings in Rust and Typescript. Use `fig.Language.detect()` to discover the kind of format a document is — including the fig dialect itself, when nothing stricter (JSON/ZON/XML/TOML) claims it and it isn't so plain that YAML would. Use the language's parser (for example, `fig.Language.JSON.parse()`) to convert the document to an AST. Or use `fig.Embed.extract(allocator, content, .FrontmatterYaml)` to extract a document from a markdown file's frontmatter — `fig.Embed.detect(content)` sniffs which archetype (YAML/JSON/fig frontmatter, YAML endmatter) a host document actually uses. Then, edit with `fig.Editor(fig.Language.YAML)` or convert with `document.ast.serialize(&writer, .<format>)`.
+- [Zig](docs/zig.md)
+- [Rust](docs/rust.md)
+- [Typescript](docs/typescript.md) (experimental)
+- C (not tested, but likely works)
+
+## Command-line interface
 
 The CLI mirrors both: `fig get`/`fig fmt`/etc. fall back to content-sniffing when a file's extension doesn't pin its format, and `fig convert <file> --output <format>` (or `--to-embed <archetype>` to rehouse a host document's embedded region — e.g. YAML frontmatter → JSON frontmatter — in place) converts a file from one format to another, in place, the cross-format twin of `fig fmt`. Run `fig convert --help` for the full flag set.
 
-There are no docs at the moment, but I have endeavored to make the code readable and well-organized. Don't be scared to take a peek! (Unless it is the YAML parser! 😵‍💫)
-
-### Zig
-
-To add `fig` as a dependency, run `zig fetch --save https://github.com/adammharris/fig`. Then you can reference it in `build.zig`: `exe.root_module.addImport("fig", fig_dep.module("fig"))`
-
-```zig
-const std = @import("std");
-const fig = @import("fig");
-
-pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Parse JSON into a Document (the AST plus source spans).
-    const doc = try fig.Language.JSON.Parser.parse(allocator, "{\"name\":\"fig\",\"nums\":[1,2]}", .JSON);
-    defer doc.deinit(allocator);
-
-    // Convert to YAML
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try doc.ast.serialize(&out.writer, .yaml);
-    std.debug.print("{s}", .{out.written()}); // name: fig\nnums:\n- 1\n- 2\n
-}
-```
-
-### Rust
-
-`fig` can be compiled without certain languages as features. Note that you need Zig installed in order to install `fig` into your project. `fig`'s Rust bindings also carry a `serde` feature. Alternatively, `fig` has `serde`-like features and may be able to replace `serde` in your project. Diaryx currently uses `fig` in production as a `serde` replacement.
-
-```toml
-[dependencies]
-fig = { git = "https://github.com/adammharris/fig" }
-```
-
-```rust
-use fig::{Document, Format};
-
-fn main() -> Result<(), fig::Error> {
-    // `Document::serialize` is the cross-format primitive: it preserves comments
-    // where the target allows and collapses YAML's reference layer on the way out.
-    let doc = Document::parse(br#"{"name":"fig","nums":[1,2]}"#, Format::Json)?;
-    println!("{}", doc.serialize(Format::Yaml)?);
-
-    // Or read the whole document into an owned Value tree.
-    let value = doc.to_value()?;
-    println!("{value:?}");
-    Ok(())
-}
-```
-
-### TypeScript
-
-The native core ships compiled to WebAssembly and embedded in the package, so it
-loads synchronously and runs identically in Node and the browser.
-
-```ts
-import { Document, Format, parse } from "@adammharris/fig";
-
-// A Document owns a native handle — release it with `dispose()`.
-const doc = Document.parse('{"name":"fig","nums":[1,2]}', Format.Json);
-try {
-  console.log(doc.serialize(Format.Yaml)); // name: fig\nnums:\n- 1\n- 2\n
-} finally {
-  doc.dispose();
-}
-
-// Or parse straight to plain JS values; the handle is released for you.
-console.log(parse('{"name":"fig"}', Format.Json)); // { name: "fig" }
-```
+I have
 
 ## Planned features
 
-- Expand editor to include ZON
-- Better ergonomics for the Typescript bindings
+- Better ergonomics and testing for the Typescript bindings
+- Styling directives (maintain styling across formats, such as mapping TOML inline->YAML inline)
+- More distribution options (package managers, etc.)
+- More bindings
+- Advanced filtering/querying capabilties ("convert to this format, except without this node")
 
 ## Fine print
 
@@ -139,4 +77,4 @@ I am also thankful for the `toml-edit` Rust crate, which provided inspiration fo
 
 ## Contact Me
 
-<adam@diaryx.org>, or leave an issue.
+<amh421@icloud.com>, or leave an issue.

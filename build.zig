@@ -31,12 +31,16 @@ pub fn build(b: *std.Build) void {
     // `.fig` format exists and `Language.detect()` sniffs every compiled-in
     // language rather than assuming a JSON base. A build with no language at all
     // is rejected at the call sites that need one (e.g. the C ABI editor union).
-    // Default: everything on.
+    // Default: everything on, EXCEPT xml — it stays opt-in (`-Dxml=true`) even
+    // in a full build: it is the newest/least battle-tested format (writer
+    // added after the others, no conformance harness wired up yet — see
+    // `src/languages/xml/conformance.zig`), so it shouldn't ride along silently
+    // in every consumer's default build until it has earned that.
     const enable_json = b.option(bool, "json", "Include JSON/JSONC/JSON5 support") orelse true;
     const enable_yaml = b.option(bool, "yaml", "Include YAML support") orelse true;
     const enable_toml = b.option(bool, "toml", "Include TOML support") orelse true;
     const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
-    const enable_xml = b.option(bool, "xml", "Include XML support") orelse true;
+    const enable_xml = b.option(bool, "xml", "Include XML support (opt-in; default off)") orelse false;
     const enable_fig = b.option(bool, "fig", "Include the fig authoring dialect support") orelse true;
 
     const options = b.addOptions();
@@ -379,6 +383,40 @@ pub fn build(b: *std.Build) void {
     const version_floor_step = b.step("version-floor", "Check each binding's version is >= the core version it embeds");
     version_floor_step.dependOn(&version_floor_run.step);
 
+    // The `.figl` files under figl/ (build.zig.figl, ci.figl, homebrew.figl,
+    // release.figl) are the source of truth for their generated counterparts
+    // (build.zig.zon, the three .github/workflows/*.yml files) — the inverse
+    // of the usual setup,
+    // dogfooding fig's own cross-format conversion for fig's own release
+    // infra. This tool shells out to the just-built `fig` binary (`fig get -o
+    // <format>`) to regenerate them; it never re-implements parsing/printing
+    // itself. `sync-figl` writes; `check-figl` (used by CI and the pre-commit
+    // hook, via `zig build check`) fails if a destination is stale, without
+    // writing. Git state (the destination files) isn't a declared input, so
+    // neither run may be served from cache.
+    const sync_figl = b.addExecutable(.{
+        .name = "sync_figl",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/sync-figl.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const sync_figl_run = b.addRunArtifact(sync_figl);
+    sync_figl_run.addArtifactArg(exe);
+    sync_figl_run.addArg(b.pathFromRoot("."));
+    sync_figl_run.has_side_effects = true;
+    const sync_figl_step = b.step("sync-figl", "Regenerate build.zig.zon + the .github/workflows/*.yml files from their .figl sources");
+    sync_figl_step.dependOn(&sync_figl_run.step);
+
+    const check_figl_run = b.addRunArtifact(sync_figl);
+    check_figl_run.addArtifactArg(exe);
+    check_figl_run.addArg(b.pathFromRoot("."));
+    check_figl_run.addArg("--check");
+    check_figl_run.has_side_effects = true;
+    const check_figl_step = b.step("check-figl", "Fail if build.zig.zon / .github/workflows/*.yml are stale relative to their .figl sources");
+    check_figl_step.dependOn(&check_figl_run.step);
+
     // One-stop release gate: every version/ABI guard behind a single command, so
     // "did I bump correctly?" is `zig build check` instead of remembering four
     // separate invocations across two build systems. It depends on the three Zig
@@ -386,10 +424,11 @@ pub fn build(b: *std.Build) void {
     // guard that lives in cargo's world rather than zig's (it diffs the native
     // Rust API, which never crosses the C ABI the Zig tools inspect). A
     // TypeScript API guard can hang off this same step later the same way.
-    const check_step = b.step("check", "Pre-release gate: zig test + abi/semver/floor guards + cargo-semver-checks + rust & typescript tests (binding suites skip with a note if their toolchain is missing)");
+    const check_step = b.step("check", "Pre-release gate: zig test + abi/semver/floor/figl guards + cargo-semver-checks + rust & typescript tests (binding suites skip with a note if their toolchain is missing)");
     check_step.dependOn(abi_check_step);
     check_step.dependOn(semver_check_step);
     check_step.dependOn(version_floor_step);
+    check_step.dependOn(check_figl_step);
 
     // cargo-semver-checks guards the native Rust public surface. Mirror CI: pick
     // the most recent `v*` tag as the baseline and skip cleanly when there is
