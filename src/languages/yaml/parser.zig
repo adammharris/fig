@@ -1505,6 +1505,16 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
 
             const key_span = self.node_spans.items[key_id];
             const value_span = self.node_spans.items[value_id];
+            // The `keyvalue` pair is a synthetic wrapper, not a node that any
+            // comment leads: its key already claimed the entry's leading
+            // comments when it was built. When the value is a block collection,
+            // this wrapper is constructed lazily as that value closes at a
+            // dedent — which can be *after* a following sibling's leading
+            // comment was already buffered. Claiming here would steal that
+            // comment from the next entry, so park like a container node and
+            // let the buffer fall through to the sibling's key.
+            const prev_parking = self.parking_container;
+            self.parking_container = true;
             const pair_id = try self.addNode(.{ .keyvalue = .{
                 .key = key_id,
                 .value = value_id,
@@ -1512,6 +1522,7 @@ fn finishValue(self: *Parser, value_id: AST.Node.Id) ParserError!void {
                 .start = key_span.start,
                 .end = value_span.end,
             });
+            self.parking_container = prev_parking;
 
             self.attachChild(parent, pair_id);
         },
@@ -2500,6 +2511,41 @@ test "yaml: captures leading/trailing comments; block-scalar # stays content" {
     try testing.expect(text_val.kind == .string);
     try testing.expect(std.mem.indexOf(u8, text_val.kind.string, "# not a comment") != null);
     try testing.expect(ast.comments(kv_text.value).trailing == null);
+}
+
+test "yaml: comment after a block-collection value leads the next sibling, not the pair wrapper" {
+    // Regression: `with:`'s block-mapping value closes at a dedent, and the
+    // synthetic `keyvalue` wrapper for it used to be built there — *after* the
+    // following `run` entry's leading comment was buffered — and claim it. The
+    // comment must lead `run`, not vanish onto the `with` pair.
+    const doc = try Parser.parse(testing.allocator,
+        \\steps:
+        \\- uses: checkout
+        \\  with:
+        \\    version: one
+        \\  # leads run
+        \\- run: build
+    , .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const ast = doc.ast;
+    const root = ast.nodes[ast.root];
+
+    // steps -> sequence of two item mappings.
+    const kv_steps = ast.nodes[root.kind.mapping.?].kind.keyvalue;
+    const seq = ast.nodes[kv_steps.value];
+    const item1 = ast.nodes[seq.kind.sequence.?];
+    const item2 = ast.nodes[item1.next_sibling.?];
+
+    // The comment leads the `run` key of the second item — its rightful home.
+    const run_pair = ast.nodes[item2.kind.mapping.?].kind.keyvalue;
+    const run_leading = ast.comments(run_pair.key).leading;
+    try testing.expect(run_leading.len == 1);
+    try testing.expectEqualStrings("leads run", run_leading[0].text);
+
+    // And it was NOT stolen by the `with` pair inside the first item.
+    const uses_pair = ast.nodes[item1.kind.mapping.?].kind.keyvalue;
+    const with_pair_id = ast.nodes[uses_pair.value].next_sibling; // uses -> with
+    if (with_pair_id) |wid| try testing.expect(ast.comments(wid).leading.len == 0);
 }
 
 test "yaml: comment-free document carries no comment table" {
