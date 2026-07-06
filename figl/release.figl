@@ -80,7 +80,7 @@ echo "version $canonical matches tag $GITHUB_REF_NAME"
 > working-directory = bindings/rust
 > env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
 > run = '''
-if out=$(cargo publish -p fig-macros 2>&1); then
+if out=$(cargo publish -p fig-macros --allow-dirty 2>&1); then
   echo "$out"
 else
   echo "$out"
@@ -97,7 +97,7 @@ fi
 > working-directory = bindings/rust
 > env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
 > run = '''
-if out=$(cargo publish -p fig 2>&1); then
+if out=$(cargo publish -p fig --allow-dirty 2>&1); then
   echo "$out"
 else
   echo "$out"
