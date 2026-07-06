@@ -15,8 +15,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..", "..");
 const srcDir = resolve(here, "..", "src");
 
-console.error("· zig build wasm");
-execFileSync("zig", ["build", "wasm"], { cwd: repoRoot, stdio: "inherit" });
+// ZON is left out of the default published module. It's the newest editable
+// format and the one least likely to be needed by a typical JSON/YAML/TOML/Fig
+// consumer, so it's excluded to keep the inlined base64 payload smaller for
+// everyone else. Set FIG_WASM_ZON=1 to build a module with it included — that
+// module supports ZON editing at full parity with the other formats (see
+// docs/typescript.md's Formats section). Either way, check `capabilities()` at
+// runtime rather than assuming — don't hard-code which module you're running.
+const includeZon = process.env.FIG_WASM_ZON === "1";
+const zigArgs = ["build", "wasm", includeZon ? "-Dzon=true" : "-Dzon=false"];
+
+console.error(`· zig ${zigArgs.join(" ")}`);
+execFileSync("zig", zigArgs, { cwd: repoRoot, stdio: "inherit" });
 
 const wasmPath = join(repoRoot, "zig-out", "bin", "fig.wasm");
 const wasm = readFileSync(wasmPath);

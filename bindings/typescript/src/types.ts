@@ -3,10 +3,16 @@ import { Status } from "./ffi.ts";
 
 export { Status };
 
-/** A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`/
- *  `Toml`/`Fig`; serialization additionally supports `Zon`. Values match the C
- *  ABI (`Json5 = 7` is appended, leaving a gap at the reader-only `Xml = 6`;
- *  `Fig` is appended after it for the same reason). */
+/** A config format. `Json`/`Jsonc`/`Json5`/`Yaml`/`Toml`/`Fig` parse, edit, and
+ *  serialize in the module published to npm. `Zon` is fully editable too — full
+ *  parity with the other formats — but is **not compiled into the default
+ *  published wasm module**; it's left out to keep the inlined payload smaller,
+ *  since it's the newest format and the least likely to be needed by a typical
+ *  consumer. Build with `FIG_WASM_ZON=1 npm run build:wasm` to get a module
+ *  with ZON support, and call {@link capabilities} at runtime rather than
+ *  assuming which module you're running. Values match the C ABI (`Json5 = 7`
+ *  is appended, leaving a gap at the reader-only `Xml = 6`; `Fig` is appended
+ *  after it for the same reason). */
 export enum Format {
   Json = 1,
   Jsonc = 2,

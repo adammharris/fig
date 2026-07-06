@@ -29,11 +29,20 @@ import {
   toJS,
 } from "../src/index.ts";
 
+// ZON is opt-in in the wasm module under test: the default build (what's
+// published to npm) excludes it to keep the inlined payload small, and only a
+// `FIG_WASM_ZON=1 npm run build:wasm` module has it compiled in. Gate every
+// ZON assertion on the loaded module's actual capabilities rather than
+// assuming either way, so `npm test` passes against both builds.
+const zonBuiltIn = capabilities(Format.Zon).read;
+
 test("parse to plain JS across formats", () => {
   assert.deepEqual(parse('{"name":"fig","n":42}', Format.Json), { name: "fig", n: 42 });
   assert.deepEqual(parse("name: fig\ntags:\n- a\n- b\n", Format.Yaml), { name: "fig", tags: ["a", "b"] });
   assert.deepEqual(parse("name = \"fig\"\nn = 7\n", Format.Toml), { name: "fig", n: 7 });
-  assert.deepEqual(parse(".{ .name = \"fig\", .n = 3 }", Format.Zon), { name: "fig", n: 3 });
+  if (zonBuiltIn) {
+    assert.deepEqual(parse(".{ .name = \"fig\", .n = 3 }", Format.Zon), { name: "fig", n: 3 });
+  }
   assert.deepEqual(parse("name = fig\nn = 42\n", Format.Fig), { name: "fig", n: 42 });
 });
 
@@ -73,7 +82,9 @@ test("extended scalars (TOML datetime, ZON enum/char) read faithfully", () => {
   }
 
   // ZON char literals report as Int; enum literals as String. Both recover.
-  {
+  // (Only when the module under test was built with ZON support — see the
+  // `zonBuiltIn` comment above.)
+  if (zonBuiltIn) {
     using doc = Document.parse(".{ .mode = .fast, .c = 'a' }", Format.Zon);
     assert.deepEqual(doc.toValue(), V.map([
       [V.string("mode"), V.extended(ExtKind.EnumLiteral, "fast")],
@@ -112,8 +123,11 @@ test("serialize honors JSON pretty/compact options", () => {
     serialize(value, Format.Json, { indent: 4 }),
     '{\n    "name": "fig",\n    "nums": [\n        1,\n        2\n    ]\n}\n',
   );
-  // ZON honors pretty/compact too (keeping its idiomatic four-space indent).
-  assert.equal(serialize(value, Format.Zon, { pretty: false }), ".{ .name = \"fig\", .nums = .{ 1, 2 } }\n");
+  // ZON honors pretty/compact too (keeping its idiomatic four-space indent),
+  // when the module under test was built with ZON support.
+  if (zonBuiltIn) {
+    assert.equal(serialize(value, Format.Zon, { pretty: false }), ".{ .name = \"fig\", .nums = .{ 1, 2 } }\n");
+  }
 });
 
 test("serialize honors the TOML width option (inline vs. section)", () => {

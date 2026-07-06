@@ -1,7 +1,7 @@
 {
   "name": "@adammharris/fig",
   "version": "2.0.0",
-  "description": "JSON/JSONC/JSON5/YAML/TOML/ZON parsing, comment-preserving editing, and cross-format serialization, backed by a Zig core compiled to WebAssembly.",
+  "description": "JSON/JSONC/JSON5/YAML/TOML parsing (plus optional ZON), comment-preserving editing, and cross-format serialization, backed by a Zig core compiled to WebAssembly.",
   "type": "module",
   "publishConfig": {
     "access": "public"

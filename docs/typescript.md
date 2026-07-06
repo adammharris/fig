@@ -9,7 +9,8 @@ part_of = [docs](docs.md)
 # fig for TypeScript & JavaScript
 
 `fig` parses, **edits**, and serializes configuration files — JSON, JSONC, JSON5,
-YAML, TOML, ZON, and the native `fig` dialect — from one small package. Its
+YAML, TOML, and the native `fig` dialect — from one small package (ZON too, if
+you build your own module — see [Formats](#formats)). Its
 distinguishing feature is *comment-preserving editing*: you can change one value
 deep in a YAML or TOML file and every comment, blank line, key order, and quoting
 style elsewhere stays byte-for-byte identical. It also converts losslessly
@@ -106,17 +107,30 @@ cfg.port; // typed as number
 | `Json5`  |  ✅   |  ✅  |    ✅     | Unquoted keys, trailing commas, etc. |
 | `Yaml`   |  ✅   |  ✅  |    ✅     | YAML 1.2.2 / 1.1.                    |
 | `Toml`   |  ✅   |  ✅  |    ✅     | TOML 1.1 / 1.2, incl. datetimes.     |
-| `Zon`    |  ✅   |      |    ✅     | Zig Object Notation.                 |
+| `Zon`    |  ⚠️   |  ⚠️  |    ⚠️     | Zig Object Notation — opt-in build, see below. |
 | `Fig`    |  ✅   |  ✅  |    ✅     | The native `fig` authoring dialect.  |
 
-Don't hard-code that table — ask the build at runtime, since a format can be
-compiled out:
+`Zon` is fully editable — full parity with every other format — but it is
+**not compiled into the wasm module published to npm**. It's the newest
+editable format and the one least likely to be needed by a typical
+JSON/YAML/TOML/Fig consumer, so it's left out to keep the inlined base64
+payload smaller for everyone else. To get a module with ZON support, build your
+own from a checkout:
+
+```sh
+FIG_WASM_ZON=1 npm run build:wasm
+```
+
+That module parses, edits, and serializes `Format.Zon` exactly like any other
+format. Whichever module you're running, don't hard-code the table above — ask
+the build at runtime, since a format can be compiled out:
 
 ```ts
 import { capabilities, Format } from "@adammharris/fig";
 
 capabilities(Format.Toml); // → { read: true, edit: true, serialize: true }
-capabilities(Format.Zon);  // → { read: true, edit: false, serialize: true }
+capabilities(Format.Zon);  // → { read: false, edit: false, serialize: false } in the published module
+                           // → { read: true, edit: true, serialize: true } after a FIG_WASM_ZON=1 build
 ```
 
 ## Reading data
