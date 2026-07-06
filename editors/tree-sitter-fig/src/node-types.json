@@ -42,6 +42,10 @@
             "named": true
           },
           {
+            "type": "invalid_annotated_string",
+            "named": true
+          },
+          {
             "type": "multiline_double",
             "named": true
           },
@@ -153,6 +157,10 @@
           },
           {
             "type": "flow",
+            "named": true
+          },
+          {
+            "type": "invalid_annotated_string",
             "named": true
           },
           {
@@ -535,10 +543,6 @@
     "named": true
   },
   {
-    "type": "bool",
-    "named": false
-  },
-  {
     "type": "boolean",
     "named": true
   },
@@ -559,16 +563,8 @@
     "named": true
   },
   {
-    "type": "date",
-    "named": false
-  },
-  {
     "type": "datetime",
     "named": true
-  },
-  {
-    "type": "datetime",
-    "named": false
   },
   {
     "type": "enum",
@@ -584,6 +580,10 @@
   },
   {
     "type": "integer",
+    "named": true
+  },
+  {
+    "type": "invalid_annotated_string",
     "named": true
   },
   {
@@ -613,10 +613,6 @@
   {
     "type": "string_sink",
     "named": true
-  },
-  {
-    "type": "time",
-    "named": false
   },
   {
     "type": "{",

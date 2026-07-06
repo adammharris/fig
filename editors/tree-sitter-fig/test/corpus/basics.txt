@@ -459,3 +459,79 @@ tags = [a#glued, [Blog](/x)#frag]
       (flow_array
         (flow_bare)
         (flow_bracket_led_bare)))))
+
+==================
+radix integers: hex, octal, binary
+==================
+
+x = 0o17
+y = 0b101
+z = 0xFF
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    value: (number)))
+
+==================
+quoted RHS under a non-string annotation is invalid, not a real string
+==================
+
+n: int = "42"
+f: float = '3.5'
+flag: bool = "true"
+when: datetime = "2026-07-01T12:00:00Z"
+s: string = "hello"
+
+---
+
+(document
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (invalid_annotated_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (invalid_annotated_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (invalid_annotated_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (invalid_annotated_string))
+  (assignment
+    key: (keypath
+      (key
+        (bare_key)))
+    (type_annotation
+      (type))
+    value: (string_double)))

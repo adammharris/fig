@@ -176,7 +176,11 @@ const Collector = struct {
     }
 
     fn checkValue(self: *Collector, id: AST.Node.Id, path: []const u8) Allocator.Error!void {
-        const loss = valueLoss(self.format, self.ast.nodes[id].kind) orelse return;
+        // `path.len == 0` uniquely identifies the node `analyze` was called
+        // with (see `Warning.path`'s doc comment) — every recursive call below
+        // builds a non-empty dotted/`[i]` child path, so this can't
+        // false-positive on a deeply nested node.
+        const loss = valueLoss(self.format, self.ast.nodes[id].kind, path.len == 0) orelse return;
         // Under lossless, unrepresentable values are enveloped, not lost.
         if (self.options.lossless) return;
         try self.add(.{ .code = loss.code, .cause = .format_limitation, .path = path, .note = loss.note });
@@ -232,16 +236,30 @@ fn indexPath(arena: Allocator, parent: []const u8, i: usize) Allocator.Error![]c
 const Loss = struct { code: Warning.Code, note: []const u8 };
 
 /// The value loss serializing `kind` to `format` would cause, or null if none.
-/// Lossless suppression is the caller's concern (`checkValue`).
-fn valueLoss(format: Format, kind: AST.Node.Kind) ?Loss {
+/// Lossless suppression is the caller's concern (`checkValue`). `is_root`
+/// distinguishes the node `analyze` was called with from a nested descendant —
+/// only fig's root-position rule (below) depends on it; every other branch
+/// ignores it.
+fn valueLoss(format: Format, kind: AST.Node.Kind, is_root: bool) ?Loss {
     switch (format) {
         // Canonical is the lossless oracle: every kind round-trips.
         .canonical => return null,
-        // fig natively represents every kind. The `extended` scalars that lack a
-        // bare spelling (char, enum atom, non-finite float) round-trip losslessly
-        // via an explicit `: char`/`: enum`/`: float` annotation — a syntax choice,
-        // not a value loss (see `src/languages/fig/printer.zig`'s `writeExtended`).
-        .fig => return null,
+        // fig natively represents every kind EXCEPT a scalar/null/extended/alias
+        // sitting at the document root: the fig dialect's root must be a map or
+        // a sequence (see `src/languages/fig/printer.zig`'s `root`, which
+        // hard-errors with `FigUnrepresentableRoot` rather than emit
+        // non-conforming output for exactly this case). Everywhere else, the
+        // `extended` scalars that lack a bare spelling (char, enum atom,
+        // non-finite float) round-trip losslessly via an explicit
+        // `: char`/`: enum`/`: float` annotation — a syntax choice, not a value
+        // loss (see `writeExtended`).
+        .fig => {
+            if (is_root) switch (kind) {
+                .mapping, .sequence => return null,
+                else => return .{ .code = .value_dropped, .note = rootScalarNote(kind) },
+            };
+            return null;
+        },
         // Plain JSON / JSONC: no datetimes, enums, chars; non-finite floats quote.
         .json, .jsonc => switch (kind) {
             .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
@@ -314,6 +332,27 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
             .json, .jsonc => "quoted string",
             else => "string",
         },
+    };
+}
+
+/// Describes `kind` for the `value_dropped` note when it is fig's unique
+/// root-position loss (see `valueLoss`'s `.fig` branch). Never called for
+/// `.mapping`/`.sequence` (the caller already excludes those) or the
+/// container-only `.keyvalue` kind, which never reaches a value-loss check.
+fn rootScalarNote(kind: AST.Node.Kind) []const u8 {
+    return switch (kind) {
+        .null_ => "null",
+        .boolean => "boolean",
+        .number => "number",
+        .string => "string",
+        .alias => "alias",
+        .extended => |e| switch (e.kind) {
+            .enum_literal => "enum",
+            .char_literal => "char",
+            .number_special => "number",
+            .offset_datetime, .local_datetime, .local_date, .local_time => "datetime",
+        },
+        .mapping, .sequence, .keyvalue => unreachable,
     };
 }
 
@@ -432,9 +471,14 @@ test "char literal is native to fig, degrades to a number elsewhere" {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
+    // Wrapped in a mapping (not bare at the root) so this exercises the
+    // char-literal KIND's capability, not fig's separate root-position rule
+    // (see "fig root scalar is flagged as unrepresentable" below).
     const Build = struct {
         fn f(b: *AST.Builder) !AST.Node.Id {
-            return b.addExtended(.char_literal, "65"); // 'A'
+            const k = try b.addString("a");
+            const v = try b.addExtended(.char_literal, "65"); // 'A'
+            return b.addMapping(&.{.{ .key = k, .value = v }});
         }
     };
 
@@ -447,6 +491,44 @@ test "char literal is native to fig, degrades to a number elsewhere" {
     try testing.expectEqual(@as(usize, 1), json.len);
     try testing.expectEqual(Warning.Code.type_degraded, json[0].code);
     try testing.expectEqualStrings("number", json[0].note);
+}
+
+test "fig root scalar is flagged as unrepresentable, a root map/sequence is not" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // A bare number sitting at the document root: the fig dialect's root must
+    // be a map or a sequence (see `languages/fig/printer.zig`'s `root`, which
+    // hard-errors with `FigUnrepresentableRoot` for exactly this AST shape) —
+    // this is defense in depth so `--strict` catches it independent of the
+    // printer's hard error.
+    const ScalarRoot = struct {
+        fn f(b: *AST.Builder) !AST.Node.Id {
+            return b.addNumberRaw("42", false);
+        }
+    };
+    const scalar = try analyzeBuilt(arena, ScalarRoot.f, .fig, .{});
+    try testing.expectEqual(@as(usize, 1), scalar.len);
+    try testing.expectEqual(Warning.Code.value_dropped, scalar[0].code);
+    try testing.expectEqual(Warning.Cause.format_limitation, scalar[0].cause);
+    try testing.expectEqualStrings("", scalar[0].path);
+    try testing.expectEqualStrings("number", scalar[0].note);
+
+    // Other formats have no such rule — a bare JSON number root is fine.
+    const json = try analyzeBuilt(arena, ScalarRoot.f, .json, .{});
+    try testing.expectEqual(@as(usize, 0), json.len);
+
+    // A root mapping is unaffected — still fully representable.
+    const MapRoot = struct {
+        fn f(b: *AST.Builder) !AST.Node.Id {
+            const k = try b.addString("a");
+            const v = try b.addNumberRaw("1", false);
+            return b.addMapping(&.{.{ .key = k, .value = v }});
+        }
+    };
+    const map_fig = try analyzeBuilt(arena, MapRoot.f, .fig, .{});
+    try testing.expectEqual(@as(usize, 0), map_fig.len);
 }
 
 test "lossless suppresses value warnings" {

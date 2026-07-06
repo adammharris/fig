@@ -247,6 +247,32 @@
           "type": "SEQ",
           "members": [
             {
+              "type": "ALIAS",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_other_ann"
+              },
+              "named": true,
+              "value": "type_annotation"
+            },
+            {
+              "type": "STRING",
+              "value": "="
+            },
+            {
+              "type": "FIELD",
+              "name": "value",
+              "content": {
+                "type": "SYMBOL",
+                "name": "_other_rhs"
+              }
+            }
+          ]
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
               "type": "CHOICE",
               "members": [
                 {
@@ -292,23 +318,7 @@
       "members": [
         {
           "type": "STRING",
-          "value": "bool"
-        },
-        {
-          "type": "STRING",
           "value": "enum"
-        },
-        {
-          "type": "STRING",
-          "value": "datetime"
-        },
-        {
-          "type": "STRING",
-          "value": "date"
-        },
-        {
-          "type": "STRING",
-          "value": "time"
         },
         {
           "type": "SYMBOL",
@@ -353,6 +363,41 @@
               {
                 "type": "STRING",
                 "value": "float"
+              }
+            ]
+          },
+          "named": true,
+          "value": "type"
+        }
+      ]
+    },
+    "_other_ann": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": ":"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "STRING",
+                "value": "bool"
+              },
+              {
+                "type": "STRING",
+                "value": "datetime"
+              },
+              {
+                "type": "STRING",
+                "value": "date"
+              },
+              {
+                "type": "STRING",
+                "value": "time"
               }
             ]
           },
@@ -530,12 +575,57 @@
           "name": "coerced_number"
         },
         {
-          "type": "SYMBOL",
-          "name": "string_single"
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string_single"
+          },
+          "named": true,
+          "value": "invalid_annotated_string"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string_double"
+          },
+          "named": true,
+          "value": "invalid_annotated_string"
         },
         {
           "type": "SYMBOL",
-          "name": "string_double"
+          "name": "bare_string"
+        }
+      ]
+    },
+    "_other_rhs": {
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "boolean"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "datetime"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string_single"
+          },
+          "named": true,
+          "value": "invalid_annotated_string"
+        },
+        {
+          "type": "ALIAS",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string_double"
+          },
+          "named": true,
+          "value": "invalid_annotated_string"
         },
         {
           "type": "SYMBOL",
@@ -993,6 +1083,14 @@
           {
             "type": "PATTERN",
             "value": "0[xX][0-9a-fA-F]+"
+          },
+          {
+            "type": "PATTERN",
+            "value": "0[oO][0-7]+"
+          },
+          {
+            "type": "PATTERN",
+            "value": "0[bB][01]+"
           },
           {
             "type": "PATTERN",

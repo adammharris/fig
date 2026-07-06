@@ -47,3 +47,9 @@
 ; (`[Blog](/x)`, `[a-z]*.md`, `[b]x[/b]`) — see grammar.js and src/scanner.c.
 (bracket_led_bare_string) @string
 (flow_bracket_led_bare) @string
+
+; a quoted RHS under a non-`string`/non-`int`/non-`float` annotation that
+; doesn't accept a quoted spelling (`bool`/`datetime`/`date`/`time`) — this is
+; a hard `FigTypeMismatch` in the real parser (spec.md § 5.3), not a valid
+; string; see grammar.js `_number_rhs`/`_other_rhs`.
+(invalid_annotated_string) @error

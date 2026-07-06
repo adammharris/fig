@@ -20,7 +20,7 @@ A document is a sequence of lines that parses to a tree of:
 - **sequences** — ordered elements,
 - **scalars** — `null`, booleans, strings, numbers, and *extended* scalars (datetimes, enum literals, char literals, non-finite floats).
 
-The root of a document is a mapping or a sequence, never a scalar. A document with no content (empty, or containing only blank lines and comments) is an empty root mapping. There is no authoring spelling for a scalar-root document; such documents fall to the canonical form or the `$fig-envelope` (see § 13).
+The root of a document is a mapping or a sequence, never a scalar. A document with no content (empty, or containing only blank lines and comments) is an empty root mapping. There is no authoring spelling for a scalar-root document; printing such an AST as `.fig`/`.figl` is a hard error (`FigUnrepresentableRoot`) rather than emitting non-conforming output — use the canonical form or another output format instead.
 
 Numbers are stored and compared by their **source lexeme**, not by numeric conversion: `1.10` is preserved as `1.10`, `1e2` is distinct from `100.0`, and `0xFF` is never normalized to `255`. A conforming implementation MUST NOT define value identity by numeric conversion; it MAY offer numeric coercion as an explicitly lossy accessor. Two numbers are equal iff their lexemes match byte-for-byte and their integer/float kinds agree.
 
@@ -30,7 +30,7 @@ Comments are preserved in an AST side-table with three anchors: **leading** (bef
 
 ### 3.1 Encoding and line structure
 
-A fig document is UTF-8-encoded text using LF (`\n`) line terminators. Only LF is recognized as a line break; a lone CR is treated as trivia and trimmed where values and comments are captured. (Parser-side enforcement of the encoding rules is an implementation gap — see § 13.)
+A fig document is UTF-8-encoded text using LF (`\n`) line terminators. Only LF is recognized as a line break; a lone CR is treated as trivia and trimmed where values and comments are captured. A leading UTF-8 BOM is permitted and silently ignored; input that is not valid UTF-8 is a hard error (`FigInvalidUtf8`).
 
 Each physical line is one of:
 
@@ -373,13 +373,13 @@ Rules:
 
 The dialect admits many spellings per document; `fig fmt` (the printer) defines the canonical one. A conforming formatter MUST be idempotent, and its output MUST re-parse to an equal AST — comments included; every layout heuristic below is abandoned in favor of the nested spelling whenever it would drop a comment or re-anchor one onto a different node.
 
-**Markers.** Spaced runs with zero leading indentation: `"> "` per level, so the final space doubles as the marker↔key separator (`> > key`). Element stars occupy their own cell (`> > *`); a root element is a bare `*`.
+**Markers.** Spaced runs with zero leading indentation by default: `"> "` per level, so the final space doubles as the marker↔key separator (`> > key`). Element stars occupy their own cell (`> > *`); a root element is a bare `*`. An optional `fig fmt --indent` prefixes each marker/comment line with `2 × depth` literal spaces of cosmetic indentation on top of the marker run, purely visual — markers alone carry parse depth (§ 3.3), so canonical (default, unindented) and `--indent`-ed output re-parse to the same AST.
 
 **Fits-or-breaks.** A container value renders as inline flow iff every descendant is flow-representable, no comment would be dropped or re-anchored, no object directly contains another object, and the whole line fits the width budget (default 80 columns). All-or-nothing per node; each child of a broken node re-decides independently. Not flow-representable (each forces block position): multi-line strings, enum/char/non-finite atoms, and any tag-annotated scalar (the `: type =` spelling exists only in block position).
 
 **Multi-line flow.** A sequence that is fully flow-representable and holds no mapping element renders as stacked flow — `key = [`, one element per line with a two-space cosmetic indent and trailing comma, `]` at the opener's indent — when the inline form is rejected for width **or** for exceeding the item-count threshold (default 6). Nested sequences re-decide recursively. The value's trailing comment rides the opener line (`key = [  # note`). A stacked list is not blank-line separated from its neighbors. **Quote-avoidance:** when a list breaks, it takes `> *` block lines instead of stacked flow if flow would force quotes onto an element that block position renders bare (the common case: prose with a top-level comma).
 
-**Strings.** Values print bare wherever the literal-else-string sniff round-trips them unchanged (tightened in flow position: no top-level `,`/`]`/`}`, no committing lead character, no whitespace-preceded `#`); otherwise a double-quoted form with minimal escapes. A `: string`-tagged value re-emits bare (with its annotation) whenever the total-sink scan reproduces it verbatim; when it does not — the value is multiline, has leading/trailing whitespace, or contains a whitespace-preceded `#` — the printer **drops the tag** and emits the ordinary untagged quoted or multiline form, since quoting under the annotation would turn the quotes into content. A string containing newlines prints as a `'''` raw block (flush-left, closer at column 0), or as `"""` with `\`, `"`, and CR escaped when the content contains `'''` or a CR.
+**Strings.** Values print bare wherever the literal-else-string sniff round-trips them unchanged (tightened in flow position: no top-level `,`/`]`/`}`, no committing lead character, no whitespace-preceded `#`); otherwise the minimal quoted form that round-trips it: raw `'…'` (§ 4.5) when the content contains neither `'` nor a newline (no escaping needed at all), else a double-quoted form with minimal escapes. A `: string`-tagged value re-emits bare (with its annotation) whenever the total-sink scan reproduces it verbatim; when it does not — the value is multiline, has leading/trailing whitespace, or contains a whitespace-preceded `#` — the printer **drops the tag** and emits the ordinary untagged quoted or multiline form, since quoting under the annotation would turn the quotes into content. A string containing newlines prints as a `'''` raw block (flush-left, closer at column 0), or as `"""` with `\`, `"`, and CR escaped when the content contains `'''` or a CR.
 
 **Dotted collapse.** A chain of single-child maps collapses to one dotted key (`a.b.c = v`), blocked where a comment's anchor would not survive.
 
@@ -410,18 +410,8 @@ The normative warning set: `string_looks_like_literal` (§ 4.2), `string_leading
 
 - **Round-trip**: for any valid document, parse → AST → canonical-form emission MUST be byte-identical to the canonical emission of the same data authored in any other supported format (the canonical form is the comparison oracle). `fig fmt` MUST be idempotent (a second pass is byte-equal) and its output MUST re-parse to an equal AST, comments included.
 - **Reference corpus**: `src/languages/fig/testdata/kitchen_sink.figl` is a canonical valid document exercising every construct in this spec (it deliberately carries warning examples); the parser and printer test suites in `parser.zig` / `printer.zig` are the behavioral reference.
-- **Informative grammar**: `editors/tree-sitter-fig/grammar.js` is a shallow, lexical grammar for editor highlighting. It is informative only; where it and the reference parser disagree, the parser is authoritative (known divergences are listed in § 13).
+- **Informative grammar**: `editors/tree-sitter-fig/grammar.js` is a shallow, lexical grammar for editor highlighting. It is informative only; where it and the reference parser disagree, the parser is authoritative. One accepted cosmetic gap remains: a double-quoted `: char` RHS (invalid — only a single-quoted `'A'` is a valid char literal, § 5.3) still highlights as an ordinary string, since distinguishing it from the valid single-quoted spelling isn't worth the added grammar complexity for a highlighting-only grammar.
 
 ## 12. File extensions
 
-The canonical file extension is **`.figl`**; **`.fig`** is accepted for compatibility. Both select the authoring dialect. The canonical form owns no file extension and is selected explicitly (`--input canonical` / `--output canonical`).
-
-## 13. Open questions for 1.0
-
-Known implementation gaps and divergences, tracked here rather than flagged inline:
-
-- **Scalar-root printer output does not re-parse.** For totality, the printer (`printer.zig` `root()`) emits a scalar-root AST as a single bare value line, but that output does not re-parse as a scalar root (a bare token at root is a container header, § 2). A 1.0 spec should state explicitly that scalar-root emission is non-conforming output.
-- **Parser-side encoding enforcement.** The parser performs no explicit UTF-8 validation and no BOM handling; a leading BOM would likely surface as `FigBadKey`. § 3.1's UTF-8 + LF requirement is currently asserted by this spec, not enforced by the reader.
-- **Minimal-quote selection in `fig fmt`.** The formatter never selects the raw `'…'` form for escape-free strings that need quoting; it always emits the double-quoted form.
-- **`fig fmt --indent`.** Whether the formatter should offer optional cosmetic indentation (`2 × depth` spaces, § 3.3) is undecided.
-- **Tree-sitter grammar divergences.** The informative editor grammar (§ 11) omits the `0o`/`0b` integer tokens, excludes `[`/`{` from bare flow values entirely, and highlights a quoted RHS under a non-`string` annotation as a string when it is actually `FigTypeMismatch` (§ 5.3).
+The canonical file extension is **`.figl`**; **`.fig`** is accepted for compatibility. Both select the authoring dialect.

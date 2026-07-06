@@ -63,6 +63,22 @@ pub const SerializeOptions = struct {
     /// `true`: do not emit comments carried on the AST (a clean, comment-free
     /// render). `false` (default): preserve them where the target format allows.
     strip_comments: bool = false,
+    /// fig only, opt-in (`fig fmt --indent`): prefix each marker/comment line
+    /// with `2 × depth` literal spaces of cosmetic indentation on top of the
+    /// spaced `> ` marker runs that alone carry parse depth (docs/spec.md §
+    /// 3.3's "clean" convention — indentation that agrees with `2 × depth`
+    /// reparses with no `indent_marker_mismatch` warning and doesn't change
+    /// the AST). Every other format instead treats `indent` as the width to
+    /// use whenever it already indents, gated by `pretty` (JSON/JSON5's
+    /// multi-line mode; TOML's wrapped arrays) — fig has no such `pretty` gate
+    /// of its own (its zero-indent house style holds regardless of `pretty`),
+    /// and its cosmetic indentation is a fixed 2-per-depth overlay rather than
+    /// a configurable width, so `indent`'s numeric value can't double as
+    /// fig's on/off signal the way it does for those formats (its default,
+    /// 2, is not distinguishable from an explicit `--indent 2`). `false`
+    /// (default): canonical, zero-indent output — unchanged from before this
+    /// field existed.
+    fig_indent: bool = false,
 };
 
 /// `self`, or a comment-stripped *view* of it when `options.strip_comments` is
@@ -88,6 +104,7 @@ pub const SerializeError = Writer.Error || error{
     InvalidElementName, // XML: a mapping key is not a valid XML `Name`
     NonScalarValue, // XML: an `@`-attribute or `#text` entry held a mapping/sequence
     UnexpectedNodeKind, // fig: a node kind reached a printer path that expects a container
+    FigUnrepresentableRoot, // fig: a scalar/null value has no authoring spelling as a document root
 };
 
 /// Render the whole AST to `writer` in the given format, using default options.

@@ -107,6 +107,9 @@ pub const Error = error{
     /// A bare key before `:` in a flow object (`{x: 1}`) — JSON pairs require
     /// quoted keys; fig pairs use `=`.
     FigFlowBareKeyColon,
+    /// The input bytes are not valid UTF-8 (checked once, up front, before any
+    /// tokenizing/key parsing — mirrors TOML's `InvalidUtf8`).
+    FigInvalidUtf8,
 } || tok.ScanError;
 
 /// The teaching message for `code` — DESIGN.md's "every diagnostic names the
@@ -144,6 +147,7 @@ pub fn describe(code: Error) []const u8 {
         error.FigMixedFlowSeparators => "a flow object is fig (`=` pairs) or JSON (`:` pairs), never both in one object",
         error.FigUnclosedString => "unclosed string; add the closing quote (a single-line quote cannot span lines — use `'''` for multi-line)",
         error.FigBadEscape => "invalid escape; double quotes support \\n \\t \\r \\\\ \\\" \\uXXXX — use single quotes ('…') for raw text with literal backslashes",
+        error.FigInvalidUtf8 => "this file is not valid UTF-8; fig documents must be UTF-8 encoded",
         error.OutOfMemory => "out of memory",
     };
 }
@@ -183,6 +187,7 @@ pub fn shortLabel(code: Error) []const u8 {
         error.FigMixedFlowSeparators => "mixed `=`/`:` separators",
         error.FigUnclosedString => "unclosed string",
         error.FigBadEscape => "invalid escape",
+        error.FigInvalidUtf8 => "invalid UTF-8",
         error.OutOfMemory => "out of memory",
     };
 }
@@ -596,10 +601,18 @@ fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Repor
     // matches the uniform `Language.parse(parser, input, format)` signature the
     // multi-format dispatch relies on (other languages select a version here).
     _ = format;
+
+    // A fig document must be valid UTF-8 (checked once, up front — mirrors
+    // TOML's `parseOnce`).
+    if (!std.unicode.utf8ValidateSlice(input)) return error.FigInvalidUtf8;
+
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
 
     var self: Parser = .{ .allocator = arena_state.allocator(), .source = input, .recover = recover };
+    // A leading UTF-8 BOM is permitted and ignored (mirrors TOML's tokenizer /
+    // JSON's tokenizer) — skip it before any tokenizing/key parsing happens.
+    if (std.mem.startsWith(u8, input, "\xEF\xBB\xBF")) self.pos = 3;
     // Warnings are duped out on every exit path (they are valid alongside a
     // failure too). Best-effort under OOM — the tree, not the lint list, is
     // the load-bearing result. Runs before the arena defer (LIFO), while
@@ -2980,6 +2993,21 @@ test "report is empty on a clean parse" {
     defer parsed.deinit(testing.allocator);
     try testing.expect(report.diag == null);
     try testing.expectEqual(@as(usize, 0), report.warnings.len);
+}
+
+test "UTF-8 BOM before document is ignored" {
+    // Same tree as "root map with a scalar assignment", just with a leading
+    // BOM — the BOM must not shift any offsets/keys/values.
+    try expectParse("\xEF\xBB\xBFx = 1\n", .{ .allocator = testing.allocator, .root = 3, .nodes = &.{
+        .{ .id = 0, .kind = .{ .string = "x" } },
+        .{ .id = 1, .kind = .{ .number = .{ .raw = "1", .kind = .integer } } },
+        .{ .id = 2, .kind = .{ .keyvalue = .{ .key = 0, .value = 1 } } },
+        .{ .id = 3, .kind = .{ .mapping = 2 } },
+    } });
+}
+
+test "invalid UTF-8 bytes are rejected" {
+    try testing.expectError(error.FigInvalidUtf8, parseAbstract(testing.allocator, "x = \xff\xfe\n", .Fig));
 }
 
 /// Parse `input`, expecting success, and return the warning codes in order

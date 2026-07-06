@@ -1076,6 +1076,9 @@ pub fn main(init: std.process.Init) !void {
                     // (non-string key, YAML alias, scalar root) is the
                     // documented "no authoring spelling" gap — fall to
                     // `canonical`/`--lossless` with a different `--to` instead.
+                    // (A scalar root specifically makes the fig printer hard-error
+                    // with `FigUnrepresentableRoot` rather than emit non-conforming
+                    // text — see `languages/fig/printer.zig`'s `root`.)
                     // XML has no envelope of its own either: every scalar
                     // collapses to element/attribute text regardless (see
                     // `languages/xml/printer.zig`), so an envelope couldn't
@@ -1164,9 +1167,15 @@ pub fn main(init: std.process.Init) !void {
                     try stripped.serializeWith(stdout_terminal.writer, .toml, opts.serialize);
                 }
             } else if (opts.path == null) {
-                try ast.serializeWith(stdout_terminal.writer, target, opts.serialize);
+                ast.serializeWith(stdout_terminal.writer, target, opts.serialize) catch |err| switch (err) {
+                    error.FigUnrepresentableRoot => reportFigUnrepresentableRoot(&stderr_terminal),
+                    else => return err,
+                };
             } else {
-                try ast.serializeNodeWith(stdout_terminal.writer, target, node_id, opts.serialize);
+                ast.serializeNodeWith(stdout_terminal.writer, target, node_id, opts.serialize) catch |err| switch (err) {
+                    error.FigUnrepresentableRoot => reportFigUnrepresentableRoot(&stderr_terminal),
+                    else => return err,
+                };
             }
             try stdout_terminal.writer.flush();
         },
@@ -1627,6 +1636,25 @@ fn reportParseError(term: *Io.Terminal, source: []const u8, file: []const u8, of
     std.process.exit(2);
 }
 
+/// A scalar/null value reaching the fig printer as a document root has no
+/// authoring spelling there (`languages/fig/printer.zig`'s `root` hard-errors
+/// with `FigUnrepresentableRoot` rather than emit non-conforming output) — print
+/// the teaching message and exit(1) here rather than let the raw error escape
+/// to `main`'s top level. Letting it escape would still work, but would print
+/// nothing but a bare Zig stack trace: `main`'s return-error path and this
+/// function share one positional writer over stderr's fd, while an escaping
+/// error is reported through the Zig runtime's OWN separate stderr writer (the
+/// same `debug_io`-vs-`stderr_terminal` split documented at the top of this
+/// file for `std.log`) — on redirection, whichever writes second silently
+/// clobbers the first from byte 0, so any warning already printed disappears
+/// too. Exiting here, like every other user-facing CLI failure in this file,
+/// sidesteps that entirely.
+fn reportFigUnrepresentableRoot(term: *Io.Terminal) noreturn {
+    term.writer.writeAll("error: a scalar value cannot be the root of a .fig/.figl document; use canonical form or another output format instead (see docs/spec.md § 2).\n") catch {};
+    term.writer.flush() catch {};
+    std.process.exit(1);
+}
+
 /// Print every parse-time authoring warning in `warnings` (unless `--quiet`),
 /// then exit(2) if `--strict` and any fired — `get`'s shared `--quiet`/
 /// `--strict` contract for a language's authoring-time lints (fig's, JSON's
@@ -1959,7 +1987,10 @@ fn reformatSlice(
         const result = try fig.Lossless.lossyStrip(allocator, &doc.ast, doc.ast.root, .toml);
         if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
     } else {
-        try doc.ast.serializeWith(&out.writer, target, serialize);
+        doc.ast.serializeWith(&out.writer, target, serialize) catch |err| switch (err) {
+            error.FigUnrepresentableRoot => reportFigUnrepresentableRoot(term),
+            else => return err,
+        };
     }
     return out.toOwnedSlice();
 }
@@ -2088,7 +2119,10 @@ fn convertSlice(
         const result = try fig.Lossless.lossyStrip(allocator, ast, ast.root, .toml);
         if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
     } else {
-        try ast.serializeWith(&out.writer, target, serialize);
+        ast.serializeWith(&out.writer, target, serialize) catch |err| switch (err) {
+            error.FigUnrepresentableRoot => reportFigUnrepresentableRoot(term),
+            else => return err,
+        };
     }
     return out.toOwnedSlice();
 }
@@ -2934,6 +2968,11 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     log.err("Invalid --indent value: {s}\n", .{n});
                     return ArgError.MissingGetArgument;
                 };
+                // fig has no `pretty` gate of its own to read `indent`'s value
+                // against (see `SerializeOptions.fig_indent`'s doc comment), so
+                // an explicit `--indent` is fig's own on/off signal, independent
+                // of the numeric width other formats use it for.
+                serialize.fig_indent = true;
             } else if (std.mem.eql(u8, arg, "--width")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});
@@ -3161,6 +3200,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     log.err("Invalid --indent value: {s}\n", .{n});
                     return ArgError.MissingFmtArgument;
                 };
+                // See the matching comment on `get`'s `--indent` handling above.
+                serialize.fig_indent = true;
             } else if (std.mem.eql(u8, arg, "--width")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});
@@ -3295,6 +3336,8 @@ fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
                     log.err("Invalid --indent value: {s}\n", .{n});
                     return ArgError.MissingConvertArgument;
                 };
+                // See the matching comment on `get`'s `--indent` handling above.
+                serialize.fig_indent = true;
             } else if (std.mem.eql(u8, arg, "--width")) {
                 const n = args.next() orelse {
                     log.err("Missing value after {s}\n", .{arg});

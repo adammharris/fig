@@ -1,11 +1,13 @@
 //! fig authoring dialect printer — renders an AST in the `fig fmt` house
 //! style (DESIGN.md "What `fig fmt` normalizes"):
 //!
-//!   * Spaced marker runs (`> > key`) and NO leading indentation — the markers
-//!     themselves form the visual ruler (each level shifts the line two
-//!     columns, the same geometry indentation would add, without a redundant
-//!     second signal to maintain). An `--indent` mode that adds derived
-//!     indentation on top is a possible future opt-in.
+//!   * Spaced marker runs (`> > key`) and NO leading indentation by default —
+//!     the markers themselves form the visual ruler (each level shifts the
+//!     line two columns, the same geometry indentation would add, without a
+//!     redundant second signal to maintain). `options.fig_indent` is an
+//!     opt-in (`fig fmt --indent`) cosmetic overlay that prefixes each marker
+//!     run with `2 × depth` literal spaces on top — purely visual (see
+//!     `writeCosmeticIndent`); canonical (default) output is unaffected.
 //!   * Fits-or-breaks: a container value renders as inline flow iff every
 //!     descendant is flow-representable, no comment would be dropped or
 //!     re-anchored, no object directly contains another object, and the whole
@@ -29,7 +31,7 @@ const AST = @import("../../ast/ast.zig");
 const tok = @import("tokenizer.zig");
 const Writer = std.Io.Writer;
 
-pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey, UnexpectedNodeKind };
+pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey, UnexpectedNodeKind, FigUnrepresentableRoot };
 
 /// Deepest `>` count a section header's block body may reach before the map is
 /// hoisted into per-child sections instead.
@@ -92,7 +94,11 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
             for (p.danglingOf(id)) |c| try p.commentLines(c, 0);
         } else try p.mapBody(id, depth),
         .sequence => try p.seqBody(id, depth),
-        else => {
+        // A scalar reaching here at depth 0 is being asked to stand as an
+        // entire fig document/subdocument — see `root`'s doc comment below,
+        // which this mirrors exactly (a non-zero depth never reaches this
+        // switch arm: nested scalars go through `value`, not `printNode`).
+        else => if (depth == 0) return error.FigUnrepresentableRoot else {
             try p.value(id, false);
             try p.writer.writeByte('\n');
         },
@@ -100,8 +106,8 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
 }
 
 /// The root is a map or a sequence (never a bare scalar in the fig dialect —
-/// see DESIGN.md). A root map is emitted as sections; a root sequence as
-/// zero-marker `*` elements.
+/// see DESIGN.md and docs/spec.md § 2). A root map is emitted as sections; a
+/// root sequence as zero-marker `*` elements.
 fn root(self: *Printer, id: AST.Node.Id) Error!void {
     switch (self.ast.nodes[id].kind) {
         .mapping => {
@@ -110,10 +116,15 @@ fn root(self: *Printer, id: AST.Node.Id) Error!void {
         },
         .sequence => try self.seqBody(id, 0), // prints its own dangling run
         else => {
-            // Not authorable in fig, but total: fall back to a single bare
-            // value line so nothing silently vanishes.
-            try self.value(id, false);
-            try self.writer.writeByte('\n');
+            // A scalar/null/extended/alias root has no authoring spelling in
+            // the fig dialect: emitting it as a single bare value line (the
+            // old behavior) does NOT re-parse — a bare token at the document
+            // root reads as a container header with no children
+            // (`FigEmptyContainer`), not a scalar. Hard-error instead of
+            // silently emitting non-conforming output; the caller should use
+            // canonical form or another output format instead (see
+            // docs/spec.md § 2).
+            return error.FigUnrepresentableRoot;
         },
     }
 }
@@ -788,15 +799,25 @@ fn hasTrailingOrDangling(self: *const Printer, id: AST.Node.Id) bool {
 
 // ── Line primitives ──────────────────────────────────────────────────────────
 
+/// Opt-in (`options.fig_indent`) cosmetic indentation ahead of a marker run:
+/// `2 × depth` literal spaces, agreeing with the `> ` markers that alone carry
+/// the real parse depth (docs/spec.md § 3.3) — purely visual, never emitted by
+/// default.
+fn writeCosmeticIndent(self: *Printer, depth: usize) Error!void {
+    if (self.options.fig_indent) try self.writer.splatByteAll(' ', 2 * depth);
+}
+
 /// The spaced marker run for a key/comment line: `"> "` per level, so the last
 /// space doubles as the marker↔key separator (`> > key`).
 fn writeMarkers(self: *Printer, depth: usize) Error!void {
+    try self.writeCosmeticIndent(depth);
     for (0..depth) |_| try self.writer.writeAll("> ");
 }
 
 /// The marker run for an element line: the depth run, then the `*` bullet in
 /// its own cell (`> > *`); a root element is a bare `*`.
 fn writeElementMarkers(self: *Printer, depth: usize) Error!void {
+    try self.writeCosmeticIndent(depth);
     for (0..depth) |_| try self.writer.writeAll("> ");
     try self.writer.writeByte('*');
 }
@@ -1021,13 +1042,20 @@ fn writeMultilineString(self: *Printer, s: []const u8) Error!void {
 }
 
 /// Bare when the literal-else-string sniff would round-trip it unchanged
-/// (and, for a key, when it contains no structural character); a minimal
-/// double-quoted form otherwise. Correctness-first: this always double-quotes
-/// rather than picking single vs. double by escape content (a house-style
-/// nicety left for later).
+/// (and, for a key, when it contains no structural character); otherwise the
+/// minimal quoted form that round-trips it — raw `'…'` (§ 4.5) when the
+/// content holds neither `'` nor a newline (no escaping needed at all), else
+/// escaped `"…"`. Mirrors `languages/yaml/printer.zig`'s `printScalar`
+/// (bare → single-quote → double-quote as a last resort).
 fn writeBareOrQuoted(self: *Printer, s: []const u8, is_key: bool, in_flow: bool) Error!void {
     if (isBareSafe(s, is_key, in_flow)) {
         try self.writer.writeAll(s);
+        return;
+    }
+    if (canRawQuote(s)) {
+        try self.writer.writeByte('\'');
+        try self.writer.writeAll(s);
+        try self.writer.writeByte('\'');
         return;
     }
     try self.writer.writeByte('"');
@@ -1042,7 +1070,14 @@ fn writeBareOrQuoted(self: *Printer, s: []const u8, is_key: bool, in_flow: bool)
     try self.writer.writeByte('"');
 }
 
+/// Whether `s` survives verbatim inside a raw `'…'` (§ 4.5: MUST NOT contain
+/// `'` or a newline — there is no escape to spell either one raw).
+fn canRawQuote(s: []const u8) bool {
+    return std.mem.indexOfAny(u8, s, "'\n") == null;
+}
+
 fn quotedWidth(s: []const u8) usize {
+    if (canRawQuote(s)) return s.len + 2; // '…' — no escaping, just the two quotes
     var w: usize = 2;
     for (s) |c| w += @as(usize, switch (c) {
         '"', '\\', '\n', '\r', '\t' => 2,
@@ -1210,6 +1245,39 @@ fn expectRoundTrip(input: []const u8) !void {
     try std.testing.expectEqualStrings(out.written(), out2.written());
 }
 
+test "a scalar-root AST errors rather than emitting non-conforming output" {
+    // Not reachable by parsing fig source (the dialect's grammar never
+    // produces a bare-scalar root — that's the whole point), but reachable
+    // from a foreign AST (e.g. `fig get scalar.json -o fig`, where
+    // `scalar.json` is just `42`). The old fallback printed a bare `42\n`
+    // line, which does NOT re-parse (a bare token at the document root reads
+    // as an empty container header, `FigEmptyContainer`) — so this must hard
+    // error instead.
+    var b = AST.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const root_id = try b.addNumberRaw("42", false);
+    var ast = try b.finish(root_id);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try std.testing.expectError(error.FigUnrepresentableRoot, print(&out.writer, &ast, .{}));
+    try std.testing.expectEqual(@as(usize, 0), out.written().len);
+
+    // A root map/sequence is unaffected.
+    var b2 = AST.Builder.init(std.testing.allocator);
+    defer b2.deinit();
+    const k = try b2.addString("a");
+    const v = try b2.addNumberRaw("1", false);
+    const map_root = try b2.addMapping(&.{.{ .key = k, .value = v }});
+    var ast2 = try b2.finish(map_root);
+    defer ast2.deinit();
+    var out2: Writer.Allocating = .init(std.testing.allocator);
+    defer out2.deinit();
+    try print(&out2.writer, &ast2, .{});
+    try std.testing.expectEqualStrings("a = 1\n", out2.written());
+}
+
 test "prints a flat map" {
     try expectPrint("x = 1\ny = hello\n",
         \\x = 1
@@ -1261,6 +1329,52 @@ test "spaced markers, no indentation" {
     );
 }
 
+test "fig_indent: opt-in cosmetic indentation is 2 x depth, canonical output unaffected, both re-parse equal" {
+    const input =
+        \\server
+        \\> description = this line is deliberately padded far past the eighty column budget so it cannot inline
+        \\> limits
+        \\>> connections = this line is also deliberately padded far past the eighty column budget so it stays put
+        \\>> burst = and one more long sibling so the limits container cannot be collapsed to one dotted key line
+    ;
+    var ast = try Parser.parseAbstract(std.testing.allocator, input, .Fig);
+    defer ast.deinit();
+
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print(&out.writer, &ast, .{ .fig_indent = true });
+    try std.testing.expectEqualStrings(
+        \\server
+        \\  > description = this line is deliberately padded far past the eighty column budget so it cannot inline
+        \\  > limits
+        \\    > > connections = this line is also deliberately padded far past the eighty column budget so it stays put
+        \\    > > burst = and one more long sibling so the limits container cannot be collapsed to one dotted key line
+        \\
+    , out.written());
+
+    // Canonical (default) output is completely unchanged by the field's
+    // existence — `.{}` still means zero-indent, markers-only output.
+    var out_plain: Writer.Allocating = .init(std.testing.allocator);
+    defer out_plain.deinit();
+    try print(&out_plain.writer, &ast, .{});
+    try std.testing.expectEqualStrings(
+        \\server
+        \\> description = this line is deliberately padded far past the eighty column budget so it cannot inline
+        \\> limits
+        \\> > connections = this line is also deliberately padded far past the eighty column budget so it stays put
+        \\> > burst = and one more long sibling so the limits container cannot be collapsed to one dotted key line
+        \\
+    , out_plain.written());
+
+    // Both re-parse to the same AST: indentation is cosmetic, the markers
+    // alone carry parse depth (docs/spec.md § 3.3's "clean" convention).
+    var ast_indented = try Parser.parseAbstract(std.testing.allocator, out.written(), .Fig);
+    defer ast_indented.deinit();
+    var ast_plain = try Parser.parseAbstract(std.testing.allocator, out_plain.written(), .Fig);
+    defer ast_plain.deinit();
+    try std.testing.expect(ast_indented.eql(ast_plain));
+}
+
 test "a deep map hoists into dotted sections (and nested lists of maps into [] headers)" {
     try expectPrint(
         \\workspace
@@ -1274,7 +1388,7 @@ test "a deep map hoists into dotted sections (and nested lists of maps into [] h
         \\>>>> file = README.md
         \\>>>> search = a deliberately long pattern string so this element cannot fit in the inline flow budget
     ,
-        \\workspace.resolver = "2"
+        \\workspace.resolver = '2'
         \\
         \\workspace.metadata.release
         \\> shared-version-key = a deliberately long value to keep the release table from fitting inline here
@@ -1430,7 +1544,7 @@ test "quote-avoidance: prose with commas prefers > * block lines over stacked fl
     try expectPrint(
         \\pair = [a, "b, c"]
     ,
-        \\pair = [a, "b, c"]
+        \\pair = [a, 'b, c']
         \\
     );
     // An element quoted in BOTH positions (`true` sniffs to bool bare) doesn't
@@ -1442,7 +1556,7 @@ test "quote-avoidance: prose with commas prefers > * block lines over stacked fl
         \\  crates/some_long_crate_name_one,
         \\  crates/some_long_crate_name_two,
         \\  crates/some_long_crate_name_three,
-        \\  "true",
+        \\  'true',
         \\]
         \\
     );
@@ -1551,13 +1665,39 @@ test "empty document round-trips as empty output" {
     try expectPrint("# just a note\n", "# just a note\n");
 }
 
+test "minimal-quote selection: raw single-quote when possible, double-quote only for ' or newline" {
+    // "2" needs quoting (bare would sniff as a number); no `'`/newline inside,
+    // so the raw form is picked.
+    try expectPrint("resolver = \"2\"\n", "resolver = '2'\n");
+    // A value starting with `'` can't itself be bare (opens a committed string
+    // form) and can't use the raw form either (§ 4.5: raw MUST NOT contain
+    // `'`) — falls back to escaped double-quotes, same as before this change.
+    try expectPrint("s = \"'tis the season\"\n", "s = \"'tis the season\"\n");
+
+    // A key containing a literal newline (unreachable from fig source — keys
+    // can't be authored with one — but reachable from a foreign/built AST)
+    // can't use the raw form either (single-line raw MUST NOT contain a
+    // newline): falls back to escaped double-quotes with `\n` escaped.
+    var b = AST.Builder.init(std.testing.allocator);
+    defer b.deinit();
+    const k = try b.addString("a\nb");
+    const v = try b.addNumberRaw("1", false);
+    const root_id = try b.addMapping(&.{.{ .key = k, .value = v }});
+    var ast = try b.finish(root_id);
+    defer ast.deinit();
+    var out: Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try print(&out.writer, &ast, .{});
+    try std.testing.expectEqualStrings("\"a\\nb\" = 1\n", out.written());
+}
+
 test "flow strings that would not survive bare are quoted" {
     // A comma inside a flow element would split it; a leading bracket would
     // nest; a sniffable number-string would change type.
     try expectPrint(
         \\xs = ["a, b", "[glob]", "99", plain]
     ,
-        \\xs = ["a, b", "[glob]", "99", plain]
+        \\xs = ['a, b', '[glob]', '99', plain]
         \\
     );
 }
@@ -1706,14 +1846,14 @@ test "a lone flat child between deep siblings stays a dotted assignment" {
         \\>>> version = "0.4"
         \\>>> features-list = [serde, std, clock, alloc, extra, padding]
     ,
-        \\workspace.resolver = "2"
+        \\workspace.resolver = '2'
         \\
         \\workspace.dependencies
         \\> fig
         \\> > version = 1.0.0
         \\> > features-list = [serde, yaml, derive, indexmap, extras, and-more]
         \\> chrono
-        \\> > version = "0.4"
+        \\> > version = '0.4'
         \\> > features-list = [serde, std, clock, alloc, extra, padding]
         \\
     );
@@ -1852,7 +1992,7 @@ test "a string-tagged value with no bare spelling drops the tag and quotes norma
     const v = try ast.getValByPath(&.{.{ .key = "s" }});
     try std.testing.expectEqualStrings("  x", v.kind.string);
     try injectStringTag(&ast, v.id);
-    try expectTagDropped(&ast, "s = \"  x\"\n", "  x");
+    try expectTagDropped(&ast, "s = '  x'\n", "  x");
 }
 
 test "a string-tagged value that IS bare-representable keeps the tag when injected" {

@@ -1980,6 +1980,7 @@ fn serializeStatus(err: AST.SerializeError) FigStatus {
         error.InvalidElementName,
         error.NonScalarValue,
         error.UnexpectedNodeKind,
+        error.FigUnrepresentableRoot,
         => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };

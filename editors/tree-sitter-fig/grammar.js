@@ -120,22 +120,45 @@ module.exports = grammar({
     _typed_body: $ => choice(
       seq(alias($._string_ann, $.type_annotation), '=', field('value', $._string_rhs)),
       seq(alias($._number_ann, $.type_annotation), '=', field('value', $._number_rhs)),
+      seq(alias($._other_ann, $.type_annotation), '=', field('value', $._other_rhs)),
       seq(optional($.type_annotation), '=', field('value', $._value)),
     ),
 
-    // The plain/other + untyped path. `int`/`float`/`string` are intentionally
-    // NOT in `type` — they route to the dedicated branches above (which is why
-    // `word` keyword-extraction is needed: `: int` must select the numeric
-    // branch, never a `bare_key` custom type). All three annotation forms alias
-    // to a `type_annotation` node wrapping a `type` node, so the highlight query
-    // (`(type) @type`) and the tree shape are the same across branches.
+    // The plain/other + untyped path. `int`/`float`/`string`/`bool`/`datetime`/
+    // `date`/`time` are intentionally NOT in `type` — they route to the
+    // dedicated branches above (which is why `word` keyword-extraction is
+    // needed: `: int` must select the numeric branch, never a `bare_key`
+    // custom type). This generic branch is left for `enum` (see `_other_ann`
+    // below for why `enum` does NOT join it) and any unrecognized/custom type
+    // name (the "open type set" — `FigUnknownType` in the real parser, but
+    // this shallow grammar doesn't sniff that; § 5.3), plus the fully-untyped
+    // case. All annotation forms alias to a `type_annotation` node wrapping a
+    // `type` node, so the highlight query (`(type) @type`) and the tree shape
+    // are the same across branches.
     type_annotation: $ => seq(':', $.type),
     type: $ => choice(
-      'bool', 'enum', 'datetime', 'date', 'time',
+      'enum',
       $.bare_key, // open type set
     ),
     _string_ann: $ => seq(':', alias('string', $.type)),
     _number_ann: $ => seq(':', alias(choice('int', 'float'), $.type)),
+    // `bool`/`datetime`/`date`/`time`: per spec.md § 5.3, the RHS is scanned as
+    // one raw token under every annotation, and none of these four accept a
+    // quoted spelling (`flag: bool = "true"`, `when: datetime = "2026-07-01"`
+    // are `FigTypeMismatch`) — so they share `_other_rhs` below, which aliases
+    // the quoted forms to `invalid_annotated_string` instead of a real string.
+    // `enum` is deliberately EXCLUDED from this branch: `: enum = atom` accepts
+    // ANY non-empty raw token as the atom (no shape check beyond non-empty), so
+    // a quoted RHS there is not a mismatch — it's a literal atom whose text
+    // happens to include quote characters — and stays on the generic `_value`
+    // path above. `char` is also excluded: `: char = 'A'` is a single-quoted
+    // literal and IS the valid spelling (unlike the other four), so it too
+    // stays on the generic path where `string_single` colors normally; only a
+    // double-quoted `: char` RHS is actually a mismatch, but distinguishing
+    // that from the valid single-quoted form isn't worth the added grammar
+    // complexity for a highlighting-only, informative grammar (a cosmetic
+    // mis-colour in that one sub-case, same tolerance as elsewhere in this file).
+    _other_ann: $ => seq(':', alias(choice('bool', 'datetime', 'date', 'time'), $.type)),
 
     // ─── key paths: dotted segments, each optionally indexed ───
     keypath: $ => seq($._keyseg, repeat(seq('.', $._keyseg))),
@@ -168,14 +191,32 @@ module.exports = grammar({
       $.string_sink,
     ),
     // A `: int`/`: float` RHS: a real number, a coerced lookalike (`09`, `1.`,
-    // `inf`), a quoted string (`: int = "09"` stays a string), else a bare
-    // string fallback (`: int = hello`, which the Zig parser rejects — a
-    // cosmetic mis-colour, never a wrong tree).
+    // `inf`), else a bare string fallback (`: int = hello`, which the Zig
+    // parser rejects — a cosmetic mis-colour, never a wrong tree). A quoted
+    // form (`: int = "09"`) is a hard `FigTypeMismatch` per spec.md § 5.3 (the
+    // RHS is one raw token; quote characters are literal, not a real string) —
+    // aliased to `invalid_annotated_string` so it's syntactically distinct
+    // from a genuine `string_single`/`string_double` and highlights as
+    // `@error`, not `@string` (see highlights.scm).
     _number_rhs: $ => choice(
       $.number,
       $.coerced_number,
-      $.string_single,
-      $.string_double,
+      alias($.string_single, $.invalid_annotated_string),
+      alias($.string_double, $.invalid_annotated_string),
+      $.bare_string,
+    ),
+
+    // A `: bool`/`: datetime`/`: date`/`: time` RHS (see `_other_ann` above for
+    // why `enum`/`char` are excluded): the real scalar, else a bare string
+    // fallback (`: bool = hello`, a mismatch the real parser rejects — cosmetic
+    // mis-colour only). A quoted form is always a mismatch here too (none of
+    // these four accept a quoted spelling), so it's aliased the same way as
+    // `_number_rhs` above instead of coloring as a real string.
+    _other_rhs: $ => choice(
+      $.boolean,
+      $.datetime,
+      alias($.string_single, $.invalid_annotated_string),
+      alias($.string_double, $.invalid_annotated_string),
       $.bare_string,
     ),
 
@@ -265,6 +306,8 @@ module.exports = grammar({
     // Leading-zero ints intentionally excluded → they fall to bare_string (fig rule).
     number: _ => token(choice(
       /0[xX][0-9a-fA-F]+/,
+      /0[oO][0-7]+/,
+      /0[bB][01]+/,
       /(0|[1-9][0-9]*)\.[0-9]+([eE][+-]?[0-9]+)?/,
       /(0|[1-9][0-9]*)[eE][+-]?[0-9]+/,
       /(0|[1-9][0-9]*)/,
