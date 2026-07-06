@@ -1,0 +1,59 @@
+name = Release binaries
+
+# Build + attach prebuilt CLI binaries for the platforms homebrew.yml doesn't
+# cover: Windows (x86_64) and a WASI module (wasm32-wasi) runnable under any
+# WASI host (wasmtime, wasmer, ...). The macOS universal binary + Linux
+# binaries + Homebrew tap bump live in homebrew.yml instead — the tap's
+# bump-formula job needs the Linux tarballs ready in the same workflow run
+# (via `needs:`) to hash them, which two independent workflows on the same tag
+# can't guarantee relative to each other.
+#
+# Neither of these route through a package manager (yet) — plain zip/wasm
+# attached straight to the GitHub Release, downloaded by hand. Both are
+# cross-compiled from one ubuntu-latest runner: Zig's self-contained
+# cross-compilation means no per-target native runner (and no Docker/QEMU) is
+# needed, unlike most C/C++ cross-release setups.
+#
+# Runs on the same `v*.*.*` tag as homebrew.yml and release.yml.
+on
+> push.tags = [v*.*.*]
+> workflow_dispatch = null
+
+permissions.contents = write # attaches assets to the GitHub Release
+
+jobs.binaries
+> name = Build + attach Windows/WASI binaries
+> runs-on = ubuntu-latest
+> if = github.ref_type == 'tag'
+
+jobs.binaries.steps[]
+> uses = actions/checkout@v4
++
+> uses = mlugg/setup-zig@v2
+> with.version = 0.16.0
++
+> name = Build Windows x86_64
+> run = '''
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-windows --prefix zig-out/windows-x64
+cd zig-out/windows-x64/bin && zip -j "$OLDPWD/fig-windows-x86_64.zip" fig.exe && cd "$OLDPWD"
+
+'''
++
+> # fig-wasi's optimize/strip are hardcoded in build.zig (ReleaseSmall,
+> # stripped), so no -D flags needed here.
+> name = Build WASI module
+> run = '''
+zig build wasi --prefix zig-out/wasi
+cp zig-out/wasi/bin/fig-wasi.wasm fig-wasi.wasm
+
+'''
++
+> name = Attach to the GitHub Release
+> uses = softprops/action-gh-release@v2
+> with
+> > tag_name = ${{ github.ref_name }}
+> > files = '''
+fig-windows-x86_64.zip
+fig-wasi.wasm
+
+'''

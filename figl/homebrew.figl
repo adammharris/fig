@@ -1,63 +1,152 @@
 name = Homebrew
 
-# Release the `fig` CLI to Homebrew. Two jobs:
-# 1. build a prebuilt universal (arm64 + x86_64) macOS binary with the pinned
-# Zig toolchain and attach it to this repo's GitHub Release, then
-# 2. bump url/sha256/version of Formula/fig.rb in the tap repo.
+# Release the `fig` CLI to Homebrew. Three jobs:
+# 1. build separate macOS binaries (arm64, x86_64) and
+# 2. separate Linux binaries (x86_64, aarch64), both with the pinned Zig
+# toolchain, and attach them to this repo's GitHub Release, then
+# 3. render Formula/fig.rb (this repo's template — see that file) with the
+# release's version + checksums and push it to the tap repo.
+#
+# Per-arch (not universal/lipo'd) binaries: smaller downloads per user, and it
+# keeps macOS and Linux symmetric — both platforms resolve arch the same way
+# in the formula (`on_arm`/`on_intel` nested inside `on_macos`/`on_linux`).
 #
 # A prebuilt binary (not a source `depends_on "zig"` formula) is deliberate:
 # Homebrew-core's zig tracks stable releases and won't reliably have the version
 # fig needs.
 #
+# Linux binaries live here (not in release-binaries.yml) because bump-formula
+# needs them ready in the same workflow run, via `needs:`, before it downloads
+# them to compute checksums — two independent workflows triggered by the same
+# tag have no ordering guarantee between them. Windows + WASI binaries have no
+# such downstream dependency, so they stay in release-binaries.yml. The npm +
+# crates.io bindings are release.yml.
+#
 # Prerequisites before the first tagged release succeeds:
-# 1. Create the tap repo `adammharris/homebrew-tap` and seed it with
-# Formula/fig.rb (copy this repo's Formula/fig.rb). Users then install with
-# `brew install adammharris/tap/fig`.
-# 2. Add a HOMEBREW_TAP_TOKEN secret: a PAT with contents:write on the tap.
+# 1. Create the tap repo `adammharris/homebrew-tap` (already done).
+# 2. Add a HOMEBREW_TAP_TOKEN secret: a PAT with contents:write on the tap
+# (already done).
 on
 > push.tags = [v*.*.*]
 > workflow_dispatch = null
 
-permissions.contents = write # the binary job attaches an asset to the GitHub Release
+permissions.contents = write # the binary jobs attach assets to the GitHub Release
 
-jobs.macos-binary
-> name = Build + attach macOS binary
+jobs.macos-binaries
+> name = Build + attach macOS binaries
 > runs-on = macos-latest
 > if = github.ref_type == 'tag'
 
-jobs.macos-binary.steps[]
+jobs.macos-binaries.steps[]
 > uses = actions/checkout@v4
 +
 > uses = mlugg/setup-zig@v2
 > with.version = 0.16.0
 +
-> name = Build universal (arm64 + x86_64) binary
+> name = Build macOS arm64
 > run = '''
-zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=aarch64-macos --prefix zig-out/arm
-zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-macos --prefix zig-out/x86
-mkdir -p dist
-lipo -create -output dist/fig zig-out/arm/bin/fig zig-out/x86/bin/fig
-lipo -info dist/fig
-tar -czf fig-macos.tar.gz -C dist fig
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=aarch64-macos --prefix zig-out/macos-arm64
+tar -czf fig-macos-arm64.tar.gz -C zig-out/macos-arm64/bin fig
+
+'''
++
+> name = Build macOS x86_64
+> run = '''
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-macos --prefix zig-out/macos-x64
+tar -czf fig-macos-x86_64.tar.gz -C zig-out/macos-x64/bin fig
 
 '''
 +
 > name = Attach to the GitHub Release
 > uses = softprops/action-gh-release@v2
-> with = { tag_name = "${{ github.ref_name }}", files = fig-macos.tar.gz }
+> with
+> > tag_name = ${{ github.ref_name }}
+> > files = '''
+fig-macos-arm64.tar.gz
+fig-macos-x86_64.tar.gz
+
+'''
+
+jobs.linux-binaries
+> name = Build + attach Linux binaries
+> runs-on = ubuntu-latest
+> if = github.ref_type == 'tag'
+
+jobs.linux-binaries.steps[]
+> uses = actions/checkout@v4
++
+> uses = mlugg/setup-zig@v2
+> with.version = 0.16.0
++
+> name = Build Linux x86_64
+> run = '''
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-linux --prefix zig-out/linux-x64
+tar -czf fig-linux-x86_64.tar.gz -C zig-out/linux-x64/bin fig
+
+'''
++
+> name = Build Linux aarch64
+> run = '''
+zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=aarch64-linux --prefix zig-out/linux-arm64
+tar -czf fig-linux-aarch64.tar.gz -C zig-out/linux-arm64/bin fig
+
+'''
++
+> name = Attach to the GitHub Release
+> uses = softprops/action-gh-release@v2
+> with
+> > tag_name = ${{ github.ref_name }}
+> > files = '''
+fig-linux-x86_64.tar.gz
+fig-linux-aarch64.tar.gz
+
+'''
 
 jobs.bump-formula
 > name = Bump tap formula
 > runs-on = ubuntu-latest
-> needs = macos-binary # the formula points at the Release asset that job uploads
+> needs = [macos-binaries, linux-binaries]
 > if = github.ref_type == 'tag'
 
 jobs.bump-formula.steps[]
-> # Updates url/sha256/version in Formula/fig.rb on adammharris/homebrew-tap.
-> uses = mislav/bump-homebrew-formula-action@v3
-> with
-> > formula-name = fig
-> > formula-path = Formula/fig.rb
-> > homebrew-tap = adammharris/homebrew-tap
-> > download-url = https://github.com/adammharris/fig/releases/download/${{ github.ref_name }}/fig-macos.tar.gz
+> uses = actions/checkout@v4
++
+> # Downloads the four tarballs the jobs above just attached to this tag's
+> # Release and hashes them — cheaper and less brittle than passing checksums
+> # between jobs via artifacts, and it's what mislav/bump-homebrew-formula-action
+> # did under the hood for the single-URL case this replaces.
+> name = Compute checksums and render Formula/fig.rb
+> run = '''
+version="${GITHUB_REF_NAME#v}"
+base="https://github.com/adammharris/fig/releases/download/${GITHUB_REF_NAME}"
+mac_arm64_sha=$(curl -sL "$base/fig-macos-arm64.tar.gz" | sha256sum | cut -d' ' -f1)
+mac_x64_sha=$(curl -sL "$base/fig-macos-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
+linux_x64_sha=$(curl -sL "$base/fig-linux-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
+linux_arm64_sha=$(curl -sL "$base/fig-linux-aarch64.tar.gz" | sha256sum | cut -d' ' -f1)
+sed \
+  -e "s/__VERSION__/$version/g" \
+  -e "s/__MAC_ARM64_SHA256__/$mac_arm64_sha/" \
+  -e "s/__MAC_X86_64_SHA256__/$mac_x64_sha/" \
+  -e "s/__LINUX_X86_64_SHA256__/$linux_x64_sha/" \
+  -e "s/__LINUX_AARCH64_SHA256__/$linux_arm64_sha/" \
+  Formula/fig.rb > /tmp/fig.rb
+
+'''
++
+> name = Push to the tap
 > env.COMMITTER_TOKEN = ${{ secrets.HOMEBREW_TAP_TOKEN }}
+> run = '''
+git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/adammharris/homebrew-tap" tap
+cp /tmp/fig.rb tap/Formula/fig.rb
+cd tap
+git config user.name "github-actions[bot]"
+git config user.email "github-actions[bot]@users.noreply.github.com"
+git add Formula/fig.rb
+if git diff --cached --quiet; then
+  echo "Formula unchanged — skipping commit"
+else
+  git commit -m "fig ${GITHUB_REF_NAME#v}"
+  git push
+fi
+
+'''

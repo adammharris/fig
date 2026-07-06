@@ -36,6 +36,7 @@ const mappings = [_]Mapping{
     .{ .src = "figl/build.zig.figl", .dest = "build.zig.zon", .format = "zon" },
     .{ .src = "figl/ci.figl", .dest = ".github/workflows/ci.yml", .format = "yaml" },
     .{ .src = "figl/homebrew.figl", .dest = ".github/workflows/homebrew.yml", .format = "yaml" },
+    .{ .src = "figl/release-binaries.figl", .dest = ".github/workflows/release-binaries.yml", .format = "yaml" },
     .{ .src = "figl/release.figl", .dest = ".github/workflows/release.yml", .format = "yaml" },
 };
 

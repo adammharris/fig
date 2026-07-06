@@ -2,18 +2,20 @@ name = Release (npm + crates.io)
 
 # Publish the npm package and the crates.io crate. There is no Zig package step:
 # Zig has no central registry — consumers `zig fetch` this repo at a git tag, so
-# pushing the tag *is* the Zig release. The Homebrew CLI release is a separate
-# workflow (homebrew.yml).
+# pushing the tag *is* the Zig release. The macOS CLI binary + Homebrew tap
+# bump is a separate workflow (homebrew.yml); Linux/Windows/WASI CLI binaries
+# are release-binaries.yml.
 #
-# DISABLED FOR NOW: runs only via manual `workflow_dispatch`. Re-enable automatic
-# tag releases by uncommenting the `push.tags` trigger below. The crate carries
-# the `license`, `description`, and `readme` crates.io needs (the README and
-# license text are vendored in from the repo root by the `vendor-rust` step that
-# runs before `cargo publish`).
+# LIVE on every `v*.*.*` tag push (also runnable by hand via
+# `workflow_dispatch`). The crate carries the `license`, `description`, and
+# `readme` crates.io needs (the README and license text are vendored in from
+# the repo root by the `vendor-rust` step that runs before `cargo publish`).
 #
-# Required repository secrets (when enabled):
-# NPM_TOKEN             — npm automation token with publish rights
-# CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights
+# Required repository secrets:
+# NPM_TOKEN             — npm automation token with publish rights (not yet
+#                         set — the npm job will fail at the publish step
+#                         until it's added: `gh secret set NPM_TOKEN`)
+# CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights (already set)
 on
 > workflow_dispatch = {}
 > push.tags = [v*.*.*]
