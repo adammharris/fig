@@ -10,7 +10,7 @@
 // site; the `*Raw` variants pass already-serialized text straight through.
 import { check, Format } from "./types.ts";
 import { Frame, encodePath, encodeKeyList, encodeIndexList, readOutSlice, Status, type Segment } from "./ffi.ts";
-import { V, valueText, type JsValue, type Value } from "./value.ts";
+import { V, valueText, type JsInput, type Value } from "./value.ts";
 
 /** The bound C ABI edit functions a concrete editor supplies. */
 export interface EditFns {
@@ -49,7 +49,7 @@ export abstract class Editable {
   // ── value edits (over Value / plain JS) ─────────────────────────────────
 
   /** Replace the value at `path` with `value`. */
-  replaceValue(path: readonly Segment[], value: Value | JsValue): void {
+  replaceValue(path: readonly Segment[], value: Value | JsInput): void {
     this.replaceValueRaw(path, valueText(value, this.textFormat));
   }
 
@@ -66,7 +66,7 @@ export abstract class Editable {
   }
 
   /** Insert `key: value` into the mapping at `path` (empty path = root). */
-  insertValue(path: readonly Segment[], key: string, value: Value | JsValue): void {
+  insertValue(path: readonly Segment[], key: string, value: Value | JsInput): void {
     this.insertValueRaw(path, key, valueText(value, this.textFormat));
   }
 
@@ -74,17 +74,17 @@ export abstract class Editable {
    *  the trailing key is absent. Folds the `replaceValue` → (on `NotFound`)
    *  `insertValue` two-step into one call. `path` must end in a key; a missing
    *  intermediate container throws `NotFound`. */
-  set(path: readonly Segment[], value: Value | JsValue): void {
+  set(path: readonly Segment[], value: Value | JsInput): void {
     this.setRaw(path, valueText(value, this.textFormat));
   }
 
   /** Append `value` to the sequence at `path`. */
-  appendValue(path: readonly Segment[], value: Value | JsValue): void {
+  appendValue(path: readonly Segment[], value: Value | JsInput): void {
     this.appendValueRaw(path, valueText(value, this.textFormat));
   }
 
   /** Prepend `value` to the sequence at `path`. */
-  prependValue(path: readonly Segment[], value: Value | JsValue): void {
+  prependValue(path: readonly Segment[], value: Value | JsInput): void {
     this.prependValueRaw(path, valueText(value, this.textFormat));
   }
 
@@ -231,7 +231,7 @@ export abstract class Editable {
    *  can't be safely diffed — an empty list, an empty current list, a non-scalar
    *  item on either side, a non-sequence target, or a format whose scalars can't
    *  stand alone (TOML); the caller should then replace the whole value. */
-  setSequence(path: readonly Segment[], items: readonly (Value | JsValue)[]): void {
+  setSequence(path: readonly Segment[], items: readonly (Value | JsInput)[]): void {
     const frame = new Frame();
     try {
       const p = encodePath(frame, path);

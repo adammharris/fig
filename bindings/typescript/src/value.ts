@@ -56,10 +56,10 @@ export const V = {
   map: (entries: Array<[Value, Value]>): Value => ({ kind: "map", entries }),
 };
 
-/** A plain JavaScript value `fromJS` accepts and `toJS` produces. */
+/** A plain JavaScript value {@link toJS} produces (the read side). `undefined`
+ *  never appears in output — see {@link JsInput} for the write side. */
 export type JsValue =
   | null
-  | undefined
   | boolean
   | number
   | bigint
@@ -68,11 +68,25 @@ export type JsValue =
   | Map<JsValue, JsValue>
   | { [key: string]: JsValue };
 
+/** A plain JavaScript value {@link fromJS} / {@link serialize} accept (the write
+ *  side). Like {@link JsValue} but also allows `undefined` (treated as `null`),
+ *  so ordinary objects with optional fields pass through without a cast. */
+export type JsInput =
+  | null
+  | undefined
+  | boolean
+  | number
+  | bigint
+  | string
+  | readonly JsInput[]
+  | Map<JsInput, JsInput>
+  | { [key: string]: JsInput };
+
 /** Convert a plain JavaScript value into a {@link Value} tree. Integers map to
  *  `int` (or `uint` past the i64 range), other numbers to `float`; a `Map`
  *  preserves entry order and non-string keys, a plain object becomes a string-
- *  keyed map in insertion order. */
-export function fromJS(input: JsValue): Value {
+ *  keyed map in insertion order. `undefined` (like `null`) becomes `null`. */
+export function fromJS(input: JsInput): Value {
   if (input === null || input === undefined) return V.null();
   switch (typeof input) {
     case "boolean":
@@ -118,14 +132,31 @@ export function toJS(value: Value): JsValue {
     case "seq":
       return value.items.map(toJS);
     case "map": {
-      if (value.entries.every(([k]) => k.kind === "string")) {
-        const obj: { [key: string]: JsValue } = {};
-        for (const [k, v] of value.entries) obj[(k as { value: string }).value] = toJS(v);
-        return obj;
+      // Represent as a plain object only when it is lossless to do so: every key
+      // is a string AND none is an array-index key, since JS objects reorder
+      // integer-like keys ahead of the rest — which would silently lose the
+      // document's key order. Otherwise fall back to an order-faithful Map.
+      const plainSafe = value.entries.every(
+        ([k]) => k.kind === "string" && !isArrayIndexKey((k as { value: string }).value),
+      );
+      if (plainSafe) {
+        // `Object.fromEntries` defines own properties, so a "__proto__" key
+        // becomes a normal own field instead of mutating the prototype.
+        return Object.fromEntries(
+          value.entries.map(([k, v]) => [(k as { value: string }).value, toJS(v)]),
+        );
       }
       return new Map(value.entries.map(([k, v]) => [toJS(k), toJS(v)]));
     }
   }
+}
+
+/** Whether `key` is an "array index" string — one a JS engine reorders to the
+ *  front of an object's key order (a canonical decimal in `[0, 2³²−1)`). Such a
+ *  key forces the {@link toJS} map fallback so entry order is preserved. */
+function isArrayIndexKey(key: string): boolean {
+  if (!/^(?:0|[1-9]\d*)$/.test(key)) return false;
+  return Number(key) < 0xffffffff;
 }
 
 /** Format a float the way fig's serializer reads it back: `.nan`/`.inf`, and a
@@ -189,8 +220,8 @@ function emitNumber(handle: number, text: string, isFloat: boolean, frame: Frame
 /** Render a value to `format` via fig's serializer. Accepts a {@link Value} tree
  *  or any plain JS value (converted with {@link fromJS}). `options` controls
  *  output style such as compact vs. pretty-printed JSON. */
-export function serialize(value: Value | JsValue, format: Format, options?: SerializeOptions): string {
-  const node: Value = isValue(value) ? value : fromJS(value as JsValue);
+export function serialize(value: Value | JsInput, format: Format, options?: SerializeOptions): string {
+  const node: Value = isValue(value) ? value : fromJS(value as JsInput);
   const frame = new Frame();
   const outValue = frame.alloc(4); // *FigValue out-pointer
   try {
@@ -213,7 +244,7 @@ export function serialize(value: Value | JsValue, format: Format, options?: Seri
 /** Serialize a value for splicing into an editor: the rendered form with a
  *  single trailing newline stripped (the editor re-frames context at the site).
  *  Mirrors the Rust binding's `value_text`. */
-export function valueText(value: Value | JsValue, format: Format, options?: SerializeOptions): string {
+export function valueText(value: Value | JsInput, format: Format, options?: SerializeOptions): string {
   const s = serialize(value, format, options);
   return s.endsWith("\n") ? s.slice(0, -1) : s;
 }
@@ -222,8 +253,8 @@ export function valueText(value: Value | JsValue, format: Format, options?: Seri
  *  comments dropped or degraded). The built value has no source envelopes, so
  *  `options.lossless` is ignored. Returns one {@link Warning} per lossy event
  *  (empty if nothing is lost). The build/serialize mirror of {@link serialize}. */
-export function diagnose(value: Value | JsValue, format: Format, options?: SerializeOptions): Warning[] {
-  const node: Value = isValue(value) ? value : fromJS(value as JsValue);
+export function diagnose(value: Value | JsInput, format: Format, options?: SerializeOptions): Warning[] {
+  const node: Value = isValue(value) ? value : fromJS(value as JsInput);
   const frame = new Frame();
   const outValue = frame.alloc(4);
   try {

@@ -7,8 +7,10 @@
 // (Document, Editor, Embed, serialize) speaks in JS types and never touches a
 // pointer.
 //
-// The module imports nothing and exports its memory, so it instantiates
-// synchronously and works identically under Node and in the browser.
+// The module imports nothing and exports its memory. Instantiation is lazy: the
+// first FFI call compiles it synchronously (fine under Node and Web Workers). A
+// browser main thread forbids synchronous compilation of modules >4 KB, so
+// there a caller must `await init()` once before any other call — see `init`.
 import { WASM_BASE64 } from "./wasm-bytes.ts";
 import type { SerializeOptions } from "./types.ts";
 
@@ -129,8 +131,59 @@ function decodeBase64(b64: string): Uint8Array<ArrayBuffer> {
   return out;
 }
 
-const instance = new WebAssembly.Instance(new WebAssembly.Module(decodeBase64(WASM_BASE64)));
-const exports = instance.exports as unknown as Exports;
+// The instance is created lazily so that merely importing the package never
+// compiles wasm — which would throw on a browser main thread (sync compile of a
+// >4 KB module is disallowed there). `ensure()` does the sync compile on first
+// use; `init()` does it asynchronously for the browser.
+let exports: Exports | null = null;
+let initPromise: Promise<void> | null = null;
+
+/** Compile + instantiate the fig wasm module, synchronously. Return its exports
+ *  or throw a guidance error (the browser-main-thread case). */
+function ensure(): Exports {
+  if (exports) return exports;
+  try {
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(decodeBase64(WASM_BASE64)));
+    exports = instance.exports as unknown as Exports;
+  } catch (err) {
+    throw new Error(
+      "fig: the WebAssembly module failed to initialize synchronously. On a " +
+        "browser main thread, call `await init()` once at startup before using " +
+        "any fig API (synchronous compilation of modules larger than 4 KB is " +
+        "disallowed there). Underlying error: " +
+        (err instanceof Error ? err.message : String(err)),
+    );
+  }
+  return exports;
+}
+
+/** Asynchronously compile + instantiate the fig wasm module. Safe to call
+ *  anywhere — including a browser main thread — and idempotent (concurrent calls
+ *  share one instantiation). Optional under Node and in Web Workers, where the
+ *  module also initializes lazily on first use. Once it resolves, every fig API
+ *  is usable synchronously. */
+export function init(): Promise<void> {
+  if (exports) return Promise.resolve();
+  if (initPromise) return initPromise;
+  initPromise = WebAssembly.instantiate(decodeBase64(WASM_BASE64), {}).then(({ instance }) => {
+    exports = instance.exports as unknown as Exports;
+  });
+  return initPromise;
+}
+
+/** True once the wasm module is instantiated (after `init()` or a first sync
+ *  call). Lets a browser caller check without triggering a sync compile. */
+export function isReady(): boolean {
+  return exports !== null;
+}
+
+// A Proxy so every existing `fig.fig_*` / `fig.memory` call site lazily triggers
+// `ensure()` on first property access, with no change to the callers.
+const fig: Exports = new Proxy({} as Exports, {
+  get(_target, prop) {
+    return ensure()[prop as keyof Exports];
+  },
+}) as Exports;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
@@ -138,10 +191,10 @@ const decoder = new TextDecoder("utf-8", { fatal: false });
 /** A fresh view over linear memory. `memory.grow` detaches the old buffer, so a
  *  view must be re-derived after any allocation rather than cached. */
 function u8(): Uint8Array {
-  return new Uint8Array(exports.memory.buffer);
+  return new Uint8Array(ensure().memory.buffer);
 }
 function dv(): DataView {
-  return new DataView(exports.memory.buffer);
+  return new DataView(ensure().memory.buffer);
 }
 
 /** A scratch arena: every allocation made through a frame is freed together by
@@ -152,7 +205,7 @@ export class Frame {
   /** Allocate `len` uninitialized bytes (no-op pointer 0 for an empty request). */
   alloc(len: number): number {
     if (len === 0) return 0;
-    const ptr = exports.fig_alloc(len);
+    const ptr = ensure().fig_alloc(len);
     if (ptr === 0) throw new Error("fig_alloc: out of memory");
     this.allocs.push([ptr, len]);
     return ptr;
@@ -172,7 +225,9 @@ export class Frame {
   }
 
   dispose(): void {
-    for (const [ptr, len] of this.allocs) exports.fig_free(ptr, len);
+    if (this.allocs.length === 0) return;
+    const free = ensure().fig_free;
+    for (const [ptr, len] of this.allocs) free(ptr, len);
     this.allocs.length = 0;
   }
 }
@@ -358,4 +413,12 @@ export function readFigWarning(ptr: number): { code: number; cause: number; path
   return { code, cause, path, note };
 }
 
-export { exports as fig };
+/** Build a FinalizationRegistry that frees a native handle when its JS wrapper
+ *  is garbage-collected without an explicit `dispose()` — a leak backstop, not a
+ *  substitute for `using`/`dispose()` (GC timing is unspecified). Returns `null`
+ *  on a runtime without FinalizationRegistry, so callers stay a no-op there. */
+export function handleRegistry(destroy: (handle: number) => void): FinalizationRegistry<number> | null {
+  return typeof FinalizationRegistry !== "undefined" ? new FinalizationRegistry(destroy) : null;
+}
+
+export { fig };

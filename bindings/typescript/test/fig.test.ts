@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   capabilities,
+  convert,
   diagnose,
   Document,
   Editor,
@@ -11,6 +12,8 @@ import {
   ExtKind,
   FigError,
   Format,
+  init,
+  isReady,
   NodeKind,
   Status,
   V,
@@ -21,6 +24,7 @@ import {
   fromJS,
   parse,
   serialize,
+  stringify,
   split,
   toJS,
 } from "../src/index.ts";
@@ -389,4 +393,113 @@ test("value diagnose reports a degraded datetime", () => {
   assert.equal(warns[0].code, WarningCode.TypeDegraded);
   assert.equal(warns[0].path, "when");
   assert.equal(warns[0].note, "string");
+});
+
+// ── new: init / lazy loading ────────────────────────────────────────────────
+
+test("init() is idempotent and leaves the module ready", async () => {
+  // The suite has already triggered lazy init via earlier tests, so it's ready.
+  await init();
+  await init(); // second call is a no-op
+  assert.equal(isReady(), true);
+});
+
+// ── new: convert() one-shot ─────────────────────────────────────────────────
+
+test("convert() bridges formats in one call, releasing the handle", () => {
+  assert.equal(
+    convert("name: fig\nport: 8080\n", Format.Yaml, Format.Json),
+    '{\n  "name": "fig",\n  "port": 8080\n}\n',
+  );
+  // Lossless round-trips a YAML null into TOML (which has no null) via envelope.
+  const toml = convert("a: null\nb: 1\n", Format.Yaml, Format.Toml, { lossless: true });
+  assert.equal(convert(toml, Format.Toml, Format.Yaml, { lossless: true }), "a: null\nb: 1\n");
+  // Without lossless, the unrepresentable null throws rather than silently drop.
+  assert.throws(
+    () => convert("a: null\n", Format.Yaml, Format.Toml),
+    (err: unknown) => err instanceof FigError && err.status === Status.UnsupportedFormat,
+  );
+});
+
+// ── new: Document.get / has / nodeAt ────────────────────────────────────────
+
+test("Document.get plucks values by path; has reports presence", () => {
+  using doc = Document.parse(
+    "[server]\nhost = \"localhost\"\nports = [80, 443]\n",
+    Format.Toml,
+  );
+  assert.equal(doc.get(["server", "host"]), "localhost");
+  assert.equal(doc.get(["server", "ports", 1]), 443); // numbers index sequences
+  assert.deepEqual(doc.get(["server", "ports"]), [80, 443]);
+  assert.equal(doc.get(["server", "missing"]), undefined);
+  assert.equal(doc.get(["server", "ports", 9]), undefined); // out of range
+  assert.equal(doc.get(["server", "host", "x"]), undefined); // descend into a scalar
+  assert.equal(doc.has(["server", "host"]), true);
+  assert.equal(doc.has(["server", "tls"]), false);
+  assert.deepEqual(doc.get([]), { server: { host: "localhost", ports: [80, 443] } }); // empty path = root
+});
+
+// ── new: generic parse ──────────────────────────────────────────────────────
+
+test("parse carries a caller-supplied type", () => {
+  interface Config { name: string; port: number }
+  const cfg = parse<Config>("name = fig\nport = 8080\n", Format.Fig);
+  assert.equal(cfg.name, "fig");
+  assert.equal(cfg.port, 8080);
+});
+
+// ── new: stringify accepts a Value tree (not just plain JS) ──────────────────
+
+test("stringify accepts a Value tree as well as plain JS", () => {
+  const value = V.seq([V.int(1), V.uint(2n)]);
+  assert.equal(stringify(value, Format.Json, { pretty: false }), "[1,2]\n");
+  assert.equal(stringify([1, 2], Format.Json, { pretty: false }), "[1,2]\n");
+});
+
+// ── new: toJS preserves key order for array-index-like keys ──────────────────
+
+test("toJS keeps a Map when string keys would reorder as an object", () => {
+  // "10" before "2": a plain object would sort these numerically and lose order.
+  const value = V.map([
+    [V.string("10"), V.int(1)],
+    [V.string("2"), V.int(2)],
+    [V.string("name"), V.string("fig")],
+  ]);
+  const js = toJS(value);
+  assert.ok(js instanceof Map);
+  assert.deepEqual([...(js as Map<unknown, unknown>).keys()], ["10", "2", "name"]);
+  // All-non-index string keys still become a plain object.
+  assert.deepEqual(toJS(V.map([[V.string("b"), V.int(1)], [V.string("a"), V.int(2)]])), { b: 1, a: 2 });
+});
+
+test("toJS does not pollute the prototype via a __proto__ key", () => {
+  const js = toJS(V.map([[V.string("__proto__"), V.string("x")]])) as Record<string, unknown>;
+  // Own enumerable property, not a mutated prototype.
+  assert.equal(Object.getPrototypeOf(js), Object.prototype);
+  assert.equal(Object.getOwnPropertyDescriptor(js, "__proto__")?.value, "x");
+});
+
+// ── new: undefined is accepted on the write side (JsInput) ───────────────────
+
+test("undefined serializes as null", () => {
+  assert.equal(serialize(undefined, Format.Json), "null\n");
+  assert.equal(stringify({ a: undefined, b: 1 }, Format.Json, { pretty: false }), '{"a":null,"b":1}\n');
+});
+
+// ── new: disposal guards ────────────────────────────────────────────────────
+
+test("using a disposed Document throws, and dispose is idempotent", () => {
+  const doc = Document.parse("a: 1\n", Format.Yaml);
+  doc.dispose();
+  doc.dispose(); // idempotent — no throw
+  assert.throws(() => doc.root(), /already disposed/);
+  assert.throws(() => doc.get(["a"]), /already disposed/);
+});
+
+test("using a disposed Editor throws", () => {
+  const ed = Editor.open("a: 1\n", Format.Yaml);
+  ed.dispose();
+  ed.dispose(); // idempotent
+  assert.throws(() => ed.source(), /already disposed/);
+  assert.throws(() => ed.set(["a"], 2), /already disposed/);
 });

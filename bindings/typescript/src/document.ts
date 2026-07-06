@@ -22,16 +22,22 @@ import {
   fig,
   FIG_WARNING_SIZE,
   Frame,
+  handleRegistry,
   readFigError,
   readFigWarning,
   readOutSlice,
   readU32,
   writeWarningSize,
+  type Segment,
 } from "./ffi.ts";
 import { numberFromRaw, toJS, V, type JsValue, type Value } from "./value.ts";
 
 const NODE_NONE = 0xffffffff;
 const encoder = new TextEncoder();
+
+// Frees the handle of a Document that was dropped without dispose(). A backstop
+// only — `using`/`dispose()` remains the deterministic path.
+const REGISTRY = handleRegistry((handle) => fig.fig_document_destroy(handle));
 
 // fig node ids are `u32`, but a wasm `i32` return arrives in JS sign-extended,
 // so `0xFFFFFFFF` (the "no node" sentinel) shows up as -1. Re-widen to unsigned
@@ -45,6 +51,7 @@ export class Document {
 
   private constructor(handle: number) {
     this.handle = handle;
+    REGISTRY?.register(this, handle, this);
   }
 
   /** Parse `input` in `format`. Accepts a string or raw bytes. On a parse
@@ -194,12 +201,62 @@ export class Document {
     return toJS(this.toValue());
   }
 
+  /** Resolve `path` (mapping keys as strings, sequence indices as numbers) to a
+   *  node id, or `null` if any segment is missing or lands on the wrong kind. An
+   *  empty path returns the {@link Document#root}. */
+  nodeAt(path: readonly Segment[]): number | null {
+    let current = this.root();
+    for (const seg of path) {
+      if (current === null) return null;
+      if (typeof seg === "number") {
+        if (this.kind(current) !== NodeKind.Sequence || seg < 0) return null;
+        let i = 0;
+        let found: number | null = null;
+        for (const child of this.children(current)) {
+          if (i++ === seg) {
+            found = child;
+            break;
+          }
+        }
+        current = found;
+      } else {
+        if (this.kind(current) !== NodeKind.Mapping) return null;
+        let found: number | null = null;
+        for (const kv of this.children(current)) {
+          const key = this.keyOf(kv);
+          if (key !== null && this.asString(key) === seg) {
+            found = this.valueOf(kv);
+            break;
+          }
+        }
+        current = found;
+      }
+    }
+    return current;
+  }
+
+  /** Pluck a single value out of the document by `path`, as a plain JS value, or
+   *  `undefined` if the path does not resolve. Convenience over manual
+   *  {@link Document#nodeAt} traversal — `doc.get(["server", "port"])`. */
+  get(path: readonly Segment[]): JsValue | undefined {
+    const node = this.nodeAt(path);
+    return node === null ? undefined : toJS(this.nodeToValue(node));
+  }
+
+  /** Whether `path` resolves to a node in the document. */
+  has(path: readonly Segment[]): boolean {
+    return this.nodeAt(path) !== null;
+  }
+
   private nodeToValue(id: number): Value {
-    // A format-specific scalar reports as String/Int at the `kind` ABI; recover
-    // it faithfully here (mirrors the Rust binding's `to_value`).
-    const ext = this.asExtended(id);
-    if (ext !== null) return V.extended(ext.ext, ext.text);
     const kind = this.kind(id);
+    // A format-specific scalar reports as String/Int at the `kind` ABI; recover
+    // it faithfully here (mirrors the Rust binding's `to_value`). Only scalars
+    // can be extended, so skip the extra FFI call for containers.
+    if (kind === NodeKind.String || kind === NodeKind.Int) {
+      const ext = this.asExtended(id);
+      if (ext !== null) return V.extended(ext.ext, ext.text);
+    }
     switch (kind) {
       case NodeKind.Null:
         return V.null();
@@ -286,6 +343,7 @@ export class Document {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    REGISTRY?.unregister(this);
     fig.fig_document_destroy(this.handle);
   }
 

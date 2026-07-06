@@ -7,31 +7,37 @@
 // methods are inherited from `Editable`. `extract` is a parse-free locator that
 // just reports the fence/content byte spans. Release with `dispose`.
 import { check, EmbedType, FigError, Format, Status } from "./types.ts";
-import { fig, Frame, readOutSlice, readU32, writeU32 } from "./ffi.ts";
+import { fig, Frame, handleRegistry, readOutSlice, readU32, writeU32 } from "./ffi.ts";
 import { Editable, type EditFns } from "./edit-ops.ts";
 
 const encoder = new TextEncoder();
 
+// Frees the handle of an Embed dropped without dispose() (leak backstop only).
+const REGISTRY = handleRegistry((handle) => fig.fig_embed_destroy(handle));
+
+// Thunks, not direct `fig.fig_embed_*` references: a direct reference would read
+// off the lazy `fig` proxy at module load and force wasm instantiation on
+// import (which throws on a browser main thread). See editor.ts / ffi.ts `init`.
 const EMBED_FNS: EditFns = {
-  replaceVal: fig.fig_embed_replace_val,
-  replaceKey: fig.fig_embed_replace_key,
-  set: fig.fig_embed_set,
-  insertKey: fig.fig_embed_insert_key,
-  deleteKey: fig.fig_embed_delete_key,
-  appendSeq: fig.fig_embed_append_seq,
-  prependSeq: fig.fig_embed_prepend_seq,
-  removeSeqItem: fig.fig_embed_remove_seq_item,
-  moveKey: fig.fig_embed_move_key,
-  reorderKeys: fig.fig_embed_reorder_keys,
-  moveItem: fig.fig_embed_move_item,
-  reorderItems: fig.fig_embed_reorder_items,
-  setSequence: fig.fig_embed_set_sequence,
-  addLeadingComment: fig.fig_embed_add_leading_comment,
-  setTrailingComment: fig.fig_embed_set_trailing_comment,
-  deleteLeadingComments: fig.fig_embed_delete_leading_comments,
-  deleteTrailingComment: fig.fig_embed_delete_trailing_comment,
-  getLeadingComment: fig.fig_embed_get_leading_comment,
-  getTrailingComment: fig.fig_embed_get_trailing_comment,
+  replaceVal: (...a) => fig.fig_embed_replace_val(...a),
+  replaceKey: (...a) => fig.fig_embed_replace_key(...a),
+  set: (...a) => fig.fig_embed_set(...a),
+  insertKey: (...a) => fig.fig_embed_insert_key(...a),
+  deleteKey: (...a) => fig.fig_embed_delete_key(...a),
+  appendSeq: (...a) => fig.fig_embed_append_seq(...a),
+  prependSeq: (...a) => fig.fig_embed_prepend_seq(...a),
+  removeSeqItem: (...a) => fig.fig_embed_remove_seq_item(...a),
+  moveKey: (...a) => fig.fig_embed_move_key(...a),
+  reorderKeys: (...a) => fig.fig_embed_reorder_keys(...a),
+  moveItem: (...a) => fig.fig_embed_move_item(...a),
+  reorderItems: (...a) => fig.fig_embed_reorder_items(...a),
+  setSequence: (...a) => fig.fig_embed_set_sequence(...a),
+  addLeadingComment: (...a) => fig.fig_embed_add_leading_comment(...a),
+  setTrailingComment: (...a) => fig.fig_embed_set_trailing_comment(...a),
+  deleteLeadingComments: (...a) => fig.fig_embed_delete_leading_comments(...a),
+  deleteTrailingComment: (...a) => fig.fig_embed_delete_trailing_comment(...a),
+  getLeadingComment: (...a) => fig.fig_embed_get_leading_comment(...a),
+  getTrailingComment: (...a) => fig.fig_embed_get_trailing_comment(...a),
 };
 
 /** A half-open `[start, end)` byte span within the host file. */
@@ -65,6 +71,7 @@ function innerFormat(kind: EmbedType): Format {
 export class Embed extends Editable {
   private constructor(handle: number, kind: EmbedType) {
     super(handle, EMBED_FNS, innerFormat(kind));
+    REGISTRY?.register(this, handle, this);
   }
 
   private static openWith(
@@ -155,6 +162,7 @@ export class Embed extends Editable {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    REGISTRY?.unregister(this);
     fig.fig_embed_destroy(this.handle);
   }
 }
