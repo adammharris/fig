@@ -455,34 +455,33 @@ pub fn moveContainer(self: *FigEditor, src_path: []const AST.PathSegment, dest_p
     defer moved.deinit(self.allocator);
     for (used) |r| try moved.appendSlice(self.allocator, source[r.start..r.end]);
 
-    var kept: std.ArrayList(u8) = .empty;
-    defer kept.deinit(self.allocator);
-    var insert_pos: ?usize = null;
+    // Emit the kept source with the used regions removed and `moved` spliced in
+    // at `dest_at`, in a single pass. The result is at most the source plus the
+    // separator `appendWithBlankBefore` may add (the moved bytes are cut from
+    // the source, then re-added), so one precise reservation avoids reallocs.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(self.allocator);
+    try out.ensureTotalCapacity(self.allocator, source.len + 2);
+    var inserted = false;
     var pos: usize = 0;
     for (used) |r| {
-        if (insert_pos == null and dest_at >= pos and dest_at <= r.start) {
-            try kept.appendSlice(self.allocator, source[pos..dest_at]);
-            insert_pos = kept.items.len;
-            try kept.appendSlice(self.allocator, source[dest_at..r.start]);
+        if (!inserted and dest_at >= pos and dest_at <= r.start) {
+            try out.appendSlice(self.allocator, source[pos..dest_at]);
+            try appendWithBlankBefore(&out, self.allocator, moved.items);
+            try out.appendSlice(self.allocator, source[dest_at..r.start]);
+            inserted = true;
         } else {
-            try kept.appendSlice(self.allocator, source[pos..r.start]);
+            try out.appendSlice(self.allocator, source[pos..r.start]);
         }
         pos = r.end;
     }
-    if (insert_pos == null) {
-        try kept.appendSlice(self.allocator, source[pos..dest_at]);
-        insert_pos = kept.items.len;
-        try kept.appendSlice(self.allocator, source[dest_at..]);
+    if (!inserted) {
+        try out.appendSlice(self.allocator, source[pos..dest_at]);
+        try appendWithBlankBefore(&out, self.allocator, moved.items);
+        try out.appendSlice(self.allocator, source[dest_at..]);
     } else {
-        try kept.appendSlice(self.allocator, source[pos..]);
+        try out.appendSlice(self.allocator, source[pos..]);
     }
-
-    const ip = insert_pos.?;
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(self.allocator);
-    try out.appendSlice(self.allocator, kept.items[0..ip]);
-    try appendWithBlankBefore(&out, self.allocator, moved.items);
-    try out.appendSlice(self.allocator, kept.items[ip..]);
     try self.replaceAtSpan(Span.init(0, source.len), out.items);
 }
 
@@ -512,11 +511,17 @@ pub fn reorderContainers(self: *FigEditor, order: []const []const u8) !void {
         defer g.regions.deinit(self.allocator);
         const n = normalizeRegions(g.regions.items);
         var bytes: std.ArrayList(u8) = .empty;
+        // Guard both windows before `bundles` owns the buffer: an OOM during the
+        // fill loop frees the growable `bytes`; an OOM in the final `append`
+        // (after `toOwnedSlice` has emptied `bytes`) frees the moved-out slice.
+        errdefer bytes.deinit(self.allocator);
         for (g.regions.items[0..n]) |r| {
             try bytes.appendSlice(self.allocator, source[r.start..r.end]);
             try all.append(self.allocator, r);
         }
-        try bundles.append(self.allocator, try bytes.toOwnedSlice(self.allocator));
+        const owned = try bytes.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(owned);
+        try bundles.append(self.allocator, owned);
     }
     const total = normalizeRegions(all.items);
     const used = all.items[0..total];

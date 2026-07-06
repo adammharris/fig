@@ -1979,6 +1979,7 @@ fn serializeStatus(err: AST.SerializeError) FigStatus {
         error.NestedSequenceUnsupported,
         error.InvalidElementName,
         error.NonScalarValue,
+        error.UnexpectedNodeKind,
         => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };

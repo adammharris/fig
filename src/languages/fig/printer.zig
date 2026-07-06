@@ -29,7 +29,7 @@ const AST = @import("../../ast/ast.zig");
 const tok = @import("tokenizer.zig");
 const Writer = std.Io.Writer;
 
-pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey };
+pub const Error = Writer.Error || error{ UnresolvedAlias, NonStringKey, UnexpectedNodeKind };
 
 /// Deepest `>` count a section header's block body may reach before the map is
 /// hoisted into per-child sections instead.
@@ -45,10 +45,26 @@ const max_inline_seq_items = 6;
 /// Recursion guard for the section path buffer (collapse/hoist recursion is
 /// bounded by tree depth; 128 dotted segments is far past any real config).
 const path_cap = 128;
+/// Columns of `" = "`, the operator between a key and its inline value.
+const assign_op_width = 3;
+/// Columns one marker level occupies — a `> ` run cell, or the `* ` bullet.
+const marker_cell = 2;
+
+/// Memoized `inlineWidth` result for a node, keyed by node id (`width_memo`).
+/// `inlineWidth` is asked for the same subtree repeatedly (the block-depth
+/// pre-pass, the fits-inline test, the multiline-flow test, then real
+/// emission), and each call otherwise walks the whole subtree — so caching the
+/// comment-policy-independent core collapses that from superlinear to one pass.
+const WidthMemo = struct { done: bool = false, width: ?usize = null };
 
 writer: *Writer,
 ast: *const AST,
 options: AST.SerializeOptions,
+/// Per-node-id `inlineWidth` cache, sized to `ast.nodes.len` by the entry
+/// points. Empty (`&.{}`) if the one-time allocation failed — the width
+/// helpers fall back to recomputing, so the cache is a pure speedup, never a
+/// correctness dependency.
+width_memo: []WidthMemo = &.{},
 /// Dotted path (key node ids) of the section currently being emitted.
 path: [path_cap]AST.Node.Id = undefined,
 path_len: usize = 0,
@@ -59,6 +75,8 @@ prev_multiline: bool = false,
 
 pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    const memo = p.initWidthMemo();
+    defer if (memo) |m| ast.allocator.free(m);
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
     try p.root(ast.root);
     try writer.flush();
@@ -66,6 +84,8 @@ pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Er
 
 pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize, options: AST.SerializeOptions) Error!void {
     var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    const memo = p.initWidthMemo();
+    defer if (memo) |m| ast.allocator.free(m);
     switch (ast.nodes[id].kind) {
         .mapping => if (depth == 0) {
             try p.emitSections(id);
@@ -122,7 +142,7 @@ fn emitSection(self: *Printer, kv_id: AST.Node.Id) Error!void {
     const v = kv.value;
     switch (self.ast.nodes[v].kind) {
         .mapping => |first_opt| {
-            if (self.fitsInline(v, self.pathWidth() + 3, .allow_trailing))
+            if (self.fitsInline(v, self.pathWidth() + assign_op_width, .allow_trailing))
                 return self.sectionAssign(kv.key, v);
             // Hoist: a body that would pass the depth budget reads better as
             // sections. Only when every comment re-anchors: the map itself
@@ -175,8 +195,7 @@ fn emitSection(self: *Printer, kv_id: AST.Node.Id) Error!void {
             try self.mapBody(v, 1);
         },
         .sequence => |first_opt| {
-            if (self.seqLen(v) <= max_inline_seq_items and
-                self.fitsInline(v, self.pathWidth() + 3, .allow_trailing))
+            if (self.seqFitsInline(v, self.pathWidth() + assign_op_width, .allow_trailing))
                 return self.sectionAssign(kv.key, v);
             // A list of maps is the append header's home turf: `path[]` for
             // the first element, `+` for the rest, fields one `>` deep.
@@ -287,11 +306,10 @@ fn isFlatChild(self: *const Printer, kv_id: AST.Node.Id) bool {
     const chain = self.resolveChain(kv_id);
     const end = self.ast.nodes[chain.end_kv].kind.keyvalue;
     return switch (self.ast.nodes[end.value].kind) {
-        .mapping => self.fitsInline(end.value, 2 + chain.key_width + 3, .allow_trailing),
-        // Mirrors mapEntryLine's inline test exactly: past the item-count
-        // threshold a sequence stacks (multiple lines), so it is not flat.
-        .sequence => self.seqLen(end.value) <= max_inline_seq_items and
-            self.fitsInline(end.value, 2 + chain.key_width + 3, .allow_trailing),
+        .mapping => self.fitsInline(end.value, mapEntryPrefixWidth(1, chain.key_width), .allow_trailing),
+        // Past the item-count threshold a sequence stacks (multiple lines), so
+        // it is not flat — `seqFitsInline` is the shared rule mapEntryLine uses.
+        .sequence => self.seqFitsInline(end.value, mapEntryPrefixWidth(1, chain.key_width), .allow_trailing),
         else => true,
     };
 }
@@ -309,6 +327,20 @@ fn seqLen(self: *const Printer, seq_id: AST.Node.Id) usize {
     var cur = self.ast.nodes[seq_id].kind.sequence;
     while (cur) |el| : (cur = self.ast.nodes[el].next_sibling) n += 1;
     return n;
+}
+
+/// A sequence renders as inline flow (`[a, b, c]`) iff it is under the
+/// item-count threshold AND its inline spelling fits the width budget at
+/// `prefix_width`. The single home for this rule — `mapEntryLine`, `seqBody`,
+/// `isFlatChild`, and `emitSection` all consult it, so it can't drift.
+fn seqFitsInline(self: *const Printer, seq_id: AST.Node.Id, prefix_width: usize, policy: CommentPolicy) bool {
+    return self.seqLen(seq_id) <= max_inline_seq_items and self.fitsInline(seq_id, prefix_width, policy);
+}
+
+/// Columns before a map entry's value: the marker run (`> ` per level), the
+/// dotted key, then `" = "`.
+fn mapEntryPrefixWidth(depth: usize, key_width: usize) usize {
+    return marker_cell * depth + key_width + assign_op_width;
 }
 
 fn hasMappingElement(self: *const Printer, seq_id: AST.Node.Id) bool {
@@ -381,8 +413,7 @@ fn multilineFlowSeq(self: *Printer, seq_id: AST.Node.Id, indent: usize, comment_
         for (0..inner) |_| try self.writer.writeByte(' ');
         const el_node = self.ast.nodes[el];
         if (el_node.kind == .sequence and el_node.kind.sequence != null and
-            (self.seqLen(el) > max_inline_seq_items or
-                !self.fitsInline(el, inner + 1, .strict))) // +1: the trailing comma
+            !self.seqFitsInline(el, inner + 1, .strict)) // +1: the trailing comma
         {
             try self.multilineFlowSeq(el, inner, null);
         } else {
@@ -400,7 +431,10 @@ fn body(self: *Printer, id: AST.Node.Id, depth: usize) Error!void {
     switch (self.ast.nodes[id].kind) {
         .mapping => try self.mapBody(id, depth),
         .sequence => try self.seqBody(id, depth),
-        else => unreachable,
+        // `body` is only reached for containers today, but it is on the
+        // data-driven path from the public `print`/`printNode` — a scalar
+        // arriving from a hand-built or cross-format AST is recoverable, not UB.
+        else => return error.UnexpectedNodeKind,
     }
 }
 
@@ -423,7 +457,7 @@ fn mapEntryLine(self: *Printer, kv_id: AST.Node.Id, depth: usize) Error!void {
     try self.writeMarkers(depth);
     try self.writeChainKeys(kv_id, chain.end_kv);
     const v = end.value;
-    const prefix_width = 2 * depth + chain.key_width + 3;
+    const prefix_width = mapEntryPrefixWidth(depth, chain.key_width);
     switch (self.ast.nodes[v].kind) {
         .mapping => {
             if (self.fitsInline(v, prefix_width, .allow_trailing)) {
@@ -439,9 +473,7 @@ fn mapEntryLine(self: *Printer, kv_id: AST.Node.Id, depth: usize) Error!void {
             }
         },
         .sequence => {
-            if (self.seqLen(v) <= max_inline_seq_items and
-                self.fitsInline(v, prefix_width, .allow_trailing))
-            {
+            if (self.seqFitsInline(v, prefix_width, .allow_trailing)) {
                 try self.writer.writeAll(" = ");
                 try self.flowValue(v);
                 try self.trailingComment(v);
@@ -490,9 +522,7 @@ fn seqBody(self: *Printer, seq_id: AST.Node.Id, depth: usize) Error!void {
                 }
             },
             .sequence => {
-                if (self.seqLen(el) <= max_inline_seq_items and
-                    self.fitsInline(el, elementPrefixWidth(depth), .allow_leading_trailing))
-                {
+                if (self.seqFitsInline(el, elementPrefixWidth(depth), .allow_leading_trailing)) {
                     try self.writer.writeByte(' ');
                     try self.flowValue(el);
                     try self.trailingComment(el);
@@ -534,6 +564,16 @@ fn budget(self: *const Printer) usize {
     return self.options.width;
 }
 
+/// Allocate the per-node `width_memo` from the AST's allocator and install it
+/// on `self`. Returns the owned slice for the caller to free (or null if the
+/// allocation failed — the width helpers degrade to recomputing).
+fn initWidthMemo(self: *Printer) ?[]WidthMemo {
+    const memo = self.ast.allocator.alloc(WidthMemo, self.ast.nodes.len) catch return null;
+    @memset(memo, .{});
+    self.width_memo = memo;
+    return memo;
+}
+
 fn fitsInline(self: *const Printer, id: AST.Node.Id, prefix_width: usize, policy: CommentPolicy) bool {
     const w = self.inlineWidth(id, policy) orelse return false;
     return prefix_width + w <= self.budget();
@@ -544,6 +584,10 @@ fn fitsInline(self: *const Printer, id: AST.Node.Id, prefix_width: usize, policy
 /// leading/trailing per `policy`), the node has no flow spelling (enum
 /// literal, non-finite float, char literal, alias), or an object directly
 /// contains another object (that much structure reads better as block lines).
+///
+/// `policy` gates ONLY `id`'s own comments; everything else — the tag check and
+/// the recursive structural width — is a pure function of `id` (children always
+/// recurse with `.strict`), factored into the memoized `structuralInlineWidth`.
 fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?usize {
     if (self.commentsOn()) {
         const c = self.ast.comments(id);
@@ -554,6 +598,21 @@ fn inlineWidth(self: *const Printer, id: AST.Node.Id, policy: CommentPolicy) ?us
             .allow_leading_trailing => {},
         }
     }
+    return self.structuralInlineWidth(id);
+}
+
+/// The comment-policy-independent core of `inlineWidth`, memoized by node id in
+/// `width_memo`. Falls back to recomputing when the cache is absent (id past
+/// its end, e.g. the allocation failed).
+fn structuralInlineWidth(self: *const Printer, id: AST.Node.Id) ?usize {
+    if (id < self.width_memo.len and self.width_memo[id].done)
+        return self.width_memo[id].width;
+    const w = self.computeInlineWidth(id);
+    if (id < self.width_memo.len) self.width_memo[id] = .{ .done = true, .width = w };
+    return w;
+}
+
+fn computeInlineWidth(self: *const Printer, id: AST.Node.Id) ?usize {
     // A tag-annotated scalar needs `: type =`, which only exists in block
     // position — so it forces its container out of inline flow (same reason as
     // enum_literal/number_special below). A tag the printer DROPS (a `.string`
@@ -618,11 +677,11 @@ fn blockDepthMap(self: *const Printer, map_id: AST.Node.Id, depth: usize) usize 
         const end = self.ast.nodes[chain.end_kv].kind.keyvalue;
         switch (self.ast.nodes[end.value].kind) {
             .mapping => {
-                if (self.fitsInline(end.value, 2 * depth + chain.key_width + 3, .allow_trailing)) continue;
+                if (self.fitsInline(end.value, mapEntryPrefixWidth(depth, chain.key_width), .allow_trailing)) continue;
                 maxd = @max(maxd, self.blockDepthMap(end.value, depth + 1));
             },
             .sequence => {
-                if (self.fitsInline(end.value, 2 * depth + chain.key_width + 3, .allow_trailing)) continue;
+                if (self.fitsInline(end.value, mapEntryPrefixWidth(depth, chain.key_width), .allow_trailing)) continue;
                 if (self.multilineFlowEligible(end.value, .allow_trailing)) continue; // flow value, no block depth
                 maxd = @max(maxd, self.blockDepthSeq(end.value, depth + 1));
             },
@@ -652,9 +711,10 @@ fn blockDepthSeq(self: *const Printer, seq_id: AST.Node.Id, depth: usize) usize 
     return maxd;
 }
 
-/// Columns before an element's value: `* ` at root, `> > * ` etc. below.
+/// Columns before an element's value: `* ` at root, `> > * ` etc. below — the
+/// `> ` marker run plus the `* ` bullet cell (one more `marker_cell`).
 fn elementPrefixWidth(depth: usize) usize {
-    return 2 * depth + 2;
+    return marker_cell * (depth + 1);
 }
 
 const Chain = struct { end_kv: AST.Node.Id, key_width: usize };
@@ -897,7 +957,9 @@ fn flowValue(self: *Printer, id: AST.Node.Id) Error!void {
             }
             try self.writer.writeAll(" }");
         },
-        else => unreachable,
+        // Only containers have a flow spelling; a non-container reaching here
+        // from a foreign AST is recoverable rather than undefined behavior.
+        else => return error.UnexpectedNodeKind,
     }
 }
 

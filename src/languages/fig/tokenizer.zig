@@ -69,14 +69,15 @@ pub fn sniffNumber(token: []const u8) ?NumberResult {
     if (body.len >= 2 and body[0] == '0' and (body[1] == 'x' or body[1] == 'o' or body[1] == 'b')) {
         const digits = body[2..];
         if (digits.len == 0) return null;
+        // Pick the radix classifier once — `body[1]` is loop-invariant.
+        const isValidDigit = switch (body[1]) {
+            'x' => &ascii.isHex,
+            'o' => &ascii.isOctal,
+            'b' => &ascii.isBinary,
+            else => unreachable,
+        };
         for (digits) |c| {
-            const ok = switch (body[1]) {
-                'x' => ascii.isHex(c),
-                'o' => ascii.isOctal(c),
-                'b' => ascii.isBinary(c),
-                else => unreachable,
-            };
-            if (!ok) return null;
+            if (!isValidDigit(c)) return null;
         }
         return .{ .raw = token, .kind = .integer };
     }
@@ -253,14 +254,11 @@ pub const ScanResult = struct { text: []const u8, end: usize };
 /// (single-line only; use `'''...'''` for verbatim multi-line blobs).
 pub fn scanSingleQuoted(allocator: Allocator, source: []const u8, start: usize) ScanError!ScanResult {
     std.debug.assert(source[start] == '\'');
-    var i = start + 1;
-    while (i < source.len) : (i += 1) {
-        const c = source[i];
-        if (c == '\n') return error.FigUnclosedString;
-        if (c == '\'') {
-            const text = try allocator.dupe(u8, source[start + 1 .. i]);
-            return .{ .text = text, .end = i + 1 };
-        }
+    const body = start + 1;
+    if (std.mem.indexOfAnyPos(u8, source, body, "'\n")) |j| {
+        if (source[j] == '\n') return error.FigUnclosedString;
+        // No escapes to decode → the body is one contiguous slice.
+        return .{ .text = try allocator.dupe(u8, source[body..j]), .end = j + 1 };
     }
     return error.FigUnclosedString;
 }
@@ -272,18 +270,23 @@ pub fn scanDoubleQuoted(allocator: Allocator, source: []const u8, start: usize) 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
     var i = start + 1;
-    while (i < source.len) {
-        const c = source[i];
-        if (c == '\n') return error.FigUnclosedString;
-        if (c == '"') {
-            return .{ .text = try out.toOwnedSlice(allocator), .end = i + 1 };
+    // Jump straight to the next quote/backslash/newline, bulk-copying the plain
+    // run in between, instead of appending byte-by-byte. A string with no
+    // escapes never grows `out` — it is duped from the source in one shot.
+    while (std.mem.indexOfAnyPos(u8, source, i, "\"\\\n")) |j| {
+        switch (source[j]) {
+            '\n' => return error.FigUnclosedString,
+            '"' => {
+                if (out.items.len == 0)
+                    return .{ .text = try allocator.dupe(u8, source[start + 1 .. j]), .end = j + 1 };
+                try out.appendSlice(allocator, source[i..j]);
+                return .{ .text = try out.toOwnedSlice(allocator), .end = j + 1 };
+            },
+            else => { // '\\'
+                try out.appendSlice(allocator, source[i..j]); // literal run before the escape
+                i = try decodeEscape(allocator, source, j, &out);
+            },
         }
-        if (c == '\\') {
-            i = try decodeEscape(allocator, source, i, &out);
-            continue;
-        }
-        try out.append(allocator, c);
-        i += 1;
     }
     return error.FigUnclosedString;
 }

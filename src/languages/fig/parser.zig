@@ -445,7 +445,21 @@ const PendingContainer = struct {
 };
 
 const Mapping = struct {
+    /// Entries in source order — the authoritative list the builder walks.
     entries: std.ArrayList(*MEntry) = .empty,
+    /// Key → entry index, kept in sync with `entries` by `addEntry`, so
+    /// duplicate-key checks and dotted-path navigation are O(1) instead of a
+    /// linear scan of `entries` (which made building an n-key table O(n²)).
+    /// Arena-backed like the rest of the pending tree, so it needs no deinit.
+    index: std.StringHashMapUnmanaged(*MEntry) = .empty,
+
+    /// Append `entry` in source order and register it in `index`. Keys are
+    /// unique (duplicates are rejected before they reach here), so the put
+    /// never collides with a different entry.
+    fn addEntry(self: *Mapping, allocator: Allocator, entry: *MEntry) Error!void {
+        try self.entries.append(allocator, entry);
+        try self.index.put(allocator, entry.key, entry);
+    }
 };
 
 const MEntry = struct {
@@ -577,6 +591,10 @@ pub fn parseCollecting(allocator: Allocator, input: []const u8, format: Type, ou
 }
 
 fn parseImpl(allocator: Allocator, input: []const u8, format: Type, out: ?*Report, recover: bool) Error!Document {
+    // `Type` has a single member (`.Fig`) — the fig dialect is unversioned — so
+    // there is nothing to branch on. The parameter is kept only so this parser
+    // matches the uniform `Language.parse(parser, input, format)` signature the
+    // multi-format dispatch relies on (other languages select a version here).
     _ = format;
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -846,22 +864,27 @@ fn closeFramesAbove(self: *Parser, depth: u32) Error!void {
         // with zero entries is the same authoring mistake, and errors the same.
         if (frame.container.born_of_append and frame.container.mapping.entries.items.len == 0) return error.FigEmptyContainer;
         if (self.pending_leading.items.len > 0) {
-            var kept: std.ArrayList(PendingComment) = .empty;
+            // Partition in place: comments at/below the closing frame's child
+            // depth drain to its dangling run; the rest compact to the front of
+            // the existing buffer (retaining capacity, no per-close allocation).
+            var write: usize = 0;
             for (self.pending_leading.items) |pc| {
                 if (pc.depth >= frame.child_depth) {
                     try frame.owner.dangling.append(self.allocator, pc.comment);
                 } else {
-                    try kept.append(self.allocator, pc);
+                    self.pending_leading.items[write] = pc;
+                    write += 1;
                 }
             }
-            self.pending_leading = kept; // arena-allocated; the old spine needs no free
+            self.pending_leading.items.len = write;
         }
     }
 }
 
 fn drainPendingLeading(self: *Parser) Error!std.ArrayList(AST.Comment) {
     var result: std.ArrayList(AST.Comment) = .empty;
-    for (self.pending_leading.items) |pc| try result.append(self.allocator, pc.comment);
+    try result.ensureTotalCapacityPrecise(self.allocator, self.pending_leading.items.len);
+    for (self.pending_leading.items) |pc| result.appendAssumeCapacity(pc.comment);
     self.pending_leading.clearRetainingCapacity();
     return result;
 }
@@ -998,7 +1021,7 @@ fn finishAssignment(self: *Parser, target: *PendingContainer, steps: []const Ste
             const entry = try self.allocator.create(MEntry);
             entry.* = .{ .key = k.name, .key_span = k.span, .value = value_node };
             try self.appendComments(&entry.key_leading, leading);
-            try m.entries.append(self.allocator, entry);
+            try m.addEntry(self.allocator, entry);
         },
         .index => |idx| {
             const s = try parent.asSequence();
@@ -1095,6 +1118,9 @@ fn parseElementLine(self: *Parser, target: *PendingContainer, depth: u32) Error!
 
 fn scanKeyPath(self: *Parser) Error![]Step {
     var steps: std.ArrayList(Step) = .empty;
+    // Paths are short (usually 1-3 segments); seed enough to skip the mid-loop
+    // growth reallocs before the final `toOwnedSlice` shrink.
+    try steps.ensureTotalCapacity(self.allocator, 4);
     while (true) {
         const key = try self.scanKeySeg();
         try steps.append(self.allocator, .{ .key = key });
@@ -1149,8 +1175,7 @@ fn scanIndexSeg(self: *Parser) Error!IndexKind {
 
 fn findEntry(self: *Parser, m: *Mapping, key: []const u8) ?*MEntry {
     _ = self;
-    for (m.entries.items) |e| if (std.mem.eql(u8, e.key, key)) return e;
-    return null;
+    return m.index.get(key);
 }
 
 /// Resolve every step except the last, creating/reusing intermediate
@@ -1185,7 +1210,7 @@ fn getOrCreateMapContainer(self: *Parser, m: *Mapping, seg: KeySeg) Error!*Pendi
     child.* = .{};
     const entry = try self.allocator.create(MEntry);
     entry.* = .{ .key = seg.name, .key_span = seg.span, .value = .{ .value = .{ .container = child }, .span = seg.span } };
-    try m.entries.append(self.allocator, entry);
+    try m.addEntry(self.allocator, entry);
     return child;
 }
 
@@ -1239,7 +1264,7 @@ fn resolveHeaderFinal(self: *Parser, parent: *PendingContainer, last: Step) Erro
             child.* = .{};
             const entry = try self.allocator.create(MEntry);
             entry.* = .{ .key = k.name, .key_span = k.span, .value = .{ .value = .{ .container = child }, .span = k.span } };
-            try m.entries.append(self.allocator, entry);
+            try m.addEntry(self.allocator, entry);
             return .{ .container = child, .owner = &entry.value, .entry = entry };
         },
         .index => |idx| {
@@ -1350,10 +1375,9 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
             // flow, so it is a bare string, left unquoted.
             if (tok.classifyBracketCommit(self.source, self.pos) == .bare_trailing) {
                 const vstart = self.pos;
-                if (try self.flowLikePrefix(vstart)) {
-                const close = tok.bracketCloseIndex(self.source, vstart) orelse vstart;
-                try self.warnAt(.flow_like_string, vstart, close + 1);
-            }
+                if (try self.flowLikePrefix(vstart)) |close| {
+                    try self.warnAt(.flow_like_string, vstart, close + 1);
+                }
                 const res = self.scanBareRestOfLine();
                 if (res.text.len == 0) return error.FigInvalidValue;
                 // Opened with a delimiter → sniffing is off; it is a string.
@@ -1484,25 +1508,30 @@ fn looksLikeLiteral(text: []const u8) bool {
 }
 
 /// Does a `bare_trailing` value at `start` *look* like it wanted to be flow?
-/// True iff the balanced bracket prefix (a) detaches from the trailing content
-/// by whitespace and (b) is itself well-formed flow — `[80, 443] x`, not
-/// `[Blog](/x)` / `[a-z]*.md` / `[b]x[/b]` (glued: the intended bare-string
-/// shapes, DESIGN.md's warn-fatigue guard) and not `[80,, 443] x` (prefix
-/// malformed: never parsed as flow in the first place). Well-formedness is
-/// decided by a speculative sub-parse of the prefix alone; its containers land
-/// in the shared arena and its warnings are discarded with the sub-parser.
-fn flowLikePrefix(self: *Parser, start: usize) Error!bool {
-    const close = tok.bracketCloseIndex(self.source, start) orelse return false;
-    if (close + 1 >= self.source.len) return false;
+/// The index of the closing bracket when the balanced bracket prefix at `start`
+/// (a) detaches from the trailing content by whitespace and (b) is itself
+/// well-formed flow — i.e. the `flow_like_string` warning should fire spanning
+/// `start..=close`. Null otherwise: `[Blog](/x)` / `[a-z]*.md` / `[b]x[/b]`
+/// (glued: the intended bare-string shapes, DESIGN.md's warn-fatigue guard) and
+/// `[80,, 443] x` (prefix malformed: never parsed as flow in the first place).
+///
+/// Returning the close index lets both call sites warn without recomputing it.
+/// Well-formedness is decided by a speculative sub-parse of the prefix alone
+/// (which reuses the real flow grammar rather than re-deriving it here); its
+/// containers land in the shared arena and its warnings are discarded with the
+/// sub-parser.
+fn flowLikePrefix(self: *Parser, start: usize) Error!?usize {
+    const close = tok.bracketCloseIndex(self.source, start) orelse return null;
+    if (close + 1 >= self.source.len) return null;
     const sep = self.source[close + 1];
-    if (sep != ' ' and sep != '\t') return false; // glued trailing → intended string
+    if (sep != ' ' and sep != '\t') return null; // glued trailing → intended string
     const prefix = self.source[start .. close + 1];
     var sub: Parser = .{ .allocator = self.allocator, .source = prefix };
     _ = sub.parseFlowValue() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return false,
+        else => return null,
     };
-    return sub.pos == prefix.len;
+    return if (sub.pos == prefix.len) close else null;
 }
 
 /// `007`-style: digit-only (after an optional sign) with a leading zero — a
@@ -1552,74 +1581,79 @@ fn looksLikeLeadingDotNumber(text: []const u8) bool {
 /// so `1.`/`09` survive exactly. `enum`/`datetime` map to distinct `extended`
 /// node kinds that self-annotate on print, so they carry no tag.
 fn applyKnownType(self: *Parser, type_name: []const u8, text: []const u8) Error!TNode {
-    if (std.mem.eql(u8, type_name, "int")) {
-        if (tok.sniffNumber(text)) |n| {
-            if (n.kind != .integer) return error.FigTypeMismatch;
-            return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
-        }
-        // Coercion opt-in: a leading-zero decimal (`09`, `007`) is a *string*
-        // when bare (the Leading-zero rule), but `: int` is the author
-        // overriding that default. Validate the shape (null → mismatch); keep the
-        // authored lexeme verbatim so the padding round-trips.
-        if ((try self.normalizeDecimal(text)) != null)
-            return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
-        return error.FigTypeMismatch;
+    // Resolve the annotation name once (an unknown name is `FigUnknownType`),
+    // then switch — instead of a chain of `mem.eql` per candidate.
+    const TypeName = enum { int, float, bool, @"enum", char, datetime, date, time };
+    const which = std.meta.stringToEnum(TypeName, type_name) orelse return error.FigUnknownType;
+    switch (which) {
+        .int => {
+            if (tok.sniffNumber(text)) |n| {
+                if (n.kind != .integer) return error.FigTypeMismatch;
+                return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
+            }
+            // Coercion opt-in: a leading-zero decimal (`09`, `007`) is a *string*
+            // when bare (the Leading-zero rule), but `: int` is the author
+            // overriding that default. Validate the shape (null → mismatch); keep
+            // the authored lexeme verbatim so the padding round-trips.
+            if ((try self.normalizeDecimal(text)) != null)
+                return .{ .value = .{ .number = .{ .raw = text, .kind = .integer } }, .tag = .{ .kind = .integer } };
+            return error.FigTypeMismatch;
+        },
+        .float => {
+            if (std.mem.eql(u8, text, "inf") or std.mem.eql(u8, text, "-inf") or std.mem.eql(u8, text, "nan")) {
+                return .{ .value = .{ .extended = .{ .kind = .number_special, .text = text } } };
+            }
+            if (tok.sniffNumber(text)) |_|
+                return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
+            // Coercion opt-in: a trailing-dot (`1.`) or leading-zero (`09`) token
+            // is a string when bare, but `: float` overrides. Validate the shape
+            // (null → mismatch); keep the authored lexeme verbatim (`1.` stays `1.`).
+            if ((try self.normalizeCoercedFloat(text)) != null)
+                return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
+            return error.FigTypeMismatch;
+        },
+        .bool => {
+            if (std.mem.eql(u8, text, "true")) return .{ .value = .{ .boolean = true }, .tag = .{ .kind = .boolean } };
+            if (std.mem.eql(u8, text, "false")) return .{ .value = .{ .boolean = false }, .tag = .{ .kind = .boolean } };
+            return error.FigTypeMismatch;
+        },
+        .@"enum" => {
+            if (text.len == 0) return error.FigTypeMismatch;
+            return .{ .value = .{ .extended = .{ .kind = .enum_literal, .text = text } } };
+        },
+        .char => {
+            // `: char = 'A'` — a single ZON-style char literal. The annotation is
+            // the disambiguator (like `enum`/`float`): it turns a `'…'` RHS, which
+            // is a length-1 string bare, into a `char_literal` extended scalar.
+            // Reusing the Zig char codec keeps escapes (`'\n'`, `'\u{1F600}'`)
+            // working for free. Stored as the decimal codepoint — the cross-format
+            // `char_literal` invariant (see AST `ExtKind.char_literal`) — allocated
+            // in the parse arena like `normalizeDecimal`, so the builder dupes it
+            // into the AST's strings.
+            const cp: u21 = switch (std.zig.string_literal.parseCharLiteral(text)) {
+                .success => |c| c,
+                .failure => return error.FigTypeMismatch,
+            };
+            const raw = try std.fmt.allocPrint(self.allocator, "{d}", .{cp});
+            return .{ .value = .{ .extended = .{ .kind = .char_literal, .text = raw } } };
+        },
+        .datetime, .date, .time => {
+            const k = datetime.classify(text, .{}) catch return error.FigTypeMismatch;
+            const ext: tok.ExtKind = switch (k) {
+                .offset_datetime => .offset_datetime,
+                .local_datetime => .local_datetime,
+                .local_date => .local_date,
+                .local_time => .local_time,
+            };
+            const ok = switch (which) {
+                .date => ext == .local_date,
+                .time => ext == .local_time,
+                else => true, // "datetime" accepts any of the four shapes
+            };
+            if (!ok) return error.FigTypeMismatch;
+            return .{ .value = .{ .extended = .{ .kind = ext, .text = text } } };
+        },
     }
-    if (std.mem.eql(u8, type_name, "float")) {
-        if (std.mem.eql(u8, text, "inf") or std.mem.eql(u8, text, "-inf") or std.mem.eql(u8, text, "nan")) {
-            return .{ .value = .{ .extended = .{ .kind = .number_special, .text = text } } };
-        }
-        if (tok.sniffNumber(text)) |_|
-            return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
-        // Coercion opt-in: a trailing-dot (`1.`) or leading-zero (`09`) token is
-        // a string when bare, but `: float` overrides. Validate the shape (null →
-        // mismatch); keep the authored lexeme verbatim (`1.` stays `1.`).
-        if ((try self.normalizeCoercedFloat(text)) != null)
-            return .{ .value = .{ .number = .{ .raw = text, .kind = .float } }, .tag = .{ .kind = .float } };
-        return error.FigTypeMismatch;
-    }
-    if (std.mem.eql(u8, type_name, "bool")) {
-        if (std.mem.eql(u8, text, "true")) return .{ .value = .{ .boolean = true }, .tag = .{ .kind = .boolean } };
-        if (std.mem.eql(u8, text, "false")) return .{ .value = .{ .boolean = false }, .tag = .{ .kind = .boolean } };
-        return error.FigTypeMismatch;
-    }
-    if (std.mem.eql(u8, type_name, "enum")) {
-        if (text.len == 0) return error.FigTypeMismatch;
-        return .{ .value = .{ .extended = .{ .kind = .enum_literal, .text = text } } };
-    }
-    if (std.mem.eql(u8, type_name, "char")) {
-        // `: char = 'A'` — a single ZON-style char literal. The annotation is the
-        // disambiguator (like `enum`/`float`): it turns a `'…'` RHS, which is a
-        // length-1 string bare, into a `char_literal` extended scalar. Reusing the
-        // Zig char codec keeps escapes (`'\n'`, `'\u{1F600}'`) working for free.
-        // Stored as the decimal codepoint — the cross-format `char_literal`
-        // invariant (see AST `ExtKind.char_literal`) — allocated in the parse arena
-        // like `normalizeDecimal`, so the builder dupes it into the AST's strings.
-        const cp: u21 = switch (std.zig.string_literal.parseCharLiteral(text)) {
-            .success => |c| c,
-            .failure => return error.FigTypeMismatch,
-        };
-        const raw = try std.fmt.allocPrint(self.allocator, "{d}", .{cp});
-        return .{ .value = .{ .extended = .{ .kind = .char_literal, .text = raw } } };
-    }
-    if (std.mem.eql(u8, type_name, "datetime") or std.mem.eql(u8, type_name, "date") or std.mem.eql(u8, type_name, "time")) {
-        const k = datetime.classify(text, .{}) catch return error.FigTypeMismatch;
-        const ext: tok.ExtKind = switch (k) {
-            .offset_datetime => .offset_datetime,
-            .local_datetime => .local_datetime,
-            .local_date => .local_date,
-            .local_time => .local_time,
-        };
-        const ok = if (std.mem.eql(u8, type_name, "date"))
-            ext == .local_date
-        else if (std.mem.eql(u8, type_name, "time"))
-            ext == .local_time
-        else
-            true; // "datetime" accepts any of the four shapes
-        if (!ok) return error.FigTypeMismatch;
-        return .{ .value = .{ .extended = .{ .kind = ext, .text = text } } };
-    }
-    return error.FigUnknownType;
 }
 
 /// Normalize a decimal-integer token that `sniffNumber` rejected only for its
@@ -1814,7 +1848,7 @@ fn parseFlowObject(self: *Parser) Error!TNode {
         if (self.findEntry(m, key.text) != null) return error.FigDuplicateKey;
         const entry = try self.allocator.create(MEntry);
         entry.* = .{ .key = key.text, .key_span = key.span, .value = v };
-        try m.entries.append(self.allocator, entry);
+        try m.addEntry(self.allocator, entry);
         self.skipFlowWs();
         const p = self.peek() orelse return error.FigUnclosedFlow;
         if (p == ',') {
@@ -1874,8 +1908,7 @@ fn parseFlowScalarOrNested(self: *Parser) Error!TNode {
         // is what lets `[Blog](/Blog.md)` sit unquoted in a flow list.
         if (tok.classifyFlowBracket(self.source, self.pos) == .bare_trailing) {
             const vstart = self.pos;
-            if (try self.flowLikePrefix(vstart)) {
-                const close = tok.bracketCloseIndex(self.source, vstart) orelse vstart;
+            if (try self.flowLikePrefix(vstart)) |close| {
                 try self.warnAt(.flow_like_string, vstart, close + 1);
             }
             const text = self.scanFlowBareBracket();
@@ -2005,6 +2038,7 @@ fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!Bu
         .undecided => return error.FigEmptyContainer,
         .mapping => {
             var kv_ids: std.ArrayList(AST.Node.Id) = .empty;
+            try kv_ids.ensureTotalCapacityPrecise(self.allocator, c.mapping.entries.items.len);
             var end: usize = 0;
             for (c.mapping.entries.items) |e| {
                 const key_id = try b.addString(e.key);
@@ -2014,7 +2048,7 @@ fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!Bu
                 const kv_id = try b.addKeyValue(key_id, value_id);
                 b.setSpan(kv_id, Span.init(e.key_span.start, e.value.span.end));
                 end = @max(end, e.value.span.end);
-                try kv_ids.append(self.allocator, kv_id);
+                kv_ids.appendAssumeCapacity(kv_id);
             }
             const id = try b.addMappingFromEntries(kv_ids.items);
             try self.recordReentries(c, id);
@@ -2022,12 +2056,13 @@ fn buildContainer(self: *Parser, b: *AST.Builder, c: *PendingContainer) Error!Bu
         },
         .sequence => {
             var ids: std.ArrayList(AST.Node.Id) = .empty;
+            try ids.ensureTotalCapacityPrecise(self.allocator, c.sequence.elements.items.len);
             var end: usize = 0;
             for (c.sequence.elements.items) |el| {
                 const el_id = try self.buildNode(b, el);
                 end = @max(end, el.span.end);
                 for (el.leading.items) |lc| try b.addLeadingComment(el_id, lc);
-                try ids.append(self.allocator, el_id);
+                ids.appendAssumeCapacity(el_id);
             }
             const id = try b.addSequence(ids.items);
             try self.recordReentries(c, id);

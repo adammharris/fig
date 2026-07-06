@@ -87,6 +87,7 @@ pub const SerializeError = Writer.Error || error{
     NestedSequenceUnsupported, // XML: a sequence with no element name to expand under
     InvalidElementName, // XML: a mapping key is not a valid XML `Name`
     NonScalarValue, // XML: an `@`-attribute or `#text` entry held a mapping/sequence
+    UnexpectedNodeKind, // fig: a node kind reached a printer path that expects a container
 };
 
 /// Render the whole AST to `writer` in the given format, using default options.
