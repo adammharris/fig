@@ -416,3 +416,12 @@ manage the handle for you, so no cleanup is needed.
 - `FigError` — the thrown error type.
 - Types: `Value`, `JsValue` (read side), `JsInput` (write side), `Segment`,
   `SerializeOptions`, `Warning`, `Region`, `Span`, `Version`, `Capabilities`.
+
+## See also
+
+- [The Zig CLI / library](/fig.md) — install via Homebrew or a release binary.
+- [fig CLI via npm/npx](npm-wasi.md) (experimental) — the
+  `@adammharris/fig-wasi` *CLI* package (same actions as the native binary,
+  running under Node's WASI support), not a JS library — if you want to
+  `import { parse } from "@adammharris/fig"` in your own code, this package
+  (the one this guide is about) is the one you want instead.

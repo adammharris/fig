@@ -1,0 +1,10 @@
+node_modules/
+# The wasm module is built by scripts/build-wasm.mjs (zig build wasi); *.wasm
+# is also git-ignored repo-wide (see the root .gitignore).
+wasm/
+# License text and README vendored in at pack time by
+# scripts/vendor-publish-files.mjs; the canonical copies live at the repo root
+# (LICENSE-MIT, LICENSE-APACHE) and docs/npm-wasi.md.
+LICENSE-MIT
+LICENSE-APACHE
+README.md

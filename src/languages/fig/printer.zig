@@ -80,7 +80,25 @@ pub fn print(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Er
     const memo = p.initWidthMemo();
     defer if (memo) |m| ast.allocator.free(m);
     try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
-    try p.root(ast.root);
+    try p.root(ast.root, .document);
+    try writer.flush();
+}
+
+/// Render `ast.root` as a value *fragment* — the caller-built-`Value` path
+/// behind `fig_value_serialize_opts`, which backs the editors' `replace`/`set`
+/// (`Editor`/`Embed` splice a replacement value's text into existing source,
+/// e.g. after `key = `). Unlike `print`, a fragment is never asked to stand
+/// alone as a document, so a scalar/null root — which `root`'s `.document` mode
+/// rejects as `FigUnrepresentableRoot` — is fine here: `root`'s `.fragment` mode
+/// renders it with the same bare/quoted spelling `value` uses for any other
+/// scalar, and the caller only ever reads it back in the context it's spliced
+/// into, not as a standalone reparse.
+pub fn printFragment(writer: *Writer, ast: *const AST, options: AST.SerializeOptions) Error!void {
+    var p: Printer = .{ .writer = writer, .ast = ast, .options = options };
+    const memo = p.initWidthMemo();
+    defer if (memo) |m| ast.allocator.free(m);
+    try p.leadingComments(ast.leadingCommentAnchor(ast.root), 0);
+    try p.root(ast.root, .fragment);
     try writer.flush();
 }
 
@@ -105,26 +123,40 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
     }
 }
 
-/// The root is a map or a sequence (never a bare scalar in the fig dialect —
-/// see DESIGN.md and docs/spec.md § 2). A root map is emitted as sections; a
-/// root sequence as zero-marker `*` elements.
-fn root(self: *Printer, id: AST.Node.Id) Error!void {
+/// `.document`: `print`'s mode — a scalar/null/extended/alias root is rejected,
+/// since it has no authoring spelling as a *whole fig document* (see the
+/// `.document` case below). `.fragment`: `printFragment`'s mode — such a root
+/// is instead rendered with its ordinary scalar spelling, because a fragment
+/// is never reparsed alone.
+const RootMode = enum { document, fragment };
+
+/// The root is a map or a sequence in `.document` mode (never a bare scalar —
+/// see DESIGN.md and docs/spec.md § 2); `.fragment` mode additionally accepts a
+/// bare scalar/null root (see `printFragment`). A root map is emitted as
+/// sections; a root sequence as zero-marker `*` elements.
+fn root(self: *Printer, id: AST.Node.Id, mode: RootMode) Error!void {
     switch (self.ast.nodes[id].kind) {
         .mapping => {
             try self.emitSections(id);
             for (self.danglingOf(id)) |c| try self.commentLines(c, 0);
         },
         .sequence => try self.seqBody(id, 0), // prints its own dangling run
-        else => {
-            // A scalar/null/extended/alias root has no authoring spelling in
-            // the fig dialect: emitting it as a single bare value line (the
-            // old behavior) does NOT re-parse — a bare token at the document
-            // root reads as a container header with no children
-            // (`FigEmptyContainer`), not a scalar. Hard-error instead of
-            // silently emitting non-conforming output; the caller should use
-            // canonical form or another output format instead (see
-            // docs/spec.md § 2).
-            return error.FigUnrepresentableRoot;
+        else => switch (mode) {
+            .fragment => {
+                try self.value(id, false);
+                try self.writer.writeByte('\n');
+            },
+            .document => {
+                // A scalar/null/extended/alias root has no authoring spelling
+                // in the fig dialect: emitting it as a single bare value line
+                // (the old behavior) does NOT re-parse — a bare token at the
+                // document root reads as a container header with no children
+                // (`FigEmptyContainer`), not a scalar. Hard-error instead of
+                // silently emitting non-conforming output; the caller should
+                // use canonical form or another output format instead (see
+                // docs/spec.md § 2).
+                return error.FigUnrepresentableRoot;
+            },
         },
     }
 }

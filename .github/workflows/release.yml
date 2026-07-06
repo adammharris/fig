@@ -1,9 +1,18 @@
 name: Release (npm + crates.io)
-# Publish the npm package and the crates.io crate. There is no Zig package step:
-# Zig has no central registry — consumers `zig fetch` this repo at a git tag, so
-# pushing the tag *is* the Zig release. The macOS CLI binary + Homebrew tap
-# bump is a separate workflow (homebrew.yml); Linux/Windows/WASI CLI binaries
-# are release-binaries.yml.
+# Publish the npm packages and the crates.io crate. There is no Zig package
+# step: Zig has no central registry — consumers `zig fetch` this repo at a git
+# tag, so pushing the tag *is* the Zig release. The macOS CLI binary +
+# Homebrew tap bump is a separate workflow (homebrew.yml); Linux/Windows/WASI
+# CLI binaries are release-binaries.yml.
+#
+# Two npm packages, both under bindings/, published independently (each is
+# its own job below):
+# - bindings/typescript -> @adammharris/fig, a JS *library* (parse/edit/
+# serialize as an API) backed by a freestanding wasm reactor module.
+# - bindings/wasi -> @adammharris/fig-wasi (EXPERIMENTAL), the npx-able *CLI*
+# (same actions as the native binary), backed by the wasm32-wasi command
+# module (`zig build wasi`) run under Node's built-in (also experimental)
+# WASI support. See docs/npm-wasi.md.
 #
 # LIVE on every `v*.*.*` tag push (also runnable by hand via
 # `workflow_dispatch`). The crate carries the `license`, `description`, and
@@ -12,8 +21,10 @@ name: Release (npm + crates.io)
 #
 # Required repository secrets:
 # NPM_TOKEN             — npm automation token with publish rights (not yet
-# set — the npm job will fail at the publish step
-# until it's added: `gh secret set NPM_TOKEN`)
+# set — the npm jobs will fail at the publish step
+# until it's added: `gh secret set NPM_TOKEN`); it
+# needs publish rights to both @adammharris/fig and
+# @adammharris/fig-wasi.
 # CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights (already set)
 on:
   workflow_dispatch: {}
@@ -83,7 +94,7 @@ jobs:
           fi
         fi
   npm:
-    name: Publish package (npm)
+    name: Publish package (npm) — fig (library)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -120,6 +131,57 @@ jobs:
     # (a different E403, e.g. "Forbidden"/"do not have permission") still fails.
     - name: Publish to npm
       working-directory: bindings/typescript
+      env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
+      run: |
+        if out=$(npm publish --access public 2>&1); then
+          echo "$out"
+        else
+          echo "$out"
+          if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
+            echo "::notice::npm version already published — skipping"
+          else
+            exit 1
+          fi
+        fi
+  npm-wasi:
+    name: Publish package (npm) — fig-wasi (experimental)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: mlugg/setup-zig@v2
+      with: { version: 0.16.0 }
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+        registry-url: https://registry.npmjs.org
+        cache: npm
+        cache-dependency-path: bindings/wasi/package-lock.json
+    - name: Verify tag matches the package version
+      if: github.ref_type == 'tag'
+      run: |
+        pkg=$(node -p "require('./bindings/wasi/package.json').version")
+        tag="${GITHUB_REF_NAME#v}"
+        if [ "$pkg" != "$tag" ]; then
+          echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
+          exit 1
+        fi
+        echo "version $pkg matches tag $GITHUB_REF_NAME"
+    - run: npm ci
+      working-directory: bindings/wasi
+    # Builds its own `zig build wasi` (see scripts/build-wasm.mjs) rather than
+    # reusing release-binaries.yml's copy: independent workflows on the same
+    # tag have no ordering guarantee (the same reasoning homebrew.yml's doc
+    # comment gives for why its Linux binaries live in that workflow instead).
+    - run: npm run build
+      working-directory: bindings/wasi
+    - run: npm test
+      working-directory: bindings/wasi
+    # Idempotent like the other publishes: npm reports a duplicate version as
+    # E403 "cannot publish over the previously published versions" — only that
+    # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
+    # still fails.
+    - name: Publish to npm
+      working-directory: bindings/wasi
       env: { NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}' }
       run: |
         if out=$(npm publish --access public 2>&1); then

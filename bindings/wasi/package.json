@@ -1,0 +1,50 @@
+{
+  "name": "@adammharris/fig-wasi",
+  "version": "2.0.0",
+  "description": "EXPERIMENTAL: the fig CLI (parse/edit/convert JSON, JSONC, JSON5, YAML, TOML — while preserving comments) as an npx-able command, running the real fig CLI's WASI build under Node's built-in (experimental) WASI support. No install, no per-platform binary, no native build step.",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "fig": "./bin/fig.mjs"
+  },
+  "files": ["bin", "wasm", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "keywords": [
+    "json",
+    "jsonc",
+    "json5",
+    "yaml",
+    "toml",
+    "config",
+    "cli",
+    "frontmatter",
+    "comment-preserving",
+    "cross-format",
+    "wasi",
+    "webassembly",
+    "experimental"
+  ],
+  "author": "Adam Harris <amh421@icloud.com>",
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://github.com/adammharris/fig/blob/main/docs/npm-wasi.md",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adammharris/fig.git",
+    "directory": "bindings/wasi"
+  },
+  "bugs": {
+    "url": "https://github.com/adammharris/fig/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build": "npm run build:wasm",
+    "prepack": "node scripts/vendor-publish-files.mjs",
+    "prepublishOnly": "npm run build && npm test",
+    "test": "node --test 'test/**/*.test.mjs'"
+  },
+  "sideEffects": false
+}

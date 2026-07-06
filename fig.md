@@ -43,6 +43,13 @@ brew tap adammharris/tap
 brew install adammharris/tap/fig
 ```
 
+Or run it with no install at all (needs Node 20+; experimental — see
+[docs/npm-wasi.md](docs/npm-wasi.md)):
+
+```bash
+npx @adammharris/fig-wasi get config.yaml
+```
+
 Run `fig help` for instructions for how to use it on your files.
 
 ## Planned features

@@ -51,6 +51,7 @@ pub const SerializeOptions = serializer.SerializeOptions;
 pub const SerializeError = serializer.SerializeError;
 pub const serialize = serializer.serialize;
 pub const serializeWith = serializer.serializeWith;
+pub const serializeFragmentWith = serializer.serializeFragmentWith;
 pub const serializeNode = serializer.serializeNode;
 pub const serializeNodeWith = serializer.serializeNodeWith;
 

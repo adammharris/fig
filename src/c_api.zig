@@ -2215,7 +2215,11 @@ pub export fn fig_value_serialize_opts(
 
     handle.rendered.clearRetainingCapacity();
     const ast = handle.builder.view(root) catch return .out_of_memory; // borrows the builder; never deinit'd
-    ast.serializeWith(&handle.rendered.writer, fmt, serializeOptionsOf(options)) catch |err| return serializeStatus(err);
+    // Fragment mode: this is a caller-built `Value`, never a whole document, so
+    // a fig scalar/null root renders its ordinary spelling instead of erroring
+    // `FigUnrepresentableRoot` (that rule is for `fig_document_serialize`/CLI
+    // whole-document output — see `AST.serializeFragmentWith`).
+    ast.serializeFragmentWith(&handle.rendered.writer, fmt, serializeOptionsOf(options)) catch |err| return serializeStatus(err);
 
     const bytes = handle.rendered.written();
     p.* = bytes.ptr;

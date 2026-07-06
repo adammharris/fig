@@ -7,6 +7,7 @@ contents
 > * [CONTRIBUTING](CONTRIBUTING.md)
 > * [VERSIONING](VERSIONING.md)
 > * [Devlog](devlogs/devlogs.md)
+> * [fig CLI via npm/npx](npm-wasi.md)
 > * [fig in Rust](rust.md)
 > * [fig in Typescript](typescript.md)
 > * [fig in Zig](zig.md)

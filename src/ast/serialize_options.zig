@@ -130,6 +130,33 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
     };
 }
 
+/// Render the whole AST to `writer` as a value *fragment*, controlling output
+/// style via `options`. Identical to `serializeWith` for every format except
+/// `fig`: JSON/YAML/ZON/canonical already treat a scalar/null root as a fine
+/// value to render (e.g. `9090`), and TOML falls back to an inline fragment —
+/// but fig's `.fig => FigPrinter.print` deliberately errors
+/// `FigUnrepresentableRoot` on a bare scalar/null root, since a *whole fig
+/// document* (`fig fmt`, `fig get`, `fig_document_serialize`) can't be spelled
+/// that way. A value fragment built by the caller (`fig_value_serialize_opts`,
+/// backing the editors' `replace`/`set`) is never asked to stand alone as a
+/// document — it's spliced into existing source — so it uses
+/// `FigPrinter.printFragment` instead, which allows that root.
+pub fn serializeFragmentWith(self: *const AST, writer: *Writer, format: SerializeFormat, options: SerializeOptions) SerializeError!void {
+    var buf: AST = undefined;
+    const ast = commentView(self, options, &buf);
+    return switch (format) {
+        .json => if (comptime build_options.lang_json) JsonPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .jsonc => if (comptime build_options.lang_json) JsonPrinter.printc(writer, ast, options) else error.FormatDisabled,
+        .json5 => if (comptime build_options.lang_json) JsonPrinter.print5(writer, ast, options) else error.FormatDisabled,
+        .yaml => if (comptime build_options.lang_yaml) YamlPrinter.printWith(writer, ast, options) else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .canonical => CanonicalPrinter.print(writer, ast),
+        .fig => if (comptime build_options.lang_fig) FigPrinter.printFragment(writer, ast, options) else error.FormatDisabled,
+    };
+}
+
 /// Render the subtree rooted at `id` to `writer`, using default options.
 pub fn serializeNode(self: *const AST, writer: *Writer, format: SerializeFormat, id: Node.Id) SerializeError!void {
     return self.serializeNodeWith(writer, format, id, .{});
