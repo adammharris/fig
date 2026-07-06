@@ -90,7 +90,7 @@ test("serialize a Value to multiple formats", () => {
     [V.string("nums"), V.seq([V.int(1), V.int(2)])],
   ]);
   assert.equal(serialize(value, Format.Json), '{\n  "name": "fig",\n  "nums": [\n    1,\n    2\n  ]\n}\n');
-  assert.equal(serialize(value, Format.Yaml), "name: fig\nnums:\n- 1\n- 2\n");
+  assert.equal(serialize(value, Format.Yaml), "name: fig\nnums: [1, 2]\n");
   assert.equal(serialize(value, Format.Fig), "name = fig\nnums = [1, 2]\n");
 });
 

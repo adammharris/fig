@@ -409,7 +409,7 @@ mod tests {
         ]);
         assert_eq!(
             v.serialize(Format::Yaml).unwrap(),
-            "name: fig\nnums:\n- 1\n- 2\n"
+            "name: fig\nnums: [1, 2]\n"
         );
         assert_eq!(
             v.serialize(Format::Json).unwrap(),
@@ -464,7 +464,7 @@ mod tests {
         // round-trips back out through serialize
         assert_eq!(
             v.serialize(Format::Yaml).unwrap(),
-            "title: Hi\nnums:\n- 1\n- 2\nratio: 1.5\n"
+            "title: Hi\nnums: [1, 2]\nratio: 1.5\n"
         );
     }
 

@@ -77,8 +77,8 @@ fn generic_values_round_trip() {
 }
 
 /// A representative snapshot, so accidental format churn stays visible. fig
-/// emits indentless block sequences (matching serde_yaml_ng) and single-quotes
-/// only what must be quoted.
+/// prints short sequences inline (flow style) when they fit the width
+/// budget, and single-quotes only what must be quoted.
 #[test]
 fn snapshot_of_a_diaryx_shape() {
     let value = map(vec![
@@ -88,7 +88,7 @@ fn snapshot_of_a_diaryx_shape() {
     ]);
     assert_eq!(
         value.serialize(Format::Yaml).unwrap(),
-        "title: 'My Entry: A Tale'\ntags:\n- a\n- b\ndraft: false\n",
+        "title: 'My Entry: A Tale'\ntags: [a, b]\ndraft: false\n",
     );
 }
 
