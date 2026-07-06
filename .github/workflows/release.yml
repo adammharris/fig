@@ -29,7 +29,7 @@ name: Release (npm + crates.io)
 on:
   workflow_dispatch: {}
   push: { tags: [v*.*.*] }
-permissions: { contents: read }
+permissions: { id-token: write, contents: read }
 jobs:
   crate:
     name: Publish crate (crates.io)
