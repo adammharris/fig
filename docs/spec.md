@@ -1,8 +1,8 @@
 # fig authoring dialect — specification
 
-**Version: v0.9 (draft)**
+**Version: 1.0**
 
-This document describes the dialect as implemented; where this document and the implementation disagree, the implementation wins until 1.0. The reference implementation is the reader at `src/languages/fig/parser.zig` (with `tokenizer.zig`) and the formatter at `src/languages/fig/printer.zig`.
+This document is normative: where the implementation and this document disagree, that is an implementation bug. The reference implementation is the reader at `src/languages/fig/parser.zig` (with `tokenizer.zig`) and the formatter at `src/languages/fig/printer.zig`.
 
 Key words MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in RFC 2119.
 
@@ -30,7 +30,7 @@ Comments are preserved in an AST side-table with three anchors: **leading** (bef
 
 ### 3.1 Encoding and line structure
 
-A fig document is UTF-8-encoded text using LF (`\n`) line terminators. Only LF is recognized as a line break; a lone CR is treated as trivia and trimmed where values and comments are captured. A leading UTF-8 BOM is permitted and silently ignored; input that is not valid UTF-8 is a hard error (`FigInvalidUtf8`).
+A fig document is UTF-8-encoded text. A line terminator is LF (`\n`) or CRLF (`\r\n`): a CR immediately preceding an LF, or ending the input, is trivia, so a CRLF document parses identically to its LF counterpart — including inside multi-line strings, whose captured content always carries LF line breaks (§ 4.6). A CR anywhere else is ordinary content bytes where content is captured (bare values trim it at their edges like any other whitespace). A leading UTF-8 BOM is permitted and silently ignored; input that is not valid UTF-8 is a hard error (`FigInvalidUtf8`).
 
 Each physical line is one of:
 
@@ -47,11 +47,11 @@ Nesting depth is the **count of leading `>` markers** on a line. Indentation nev
 - A marker run MAY be contiguous (`>>>`) or spaced (`> > >`); both denote the same depth. Whitespace MAY appear between markers within a run.
 - A run MUST be separated from the body that follows it by at least one space or tab (`> key`, not `>key`). Violation: `FigBadMarkerSeparator`.
 - Optional leading indentation before the run is cosmetic (see § 3.3).
-- Depth MAY only grow by exactly one level from line to line; a deeper jump is `FigSkippedLevel`. Depth MAY shrink by any amount (closing several containers at once).
+- Depth MUST NOT grow by more than one level from line to line; a deeper jump is `FigSkippedLevel`. Depth MAY shrink by any amount (closing several containers at once).
 - A marked line with no open parent above it is `FigRootMarker` ("root keys carry zero markers").
 - Depth counts are **relative to the active baseline** (see § 7.2), not absolute document depth.
 
-The **element marker `*`** sits in key position, ending the run: `> *` (spaced, the canonical form) or `>*` (glued) are equivalent; at root an element is a bare `*`. `*` is a role marker, not a counted depth mark — depth is the `>` count alone. A `*` glued to its value (`*v`, `>*v`) is `FigBadMarkerSeparator`. A typed element binds `:` directly to the `*` with no separator required: `*: int = 1`.
+The **element marker `*`** sits in key position, ending the run: `> *` (spaced, the canonical form) or `>*` (glued) are equivalent; at root an element is a bare `*`. `*` is a role marker, not a counted depth mark — depth is the `>` count alone. A `*` glued to its value (`*v`, `>*v`) is `FigBadMarkerSeparator`. A typed element's `:` binds to the `*` with no separator required — `*: int = 1` (the canonical spelling) and the spaced `* : int = 1` are equivalent.
 
 Foreign-syntax guardrails at line dispatch (all hard errors that name the fig form):
 
@@ -63,7 +63,7 @@ Foreign-syntax guardrails at line dispatch (all hard errors that name the fig fo
 
 Whitespace is insignificant except in three places: the marker↔body separator (§ 3.2), the whitespace that precedes an inline `#` (§ 3.4), and the interior of quoted/multi-line strings.
 
-Indentation, when present, is checked against the convention `2 × depth` spaces (no tabs). A line whose indentation is present and disagrees with its marker count produces the `indent_marker_mismatch` warning. Unindented lines are always clean. Comment lines participate in this check (their depth is load-bearing for attachment).
+Indentation, when present, is checked against the convention `2 × depth` spaces. A line whose indentation is present and disagrees with its marker count produces the `indent_marker_mismatch` warning; any tab in the indentation produces it regardless of width. Unindented lines are always clean. Comment lines participate in this check (their depth is load-bearing for attachment).
 
 ### 3.4 Comments
 
@@ -73,7 +73,7 @@ Attachment rules:
 
 - a comment-only line attaches as a **leading** comment, at its own marker depth, to the next structural sibling;
 - a `# …` after a value on the same line is that value's **trailing** comment;
-- when containers close over buffered comment lines, a comment at or below the closing container's child depth becomes that container's **dangling** run; a shallower one stays pending as a leading comment on the next sibling;
+- when containers close over buffered comment lines, a comment at or deeper than the closing container's child depth becomes that container's **dangling** run; a shallower one stays pending as a leading comment on the next sibling;
 - comments buffered at end of input attach as the root's dangling run.
 
 Comments inside flow collections (§ 6.3) are accepted and **discarded** except for the opener-line comment rule (§ 6.3).
@@ -115,9 +115,9 @@ A bare token is a number iff it is, after an optional `+`/`-` sign:
 
 - a **radix integer**: `0x` + hex digits, `0o` + octal digits, or `0b` + binary digits;
 - a **decimal integer**: digits, with **no leading zero** on a multi-digit value (`007` is a string — the TOML leading-zero rule; `0` is a number);
-- a **float**: a decimal integer part, then an optional `.` + at least one fractional digit, and/or an optional exponent (`e`/`E`, optional sign, digits). At least one of fraction/exponent makes it a float.
+- a **float**: a decimal integer part (same no-leading-zero rule: `01.5` is a string), then an optional `.` + at least one fractional digit, and/or an optional exponent (`e`/`E`, optional sign, digits). At least one of fraction/exponent makes it a float.
 
-There are no digit separators (`1_000` is a string). Numbers never accept a leading-dot or trailing-dot float: a bare trailing-dot token (`1.`) and a bare leading-dot token (`.5`) are **strings**, and both shapes produce the `string_looks_like_number` warning — write `1.0` / `0.5`. `: float =` coercion accepts the trailing-dot lexeme (`x: float = 1.`) but NOT a leading-dot one: `x: float = .5` is a `FigTypeMismatch`.
+A token that would be a valid number but for a leading zero on its integer part — sign included — produces the `string_leading_zero` warning (`007`, `-07`, `01.5`, `-01e2`). There are no digit separators (`1_000` is a string). Numbers never accept a leading-dot or trailing-dot float: a bare trailing-dot token (`1.`) and a bare leading-dot token (`.5`) are **strings**, and both shapes produce the `string_looks_like_number` warning — write `1.0` / `0.5`. `: float =` coercion accepts the trailing-dot lexeme (`x: float = 1.`) but NOT a leading-dot one: `x: float = .5` is a `FigTypeMismatch`.
 
 The lexeme is preserved verbatim (§ 2): `1.10`, `1e2`, `0xFF`, `+9` all keep their spelling.
 
@@ -143,10 +143,10 @@ Quoting overrides sniffing: `flag = "true"` and `team = "99"` are strings. Quote
 
 Both forms suspend the block layer (markers do not apply inside) and close at the matching triple delimiter:
 
-- `'''` … `'''` — **raw/verbatim**: no escapes, no dedent. Leading indentation becomes content, so raw blocks are written flush-left.
-- `"""` … `"""` — **escaped + smart-dedent**: escapes as in § 4.5, and the whitespace run preceding the closing delimiter on its own line is stripped from the start of every content line.
+- `'''` … `'''` — **raw/verbatim**: no escapes, no dedent. A content line's leading indentation is content, so raw blocks are conventionally written flush-left.
+- `"""` … `"""` — **escaped + smart-dedent**: escapes as in § 4.5, and the whitespace run preceding the closing delimiter on its line is stripped from the start of every content line. A content line with less leading whitespace than that run loses whatever it has (never an error).
 
-The opener line is still block-layer: a `# …` after the opening delimiter is the value's trailing comment; content capture begins at the next newline. The newline before the closer's line is not part of the value. Up to two extra quote characters hugging the closing delimiter belong to the content (so a value ending in `""` round-trips, as in TOML).
+The opener line is still block-layer: a `# …` after the opening delimiter is the value's trailing comment, and content capture begins at the next newline — any other non-comment content after the opening delimiter is a hard error (`FigMultilineOpenerContent`; there is no one-line spelling of a multi-line string). The block **closes at the first line whose first non-whitespace content is the matching triple delimiter**; that closer line's leading whitespace is not content (for `"""` it defines the dedent run above), and the newline before the closer's line is not part of the value. A triple delimiter anywhere else in a line is ordinary content, so a value may contain `'''`/`"""` mid-line — but a content line *beginning* with the block's own delimiter is unrepresentable in that form (write it in the other form, or escape a leading `"""` as `\"""`). A block that never finds its closer is `FigUnclosedString`.
 
 ```
 banner = """                  # trailing comment on the value
@@ -282,7 +282,7 @@ empty_map = {}
 ```
 
 - **Objects have two spellings, selected per object by the pair separator**: fig-inline (`=`, keys bare or quoted) or JSON (`:`, keys MUST be quoted). Mixing separators in one object is `FigMixedFlowSeparators`; a bare key before `:` is `FigFlowBareKeyColon`. Arrays have no separator and no mode; each element self-selects, so pasted JSON subtrees nest inside fig objects.
-- **Bare flow values run to the next `,` `]` `}` or newline**, spaces included then edge-trimmed — `[Adam Harris, Makena Harris]` is two two-word strings. They are sniffed by the same literal-else-string rule. A non-bracket-led bare value is terminated by *any* `]`/`}`; quote a value containing them.
+- **Bare flow values run to the next `,` `]` `}` or newline**, spaces included then edge-trimmed — `[Adam Harris, Makena Harris]` is two two-word strings. They are sniffed by the same literal-else-string rule. A non-bracket-led bare value is terminated by *any* `]`/`}`; quote a value containing them. A newline ends a bare value but is **not** an element separator: the next non-blank, non-comment token must be `,` or the closer, so `[a` ⏎ `b]` is `FigUnclosedFlow` (a bare flow value cannot span lines; quote it instead).
 - **Bracket-led bare strings** (§ 4.7's flow twin): an element whose first char is `[`/`{` and whose balanced close is followed by more content is a bare string, scanned bracket-aware so interior `]` does not terminate it — `links = [[Blog](/Blog.md), [Resume](/Resume.md)]` is two unquoted strings.
 - **JSONC affordances**: trailing commas and `#` comments are accepted in both spellings; interior comments are discarded. JSON5 is otherwise dropped: `Infinity`/`NaN` are plain strings.
 - A `# …` alone after the opening bracket on its line is the flow value's trailing comment (the multi-line-string opener rule's flow twin).
@@ -342,10 +342,10 @@ Append headers are order-dependent by design (the file is a log of append events
 ```
 clusters[0].name = alpha
 clusters[0].size = 3
-clusters[1].name = beta        # indices may only extend by one
+clusters[1].name = beta        # indices extend by at most one
 ```
 
-- A literal index in final assignment position MAY only append at exactly the sequence's current length: a smaller index is `FigIndexAlreadySet`, a larger one is `FigIndexSkipped`.
+- A literal index in final assignment position MUST equal the sequence's current length (appending exactly one element): a smaller index is `FigIndexAlreadySet`, a larger one is `FigIndexSkipped`.
 - An `[i]` header re-opens element `i` (if it exists and is a container) or creates element `i == len`.
 - Indexes and `*` elements MUST NOT mix on one sequence (`FigMixedSequenceAddressing`).
 

@@ -23,8 +23,9 @@
 //!     containers close: a comment at (or below) a closing container's child
 //!     depth becomes its dangling run; a shallower one stays pending and binds
 //!     to the next sibling line as its leading run.
-//!   * Only LF line endings are recognized as line breaks (a lone `\r` is
-//!     treated as ordinary trivia and trimmed where comments are captured).
+//!   * Line terminators are LF or CRLF: a `\r` immediately before `\n` (or at
+//!     EOF) is trivia everywhere — see `atCrlf` — so CRLF documents parse
+//!     identically to LF ones. A `\r` elsewhere stays ordinary content bytes.
 //!
 //! Every built node also carries a source `Span` (see "AST assembly" below) —
 //! the foundation `Editor(fig.Language.FIG)` needs to splice edits in place
@@ -92,6 +93,10 @@ pub const Error = error{
     /// wrapped-a-bare-string-in-unescaped-quotes slip (`k = "She said, "Hi""`).
     /// A quote-specific `FigTrailingContent` that names the bare-string fix.
     FigQuotedTrailingContent,
+    /// Non-comment content followed a `'''`/`"""` opening delimiter on its own
+    /// line (`x = '''abc'''`) — multiline content begins on the NEXT line, so
+    /// silently ignoring the rest of the opener line would lose data.
+    FigMultilineOpenerContent,
     /// A `+` continuation line with no `[]` append header (or `+`) as the most
     /// recent zero-marker structural line — nothing to re-run.
     FigDanglingContinuation,
@@ -141,6 +146,7 @@ pub fn describe(code: Error) []const u8 {
         error.FigUnknownType => "unknown type name; the built-in types are int, float, bool, string, enum, char, datetime, date, time",
         error.FigTrailingContent => "unexpected content after this line's value or header; quote the whole value if it is one string (a `#` comment needs a space before it)",
         error.FigQuotedTrailingContent => "this string ends at its matching quote, and the rest of the line is stray content; fig bare strings need no outer quotes — write `key = She said, \"Hey there!\"`, or escape the inner quotes: `\"She said, \\\"Hey there!\\\"\"`",
+        error.FigMultilineOpenerContent => "a multiline string's content begins on the line AFTER the opening `'''`/`\"\"\"`; move this text down a line (only a `# comment` may share the opener line)",
         error.FigDanglingContinuation => "`+` has no `[]` append header to re-run; move it directly after its `a.b[]` group, or repeat the header",
         error.FigClosedFlowValue => "a value written inline as `[…]`/`{…}` is closed and cannot be extended later; write the block or header form if it needs to grow",
         error.FigUnclosedFlow => "this `[`/`{` value never finds its matching close; close it, or quote the whole value to make it a string",
@@ -181,6 +187,7 @@ pub fn shortLabel(code: Error) []const u8 {
         error.FigUnknownType => "unknown type",
         error.FigTrailingContent => "trailing content",
         error.FigQuotedTrailingContent => "trailing content after quote",
+        error.FigMultilineOpenerContent => "content on multiline opener line",
         error.FigDanglingContinuation => "dangling continuation",
         error.FigClosedFlowValue => "value is closed",
         error.FigUnclosedFlow => "unclosed flow",
@@ -257,8 +264,9 @@ pub const Warning = struct {
         /// (`Yes`, `ON`, `TRUE`, `Null`) fell to a plain string — the Norway
         /// class, surfaced instead of silently coerced either way.
         string_looks_like_literal,
-        /// A digit-only token with a leading zero (`007`) kept its padding as
-        /// a string (the TOML leading-zero rule).
+        /// A token that would be a valid number but for a leading zero on its
+        /// integer part (`007`, `-07`, `01.5`) kept its padding as a string
+        /// (the TOML leading-zero rule).
         string_leading_zero,
         /// A number-shaped token that no valid number spelling accepts — a
         /// trailing-dot float (`1.`, `42.`) or a leading-dot float (`.5`,
@@ -1433,6 +1441,14 @@ fn parseUntypedValue(self: *Parser, force_string_bare: bool) Error!TNode {
 fn parseQuotedOrTriple(self: *Parser, q: u8) Error!TNode {
     const start = self.pos;
     if (self.isTripleAt(self.pos, q)) {
+        // The opener line is still block-layer: only whitespace and an optional
+        // `# comment` may follow the opening delimiter — content begins on the
+        // NEXT line, so anything else here would otherwise be silently lost
+        // (`x = '''abc'''` is NOT a one-line multiline string).
+        var j = self.pos + 3;
+        while (j < self.source.len and (self.source[j] == ' ' or self.source[j] == '\t')) j += 1;
+        if (j < self.source.len and self.source[j] != '\n' and self.source[j] != '#' and !self.isCrlfAt(j))
+            return self.failAt(j, error.FigMultilineOpenerContent);
         const r = if (q == '\'')
             try tok.scanTripleSingle(self.allocator, self.source, self.pos)
         else
@@ -1547,16 +1563,18 @@ fn flowLikePrefix(self: *Parser, start: usize) Error!?usize {
     return if (sub.pos == prefix.len) close else null;
 }
 
-/// `007`-style: digit-only (after an optional sign) with a leading zero — a
-/// number lookalike the TOML leading-zero rule keeps as a string.
+/// `007`-style: a token (after an optional sign) that would be a valid number
+/// but for a leading zero on its integer part — digit-only (`007`, `-07`) or a
+/// float shape (`01.5`, `00.5`, `-01e2`) — kept as a string by the TOML
+/// leading-zero rule. Decided by re-sniffing with the extra zeros stripped, so
+/// anything that still isn't a number (`0x`, `01.5.6`, `007a`) never warns.
 fn looksLikeLeadingZero(text: []const u8) bool {
     var s = text;
     if (s.len > 0 and (s[0] == '+' or s[0] == '-')) s = s[1..];
     if (s.len < 2 or s[0] != '0' or !std.ascii.isDigit(s[1])) return false;
-    for (s[1..]) |c| {
-        if (!std.ascii.isDigit(c)) return false;
-    }
-    return true;
+    var k: usize = 0;
+    while (k + 1 < s.len and s[k] == '0' and std.ascii.isDigit(s[k + 1])) k += 1;
+    return tok.sniffNumber(s[k..]) != null;
 }
 
 /// `1.`-style: a clean integer followed by a single trailing dot (`1.`, `42.`,
@@ -1740,7 +1758,7 @@ fn scanBareRestOfLine(self: *Parser) BareScan {
 /// `FigTrailingContent`. Leaves `self.pos` at the newline/EOF.
 fn scanTrailingCommentOnly(self: *Parser) Error!?[]const u8 {
     self.skipSpacesTabs();
-    if (self.pos >= self.source.len or self.source[self.pos] == '\n') return null;
+    if (self.pos >= self.source.len or self.source[self.pos] == '\n' or self.atCrlf()) return null;
     if (self.source[self.pos] == '#') {
         const cs = self.pos + 1;
         var j = cs;
@@ -2119,17 +2137,30 @@ fn skipSpacesTabs(self: *Parser) void {
 
 fn atEndOfContent(self: *Parser) bool {
     const p = self.peek();
-    return p == null or p.? == '\n' or p.? == '#';
+    return p == null or p.? == '\n' or p.? == '#' or self.atCrlf();
 }
 
 /// Stricter than `atEndOfContent`: true only for real end-of-line/EOF, never
 /// for a `#` — used where a comment must NOT be swallowed as "blank".
 fn atTrueLineEnd(self: *Parser) bool {
     const p = self.peek();
-    return p == null or p.? == '\n';
+    return p == null or p.? == '\n' or self.atCrlf();
+}
+
+/// A `\r` that terminates its line — immediately before `\n` or at EOF — is
+/// trivia, so CRLF documents parse identically to their LF counterparts
+/// (spec § 3.1). A `\r` anywhere else stays ordinary content bytes.
+fn atCrlf(self: *const Parser) bool {
+    return self.isCrlfAt(self.pos);
+}
+
+fn isCrlfAt(self: *const Parser, pos: usize) bool {
+    return pos < self.source.len and self.source[pos] == '\r' and
+        (pos + 1 >= self.source.len or self.source[pos + 1] == '\n');
 }
 
 fn skipToNextLine(self: *Parser) void {
+    if (self.atCrlf()) self.pos += 1; // a line-terminating `\r` is trivia (§ 3.1)
     if (self.pos < self.source.len and self.source[self.pos] == '\n') self.pos += 1;
 }
 
@@ -2801,6 +2832,49 @@ test "multiline strings: raw and dedented" {
     try testing.expectEqualStrings("hi\nthere", (try ast.getValByPath(&.{.{ .key = "banner" }})).kind.string);
 }
 
+test "multiline closer is line-anchored: indented closer OK, mid-line triple is content" {
+    var ast = try parseAbstract(testing.allocator,
+        "a = '''\n  x\n  '''\nb = '''\nhas ''' inside\n'''\nc = \"\"\"\n    hi\n  low\n    \"\"\"\n", .Fig);
+    defer ast.deinit();
+    // Raw: content lines keep their indentation; the CLOSER line's leading
+    // whitespace is not content (the closer need not sit flush-left).
+    try testing.expectEqualStrings("  x", (try ast.getValByPath(&.{.{ .key = "a" }})).kind.string);
+    // A `'''` that is not the first non-whitespace content of its line is
+    // ordinary content, never a closer — nothing is silently dropped.
+    try testing.expectEqualStrings("has ''' inside", (try ast.getValByPath(&.{.{ .key = "b" }})).kind.string);
+    // Smart-dedent: a line with LESS leading whitespace than the closer's run
+    // loses whatever it has (never an error, never negative).
+    try testing.expectEqualStrings("hi\nlow", (try ast.getValByPath(&.{.{ .key = "c" }})).kind.string);
+}
+
+test "content after a multiline opener is a hard error, an opener comment is not" {
+    // `x = '''abc'''` is NOT a one-line multiline string: content begins on the
+    // next line, so the opener-line text would be silently lost.
+    try testing.expectError(error.FigMultilineOpenerContent, parseAbstract(testing.allocator, "x = '''abc'''\n", .Fig));
+    try testing.expectError(error.FigMultilineOpenerContent, parseAbstract(testing.allocator, "x = \"\"\"abc\nhi\n\"\"\"\n", .Fig));
+    try testing.expectError(error.FigMultilineOpenerContent, parseAbstract(testing.allocator, "x = ''''\nhi\n'''\n", .Fig));
+    var ast = try parseAbstract(testing.allocator, "x = '''  # note\nhi\n'''\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings("hi", (try ast.getValByPath(&.{.{ .key = "x" }})).kind.string);
+}
+
+test "CRLF input parses identically to LF (a line-terminating \\r is trivia)" {
+    var ast = try parseAbstract(testing.allocator,
+        "database\r\n> host = localhost\r\n> quoted = \"v\"  # c\r\n>>\r\nports\r\n> * 1\r\n> * 2\r\nblob = '''\r\na\r\nb\r\n'''\r\nxs[]\r\n> k = 1\r\n+\r\n> k = 2\r\n", .Fig);
+    defer ast.deinit();
+    try testing.expectEqualStrings("localhost", (try ast.getValByPath(&.{ .{ .key = "database" }, .{ .key = "host" } })).kind.string);
+    try testing.expectEqualStrings("v", (try ast.getValByPath(&.{ .{ .key = "database" }, .{ .key = "quoted" } })).kind.string);
+    try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "ports" }, .{ .index = 1 } })).kind.number.raw);
+    // Multiline content captures its line breaks as LF — CRLF and LF sources
+    // yield byte-identical values.
+    try testing.expectEqualStrings("a\nb", (try ast.getValByPath(&.{.{ .key = "blob" }})).kind.string);
+    try testing.expectEqualStrings("2", (try ast.getValByPath(&.{ .{ .key = "xs" }, .{ .index = 1 }, .{ .key = "k" } })).kind.number.raw);
+    // A final line terminated by a lone \r at EOF is closed the same way.
+    var ast2 = try parseAbstract(testing.allocator, "section\r\n> a = 1\r", .Fig);
+    defer ast2.deinit();
+    try testing.expectEqualStrings("1", (try ast2.getValByPath(&.{ .{ .key = "section" }, .{ .key = "a" } })).kind.number.raw);
+}
+
 test "element with inline field is a hard error" {
     try testing.expectError(error.FigElementInlineField, parseAbstract(testing.allocator, "xs\n> * host = a.com\n", .Fig));
 }
@@ -3034,6 +3108,13 @@ test "coercion warns: literal lookalikes and leading zeros" {
     try expectWarnCodes("shout = TRUE\n", &.{.string_looks_like_literal});
     try expectWarnCodes("nothing = Null\n", &.{.string_looks_like_literal});
     try expectWarnCodes("zip = 007\n", &.{.string_leading_zero});
+    // Float/exponent shapes with a leading zero on the integer part fall to
+    // strings too, and warn the same way (`01.5` is not silently a string).
+    try expectWarnCodes("f = 01.5\n", &.{.string_leading_zero});
+    try expectWarnCodes("f = 00.5\n", &.{.string_leading_zero});
+    try expectWarnCodes("f = -01e2\n", &.{.string_leading_zero});
+    // Still not a number even without the zeros → stays silent.
+    try expectWarnCodes("v = 01.5.6\n", &.{});
     // A trailing-dot number lookalike (`1.`) falls to a string and warns —
     // narrow, so version strings and prose stay silent.
     try expectWarnCodes("sig = 1.\n", &.{.string_looks_like_number});

@@ -357,27 +357,31 @@ fn scanTriple(allocator: Allocator, source: []const u8, start: usize, q: u8, ded
     if (i < source.len and source[i] == '\n') i += 1;
     const body_start = i;
 
-    const marker = [3]u8{ q, q, q };
-    const close_pos = std.mem.indexOfPos(u8, source, body_start, &marker) orelse
-        return error.FigUnclosedString;
-
-    // Dedent amount: the whitespace run immediately preceding the close on its
-    // own line.
-    var line_start = close_pos;
-    while (line_start > body_start and source[line_start - 1] != '\n') line_start -= 1;
+    // The closing delimiter is LINE-ANCHORED (spec § 4.6): the block closes at
+    // the first line whose first non-whitespace content begins with the triple
+    // delimiter. The closer's leading whitespace is not content (for `"""` it
+    // defines the dedent), and a delimiter appearing mid-line is ordinary
+    // content — never a closer, so no text is ever silently dropped.
+    var line_start = body_start;
+    const close_pos = while (line_start <= source.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse source.len;
+        var j = line_start;
+        while (j < line_end and (source[j] == ' ' or source[j] == '\t')) j += 1;
+        if (j + 3 <= source.len and source[j] == q and source[j + 1] == q and source[j + 2] == q)
+            break j;
+        if (line_end >= source.len) return error.FigUnclosedString;
+        line_start = line_end + 1;
+    } else return error.FigUnclosedString;
     const dedent = close_pos - line_start;
 
-    // Body text excludes the closing line and its preceding newline.
+    // Body text excludes the closing line and its preceding newline (a CRLF
+    // terminator counts as one line break — the `\r` is trivia, spec § 3.1).
     var body_end = line_start;
     if (body_end > body_start and source[body_end - 1] == '\n') body_end -= 1;
     if (body_end > body_start and source[body_end - 1] == '\r') body_end -= 1;
     const body = if (body_end >= body_start) source[body_start..body_end] else "";
 
-    // Consume up to two extra quotes hugging the close (mirrors TOML), so
-    // `""""""` (a literal `""` at the end) round-trips.
-    var end = close_pos + 3;
-    var extra: usize = 0;
-    while (extra < 2 and end < source.len and source[end] == q) : (extra += 1) end += 1;
+    const end = close_pos + 3;
 
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -387,6 +391,9 @@ fn scanTriple(allocator: Allocator, source: []const u8, start: usize, q: u8, ded
         if (!first) try out.append(allocator, '\n');
         first = false;
         var line = raw_line;
+        // A line-terminating `\r` (CRLF input) is trivia, so the captured
+        // value's line breaks are always LF. A `\r` mid-line stays content.
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
         if (dedent_and_escape) {
             var stripped: usize = 0;
             while (stripped < dedent and line.len > 0 and (line[0] == ' ' or line[0] == '\t')) : (stripped += 1) line = line[1..];
