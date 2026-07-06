@@ -181,9 +181,10 @@ impl Embed {
 
     // ── value edits (over `Value`) ──────────────────────────────────────────
 
-    /// Replace the value at `path` with `value`.
-    pub fn replace_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let repl = value_text(value, self.inner)?;
+    /// Replace the value at `path` with `value` — any `impl Into<Value>`: a
+    /// scalar (`9i64`, `"x"`, `true`), a built [`Value`], or a `&Value`.
+    pub fn replace_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
+        let repl = value_text(&value.into(), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_embed_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
@@ -202,14 +203,15 @@ impl Embed {
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
+    /// `value` is any `impl Into<Value>`.
     pub fn insert_value(
         &mut self,
         path: &[Segment],
         key: &str,
-        value: &Value,
+        value: impl Into<Value>,
     ) -> Result<(), Error> {
         let key_text = value_text(&Value::Str(key.to_string()), self.inner)?;
-        let val = value_text(value, self.inner)?;
+        let val = value_text(&value.into(), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_embed_insert_key(
@@ -230,17 +232,17 @@ impl Embed {
     /// `replace_value` → (on [`Error::NotFound`]) `insert_value` two-step into a
     /// single call. `path` must end in a key (it only ever creates a mapping
     /// entry); a missing intermediate container surfaces as [`Error::NotFound`].
-    pub fn set_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, self.inner)?;
+    pub fn set_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
+        let val = value_text(&value.into(), self.inner)?;
         let p = to_ffi_path(path);
         let status =
             unsafe { ffi::fig_embed_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
         Error::from_status(status)
     }
 
-    /// Append `value` to the sequence at `path`.
-    pub fn append_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, self.inner)?;
+    /// Append `value` (any `impl Into<Value>`) to the sequence at `path`.
+    pub fn append_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
+        let val = value_text(&value.into(), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_embed_append_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
@@ -248,9 +250,9 @@ impl Embed {
         Error::from_status(status)
     }
 
-    /// Prepend `value` to the sequence at `path`.
-    pub fn prepend_value(&mut self, path: &[Segment], value: &Value) -> Result<(), Error> {
-        let val = value_text(value, self.inner)?;
+    /// Prepend `value` (any `impl Into<Value>`) to the sequence at `path`.
+    pub fn prepend_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
+        let val = value_text(&value.into(), self.inner)?;
         let p = to_ffi_path(path);
         let status = unsafe {
             ffi::fig_embed_prepend_seq(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len())
@@ -267,7 +269,7 @@ impl Embed {
         path: &[Segment],
         value: &T,
     ) -> Result<(), Error> {
-        self.replace_value(path, &crate::ser::to_value(value)?)
+        self.replace_value(path, crate::ser::to_value(value)?)
     }
 
     /// Insert `key: value` into the mapping at `path` (empty path = root).
@@ -278,7 +280,7 @@ impl Embed {
         key: &str,
         value: &T,
     ) -> Result<(), Error> {
-        self.insert_value(path, key, &crate::ser::to_value(value)?)
+        self.insert_value(path, key, crate::ser::to_value(value)?)
     }
 
     /// Upsert: replace the value at `path`, or insert it when only the trailing
@@ -289,7 +291,7 @@ impl Embed {
         path: &[Segment],
         value: &T,
     ) -> Result<(), Error> {
-        self.set_value(path, &crate::ser::to_value(value)?)
+        self.set_value(path, crate::ser::to_value(value)?)
     }
 
     /// Append the serialized form of `value` to the sequence at `path`.
@@ -299,7 +301,7 @@ impl Embed {
         path: &[Segment],
         value: &T,
     ) -> Result<(), Error> {
-        self.append_value(path, &crate::ser::to_value(value)?)
+        self.append_value(path, crate::ser::to_value(value)?)
     }
 
     /// Prepend the serialized form of `value` to the sequence at `path`.
@@ -309,7 +311,7 @@ impl Embed {
         path: &[Segment],
         value: &T,
     ) -> Result<(), Error> {
-        self.prepend_value(path, &crate::ser::to_value(value)?)
+        self.prepend_value(path, crate::ser::to_value(value)?)
     }
 
     // ── comment editing ─────────────────────────────────────────────────────

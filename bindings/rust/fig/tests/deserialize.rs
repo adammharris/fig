@@ -1,3 +1,6 @@
+//! Serde deserialization tests. Run with `cargo test -p fig --features serde`.
+#![cfg(feature = "serde")]
+
 use fig::Value;
 use serde::Deserialize;
 

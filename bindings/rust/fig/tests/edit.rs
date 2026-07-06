@@ -1,6 +1,10 @@
 //! Comment-preserving write-path tests: edits must change only the targeted
 //! node's bytes and leave comments, key order, fences, and the markdown body
-//! intact.
+//! intact. These use the serde-sugar edit methods (`set`/`replace`/…) and
+//! `from_str`, so the file is serde-gated; the serde-free `*_value` editing path
+//! is covered by the in-crate unit tests in `src/`. Run with
+//! `cargo test -p fig --features serde`.
+#![cfg(feature = "serde")]
 
 use fig::{Editor, Embed, EmbedType, Format, Segment};
 

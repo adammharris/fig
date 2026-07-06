@@ -38,7 +38,9 @@ jobs:
           exit 1
         fi
         echo "version $canonical matches tag $GITHUB_REF_NAME"
-    - run: cargo test --workspace --locked
+    # --all-features so the serde- and derive-gated integration tests also run
+    # (they are not in the default feature set).
+    - run: cargo test --workspace --all-features --locked
       working-directory: bindings/rust
     # Vendors the Zig source into the fig crate AND fans the root LICENSE files
     # out into both crate dirs — must run before either publish so the license

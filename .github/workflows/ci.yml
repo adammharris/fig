@@ -42,7 +42,10 @@ jobs:
     - uses: dtolnay/rust-toolchain@stable
     - uses: Swatinem/rust-cache@v2
       with: { workspaces: bindings/rust }
-    - run: cargo test --workspace
+    # --all-features so the serde- and derive-gated integration tests
+    # (deserialize/serialize/edit/derive) run — none are in the default feature
+    # set, so a plain `cargo test` would silently skip them.
+    - run: cargo test --workspace --all-features
       working-directory: bindings/rust
   # cargo-semver-checks guards the *native Rust* public surface (Value, Document,
   # the editor, the #[derive] macros, serde impls, cargo features) — the contract

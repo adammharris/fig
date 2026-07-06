@@ -127,6 +127,14 @@ impl From<Vec<Value>> for Value {
         Value::Seq(v)
     }
 }
+/// Clone a borrowed value into an owned one. This is what lets a `&Value` still
+/// satisfy the `impl Into<Value>` value parameters on the editor/embed methods
+/// (pass an owned `Value` instead to move rather than clone).
+impl From<&Value> for Value {
+    fn from(v: &Value) -> Self {
+        v.clone()
+    }
+}
 
 impl Value {
     /// Render to `format` via fig's core serializer, using default output style.

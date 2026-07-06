@@ -44,15 +44,16 @@ pub use ser::{to_string, to_value};
 
 use ffi::{FIG_NODE_NONE, FigNodeId, FigNodeKind};
 
-/// A config format. Parsing and editing support `Json`/`Jsonc`/`Json5`/`Yaml`/
-/// `Fig`; [`Value::serialize`] additionally supports `Toml`/`Zon`.
+/// A config format. Every variant parses, edits, and serializes.
 ///
-/// Every variant is always present, but the non-JSON formats are gated by the
-/// crate features of the same name (`yaml`, `toml`, `zon`, `fig`; all on by
-/// default). Disabling a feature compiles that format out of the bundled
-/// native library, so selecting it then fails with [`Error::UnsupportedFormat`]
-/// at runtime. (`Json`/`Jsonc`/`Json5` are always compiled in — they share the
-/// JSON core.)
+/// Every variant is always present in the enum, but each format is gated by a
+/// crate feature of the same name (`json`, `yaml`, `toml`, `zon`, `fig`).
+/// `json`, `yaml`, `toml`, and `fig` are on by default; `zon` is opt-in.
+/// Disabling a feature compiles that format out of the bundled native library,
+/// so selecting it then fails with [`Error::UnsupportedFormat`] at runtime.
+/// `Json`/`Jsonc`/`Json5` share one core behind the `json` feature. (The core
+/// also has a reader-only XML format, but it has no writable `Format` variant
+/// and so is not exposed here.)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     Json,
@@ -87,8 +88,8 @@ impl From<Format> for ffi::FigFormat {
 /// `pretty` is honored by [`Format::Json`] (multi-line vs. minified),
 /// [`Format::Zon`] (`zig fmt` multi-line vs. inline `.{ a, b }`), and
 /// [`Format::Toml`] (gates array wrapping); `indent` by [`Format::Json`] and
-/// [`Format::Toml`]'s wrapped arrays; `width` by [`Format::Toml`]'s
-/// inline-vs-section layout. [`Format::Yaml`] renders with its own fixed layout.
+/// [`Format::Toml`]'s wrapped arrays; `width` by the inline-vs-expanded (flow vs.
+/// block) layout of [`Format::Toml`], [`Format::Yaml`], and [`Format::Fig`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SerializeOptions {
     /// `true`: multi-line, indented output. `false`: compact single-line output
@@ -107,10 +108,11 @@ pub struct SerializeOptions {
     /// `false` (lossy — an unrepresentable value is an [`Error::UnsupportedFormat`]).
     /// Ignored by [`Value::serialize_with`] (a built value has no source envelopes).
     pub lossless: bool,
-    /// [`Format::Toml`] only: the column budget for its inline-vs-expanded layout.
-    /// A mapping/array that renders within `width` columns stays inline
-    /// (`k = { … }` / `[a, b]`); a wider one expands to a `[section]` / a wrapped
-    /// array. Default `80`. Ignored by the other formats.
+    /// The column budget for the inline-vs-expanded layout of [`Format::Toml`],
+    /// [`Format::Yaml`], and [`Format::Fig`]. A mapping/array that renders within
+    /// `width` columns stays inline (flow: `k = { … }` / `[a, b]`); a wider one
+    /// expands to a `[section]`, a wrapped array, or block form. Default `80`.
+    /// Ignored by the other formats.
     pub width: u16,
 }
 
@@ -192,8 +194,9 @@ pub fn version_string() -> &'static str {
 }
 
 /// What this build of the fig core can do with a format. Reflects both inherent
-/// support (XML is reader-only; TOML/ZON parse and serialize but are not
-/// editable) and build-time gating (a format compiled out reports all-false).
+/// support (every format the `Format` enum exposes parses, edits, and
+/// serializes; the core's reader-only XML is not surfaced here) and build-time
+/// gating (a format compiled out reports all-false).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
     /// [`Document::parse`] accepts this format.

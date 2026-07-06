@@ -1,3 +1,6 @@
+//! Serde serialization tests. Run with `cargo test -p fig --features serde`.
+#![cfg(feature = "serde")]
+
 use serde::{Deserialize, Serialize};
 
 use fig::{Format, Value};
@@ -252,6 +255,7 @@ fn toml_width_controls_inline_vs_section() {
 }
 
 #[test]
+#[cfg(feature = "zon")]
 fn zon_compact_vs_pretty() {
     use fig::SerializeOptions;
     let value = map(vec![

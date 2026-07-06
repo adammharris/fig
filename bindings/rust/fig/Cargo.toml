@@ -37,11 +37,16 @@ include = [
 name = "fig"
 path = "src/lib.rs"
 
+# JSON is in `default`, not implied by the base crate: `--no-default-features`
+# compiles it out too (like any other language). `serde` is opt-in — the crate
+# parses, edits, and serializes through the `Value` tree (and `#[derive]`) with
+# no serde at all.
 [features]
-default = ["serde", "yaml", "toml", "zon", "xml", "fig"]
+default = ["json", "yaml", "toml", "fig"]
 # Typed (de)serialization: `to_string`/`from_str`, the editor's `T: Serialize`
-# value methods, and serde impls for `Value`. Without it, the binding still
-# parses, edits, and serializes via the `Value` tree directly.
+# value methods, and serde impls for `Value`. Opt-in (not in `default`); without
+# it, the binding still parses, edits, and serializes via the `Value` tree
+# directly, and `#[derive(ToValue, FromValue)]` covers typed struct mapping.
 serde = ["dep:serde"]
 # Ergonomic typed mapping without serde: `#[derive(fig::ToValue, fig::FromValue)]`
 # generates straight-line conversions to/from the concrete `Value` tree (no
@@ -53,9 +58,10 @@ indexmap = ["dep:indexmap"]
 # Per-language gates, mirroring `build.zig`'s `-D<lang>` options. Each is passed
 # through to the bundled `zig build` (see `build.rs`), so disabling a feature
 # compiles that format's parser/printer out of the linked `libfig.a` and shrinks
-# the binary. JSON is always present (the base format), so it has no feature.
-# The `Format` enum keeps every variant regardless; selecting a format whose
-# feature is off returns `Error::UnsupportedFormat` at runtime.
+# the binary. `json` gates the shared JSON/JSONC/JSON5 core. The `Format` enum
+# keeps every variant regardless; selecting a format whose feature is off returns
+# `Error::UnsupportedFormat` at runtime.
+json = []
 yaml = []
 toml = []
 zon = []

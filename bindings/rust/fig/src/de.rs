@@ -17,8 +17,9 @@ pub fn from_str<T: DeserializeOwned>(s: &str) -> Result<T, Error> {
     from_slice(s.as_bytes(), Format::Yaml)
 }
 
-/// Deserialize bytes in the given format into a typed value. All five formats
-/// (`Json`/`Jsonc`/`Yaml`/`Toml`/`Zon`) parse.
+/// Deserialize bytes in the given format into a typed value. Every parsing
+/// format works — `Json`/`Jsonc`/`Json5`/`Yaml`/`Toml`/`Zon`/`Fig` — subject to
+/// the matching crate feature being enabled.
 pub fn from_slice<T: DeserializeOwned>(input: &[u8], format: Format) -> Result<T, Error> {
     let doc = Document::parse(input, format)?;
     let de = NodeDeserializer {
