@@ -35,13 +35,18 @@ And you can use `fig` in the following programming languages:
 
 ## Command-line interface
 
-The CLI mirrors both: `fig get`/`fig fmt`/etc. fall back to content-sniffing when a file's extension doesn't pin its format, and `fig convert <file> --output <format>` (or `--to-embed <archetype>` to rehouse a host document's embedded region — e.g. YAML frontmatter → JSON frontmatter — in place) converts a file from one format to another, in place, the cross-format twin of `fig fmt`. Run `fig convert --help` for the full flag set.
+Download from Github Releases or with Homebrew:
 
-I have
+```bash
+brew tap adammharris/tap
+brew install adammharris/tap/fig
+```
+
+Run `fig help` for instructions for how to use it on your files.
 
 ## Planned features
 
-- Better ergonomics and testing for the Typescript bindings
+- Better testing for the Typescript bindings
 - Styling directives (maintain styling across formats, such as mapping TOML inline->YAML inline)
 - More distribution options (package managers, etc.)
 - More bindings
@@ -65,7 +70,7 @@ All of the code generated was carefully reviewed and edited according to my tast
 
 **License**
 
-MIT or Apache 2.0, at your discretion. If you use fig in your work, I would love to hear from you and feature you here! [Please contact me!](<#Contact Me>)
+MIT or Apache 2.0, at your discretion. If you use `fig` in your work, I would love to hear from you and feature you here! [Please contact me!](<#Contact Me>)
 
 **Credits**
 
