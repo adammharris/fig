@@ -7,9 +7,15 @@
     "access": "public"
   },
   "bin": {
-    "fig": "./bin/fig.mjs"
+    "fig": "bin/fig.mjs"
   },
-  "files": ["bin", "wasm", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "files": [
+    "bin",
+    "wasm",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
   "keywords": [
     "json",
     "jsonc",
