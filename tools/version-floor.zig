@@ -42,6 +42,7 @@
 //!   version-floor <build.zig.zon> <build.zig> <Cargo.toml> <package.json> <wasi-package.json>
 
 const std = @import("std");
+const fields = @import("version_fields.zig");
 
 const max_file = 1 * 1024 * 1024;
 
@@ -67,13 +68,13 @@ pub fn main(init: std.process.Init) !void {
     const pkg = try cwd.readFileAlloc(io, pkg_path, arena, .limited(max_file));
     const wasi_pkg = try cwd.readFileAlloc(io, wasi_pkg_path, arena, .limited(max_file));
 
-    const core_str = zonVersion(zon) orelse return fail("build.zig.zon", "no `.version` field");
-    const cli_str = buildZigCliVersion(build_zig) orelse return fail("build.zig", "no `cli_version` field");
-    const rust_str = cargoWorkspaceVersion(cargo) orelse return fail("Cargo.toml", "no `[workspace.package] version`");
-    const ts_str = jsonVersion(pkg) orelse return fail("package.json", "no `\"version\"` field");
-    const wasi_str = jsonVersion(wasi_pkg) orelse return fail("bindings/wasi/package.json", "no `\"version\"` field");
+    const core_str = fields.zonVersion(zon) orelse return fail("build.zig.zon", "no `.version` field");
+    const cli_str = fields.buildZigCliVersion(build_zig) orelse return fail("build.zig", "no `cli_version` field");
+    const rust_str = fields.cargoWorkspaceVersion(cargo) orelse return fail("Cargo.toml", "no `[workspace.package] version`");
+    const ts_str = fields.jsonVersion(pkg) orelse return fail("package.json", "no `\"version\"` field");
+    const wasi_str = fields.jsonVersion(wasi_pkg) orelse return fail("bindings/wasi/package.json", "no `\"version\"` field");
 
-    const macros_pin = cargoFigMacrosPin(cargo) orelse
+    const macros_pin = fields.cargoFigMacrosPin(cargo) orelse
         return fail("Cargo.toml", "no `fig-macros` version pin in [workspace.dependencies]");
 
     const core = std.SemanticVersion.parse(core_str) catch return fail("build.zig.zon", "unparseable `.version`");
@@ -117,78 +118,4 @@ pub fn main(init: std.process.Init) !void {
 fn fail(file: []const u8, why: []const u8) noreturn {
     std.debug.print("version-floor: FAIL: {s}: {s}\n", .{ file, why });
     std.process.exit(1);
-}
-
-/// The string after `.version = "..."` in a build.zig.zon.
-fn zonVersion(text: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, text, ".version") orelse return null;
-    return quotedAfter(text, at + ".version".len);
-}
-
-/// The quoted version string passed to `std.SemanticVersion.parse(...)` in
-/// `build.zig`'s `const cli_version = std.SemanticVersion.parse("X.Y.Z") ...`
-/// declaration. Anchors on the `cli_version` identifier (not just `parse(`,
-/// since `version` above is parsed the same way) then takes the first quoted
-/// string after it.
-fn buildZigCliVersion(text: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, text, "cli_version") orelse return null;
-    return quotedAfter(text, at + "cli_version".len);
-}
-
-/// The version under `[workspace.package]` in a Cargo.toml: the first
-/// `version = "..."` line at or after that section header (so the resolver line
-/// and the `[workspace.dependencies]` pins are never mistaken for it).
-fn cargoWorkspaceVersion(text: []const u8) ?[]const u8 {
-    const sec = std.mem.indexOf(u8, text, "[workspace.package]") orelse return null;
-    var lines = std.mem.splitScalar(u8, text[sec..], '\n');
-    _ = lines.next(); // the header line itself
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trimStart(u8, line, " \t");
-        if (std.mem.startsWith(u8, trimmed, "[")) return null; // next section, not found
-        if (std.mem.startsWith(u8, trimmed, "version")) {
-            const eq = std.mem.indexOfScalar(u8, trimmed, '=') orelse continue;
-            return quotedAfter(trimmed, eq + 1);
-        }
-    }
-    return null;
-}
-
-/// The `version = "..."` inside the `fig-macros = { ... }` dependency entry of a
-/// Cargo.toml. Finds the `fig-macros` *key* (the next non-space char after the
-/// token is `=`, which excludes the `members = [..., "fig-macros"]` array entry
-/// and the `path = "fig-macros"` value), then the `version` inside its table.
-fn cargoFigMacrosPin(text: []const u8) ?[]const u8 {
-    var i: usize = 0;
-    while (std.mem.indexOfPos(u8, text, i, "fig-macros")) |pos| {
-        const after = pos + "fig-macros".len;
-        i = after;
-        const eq = skipSpace(text, after);
-        if (eq >= text.len or text[eq] != '=') continue; // not the key — keep scanning
-        // Scope the search to this entry: up to the end of its line / inline table.
-        const line_end = std.mem.indexOfScalarPos(u8, text, eq, '\n') orelse text.len;
-        const ver = std.mem.indexOfPos(u8, text[0..line_end], eq, "version") orelse continue;
-        const veq = std.mem.indexOfScalarPos(u8, text[0..line_end], ver, '=') orelse continue;
-        return quotedAfter(text[0..line_end], veq + 1);
-    }
-    return null;
-}
-
-fn skipSpace(text: []const u8, idx: usize) usize {
-    var i = idx;
-    while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;
-    return i;
-}
-
-/// The string after the first `"version"` key in a package.json.
-fn jsonVersion(text: []const u8) ?[]const u8 {
-    const at = std.mem.indexOf(u8, text, "\"version\"") orelse return null;
-    const colon = std.mem.indexOfScalarPos(u8, text, at + "\"version\"".len, ':') orelse return null;
-    return quotedAfter(text, colon + 1);
-}
-
-/// The contents of the next double-quoted string at or after `idx`.
-fn quotedAfter(text: []const u8, idx: usize) ?[]const u8 {
-    const open = std.mem.indexOfScalarPos(u8, text, idx, '"') orelse return null;
-    const close = std.mem.indexOfScalarPos(u8, text, open + 1, '"') orelse return null;
-    return text[open + 1 .. close];
 }

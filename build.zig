@@ -430,6 +430,28 @@ pub fn build(b: *std.Build) void {
     const version_floor_step = b.step("version-floor", "Check each binding's version is >= the core version it embeds");
     version_floor_step.dependOn(&version_floor_run.step);
 
+    // The writer counterpart of version-floor: set/bump one artifact's version
+    // and keep every coupled field valid in one shot (the fig-wasi==cli pin, the
+    // fig-macros pin, and the artifact>=core floor — see docs/VERSIONING.md). It
+    // rewrites the real manifests (not addFileArg cache copies), so it takes the
+    // repo root like sync-figl and is marked has_side_effects. Not part of
+    // `check` — it mutates the tree rather than guarding it. The `--` args
+    // (<artifact> <version|major|minor|patch> [--dry-run]) are forwarded through.
+    const version_set = b.addExecutable(.{
+        .name = "version_set",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/version-set.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const version_set_run = b.addRunArtifact(version_set);
+    version_set_run.addArg(b.pathFromRoot("."));
+    if (b.args) |args| version_set_run.addArgs(args);
+    version_set_run.has_side_effects = true;
+    const version_set_step = b.step("version-set", "Set/bump an artifact's version (core|cli|rust|npm) and keep the pins/floor valid");
+    version_set_step.dependOn(&version_set_run.step);
+
     // The `.figl` files under figl/ (build.zig.figl, ci.figl, homebrew.figl,
     // release.figl) are the source of truth for their generated counterparts
     // (build.zig.zon, the three .github/workflows/*.yml files) — the inverse
