@@ -17,7 +17,7 @@ extern "C" {
 // also exposed as a string by fig_version_string().
 // ============================================================================
 #define FIG_VERSION_MAJOR 2
-#define FIG_VERSION_MINOR 0
+#define FIG_VERSION_MINOR 1
 #define FIG_VERSION_PATCH 0
 #define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
@@ -417,6 +417,18 @@ typedef enum FigEmbedType {
 // close is FIG_STATUS_PARSE_ERROR.
 FigStatus fig_embed_extract(const uint8_t *input, size_t input_len,
                             int embed_type, FigRegion *out_region);
+
+// Best-effort sniff of which embed archetype `input` uses: try each known
+// archetype's OPEN delimiter and report the first that matches. Only the open
+// delimiter is checked — an unterminated block is still recognized as its
+// archetype, so a follow-up fig_embed_extract/fig_embed_open surfaces the real
+// FIG_STATUS_PARSE_ERROR instead of a misleading "nothing found". Writes the
+// detected FigEmbedType to `out_embed_type` and returns FIG_STATUS_OK, or
+// FIG_STATUS_NOT_FOUND when `input` opens none of them (the out param is left
+// untouched). Detection is delimiter-only, so it works regardless of which
+// inner formats this build compiles in.
+FigStatus fig_embed_detect(const uint8_t *input, size_t input_len,
+                           int *out_embed_type);
 
 // ============================================================================
 // Embed editor (combined): opens the config inside a host file — selected by

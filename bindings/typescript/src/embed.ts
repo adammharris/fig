@@ -187,3 +187,25 @@ export function split(content: string, kind: EmbedType): [string, string] | null
   const body = decoder.decode(bytes.subarray(region.body.start, region.body.end));
   return [inner, body];
 }
+
+/** Best-effort sniff of which embed archetype `source` uses: try each known
+ *  archetype's OPEN delimiter and return the first that matches, or `null` when
+ *  `source` opens none of them. Only the open delimiter is checked — an
+ *  unterminated block is still *recognized* as its archetype, so a follow-up
+ *  {@link Embed.extract}/{@link Embed.open} surfaces the real error instead of a
+ *  misleading "nothing found". Pair with the archetype's inner format
+ *  (`---`/endmatter ⇒ YAML, `;;;` ⇒ JSON, ```fig ⇒ fig) to parse the content. */
+export function detect(source: string | Uint8Array): EmbedType | null {
+  const bytes = typeof source === "string" ? encoder.encode(source) : source;
+  const frame = new Frame();
+  try {
+    const ptr = frame.bytes(bytes);
+    const out = frame.alloc(4);
+    const status = fig.fig_embed_detect(ptr, bytes.length, out);
+    if (status === Status.NotFound) return null;
+    check(status, "fig_embed_detect");
+    return readU32(out) as EmbedType;
+  } finally {
+    frame.dispose();
+  }
+}

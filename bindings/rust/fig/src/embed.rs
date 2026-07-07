@@ -42,8 +42,25 @@ impl EmbedType {
         }
     }
 
-    /// The inner format values are serialized to when spliced in.
-    fn inner_format(self) -> Format {
+    /// `ffi`'s inverse: decode a `FigEmbedType` discriminant reported by the
+    /// library (e.g. by `fig_embed_detect`). `None` for an unknown value — a
+    /// newer core may know archetypes this binding doesn't.
+    fn from_ffi(value: i32) -> Option<Self> {
+        match value {
+            v if v == ffi::FigEmbedType::FrontmatterYaml as i32 => Some(EmbedType::FrontmatterYaml),
+            v if v == ffi::FigEmbedType::FrontmatterJson as i32 => Some(EmbedType::FrontmatterJson),
+            v if v == ffi::FigEmbedType::EndmatterYaml as i32 => Some(EmbedType::EndmatterYaml),
+            v if v == ffi::FigEmbedType::FrontmatterFig as i32 => Some(EmbedType::FrontmatterFig),
+            _ => None,
+        }
+    }
+
+    /// The inner format this archetype's content is written in (and serialized
+    /// to when spliced in) — `---`/endmatter ⇒ YAML, `;;;` ⇒ JSON,
+    /// ```` ```fig ```` ⇒ the fig authoring dialect. Lets a caller resolve the
+    /// parser to use for a detected embed's content instead of duplicating the
+    /// archetype→format mapping.
+    pub fn inner_format(self) -> Format {
         match self {
             EmbedType::FrontmatterYaml | EmbedType::EndmatterYaml => Format::Yaml,
             EmbedType::FrontmatterJson => Format::Json,
@@ -110,6 +127,22 @@ impl<'a> Extracted<'a> {
 pub fn split(content: &str, kind: EmbedType) -> Option<(&str, &str)> {
     let e = Embed::extract(content, kind).ok()?;
     Some((e.content(), e.body()))
+}
+
+/// Best-effort sniff of which embed archetype `source` uses: try each known
+/// archetype's OPEN delimiter and return the first that matches, or `None` when
+/// `source` opens none of them. Only the open delimiter is checked — an
+/// unterminated block is still *recognized* as its archetype, so a follow-up
+/// [`Embed::extract`]/[`Embed::open`] surfaces the real error instead of a
+/// misleading "nothing found". The counterpart to fig's `Language.detect`, for
+/// embeds.
+pub fn detect(source: &str) -> Option<EmbedType> {
+    let mut out: std::os::raw::c_int = 0;
+    let status = unsafe { ffi::fig_embed_detect(source.as_ptr(), source.len(), &mut out) };
+    if status.0 != ffi::FigStatus::OK {
+        return None;
+    }
+    EmbedType::from_ffi(out)
 }
 
 /// An editor over an embedded config region of a host file.

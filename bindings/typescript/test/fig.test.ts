@@ -25,6 +25,7 @@ import {
   parse,
   serialize,
   stringify,
+  detect,
   split,
   toJS,
 } from "../src/index.ts";
@@ -294,6 +295,19 @@ test("split returns [content, body], or null when absent", () => {
   assert.deepEqual(split("---\r\nk: v\r\n---\r\nx\r\n", EmbedType.FrontmatterYaml), ["k: v\r\n", "x\r\n"]);
   assert.equal(split("# just markdown\n", EmbedType.FrontmatterYaml), null);
   assert.equal(split("---\nk: v\nno close\n", EmbedType.FrontmatterYaml), null);
+});
+
+test("detect sniffs the embed archetype by its open delimiter", () => {
+  assert.equal(detect("---\nk: v\n---\nbody\n"), EmbedType.FrontmatterYaml);
+  assert.equal(detect(';;;\n{"k": 1}\n;;;\nbody\n'), EmbedType.FrontmatterJson);
+  assert.equal(detect("```fig\nk = v\n```\nbody\n"), EmbedType.FrontmatterFig);
+  assert.equal(detect("body\n```endmatter\nk: v\n```\n"), EmbedType.EndmatterYaml);
+  // Plain markdown opens no archetype.
+  assert.equal(detect("# just markdown\n"), null);
+  assert.equal(detect(""), null);
+  // Open-delimiter-only sniff: an unterminated fence is still recognized, so a
+  // follow-up extract/split reports the real problem instead of "nothing found".
+  assert.equal(detect("---\nk: v\nno close\n"), EmbedType.FrontmatterYaml);
 });
 
 test("Embed.replaceBody swaps the body, composing with edits", () => {

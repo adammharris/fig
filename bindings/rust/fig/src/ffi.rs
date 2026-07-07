@@ -549,6 +549,12 @@ unsafe extern "C" {
         out_region: *mut FigRegion,
     ) -> FigStatus;
 
+    pub fn fig_embed_detect(
+        input: *const u8,
+        input_len: usize,
+        out_embed_type: *mut c_int,
+    ) -> FigStatus;
+
     pub fn fig_embed_open(
         input: *const u8,
         input_len: usize,

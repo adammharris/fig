@@ -241,6 +241,39 @@ fn split_borrows_content_and_body() {
 }
 
 #[test]
+fn detect_sniffs_each_archetype() {
+    assert_eq!(fig::detect(NOTE), Some(EmbedType::FrontmatterYaml));
+    assert_eq!(
+        fig::detect(";;;\n{\"k\": 1}\n;;;\nbody\n"),
+        Some(EmbedType::FrontmatterJson)
+    );
+    assert_eq!(
+        fig::detect("```fig\nk = v\n```\nbody\n"),
+        Some(EmbedType::FrontmatterFig)
+    );
+    assert_eq!(
+        fig::detect("body\n```endmatter\nk: v\n```\n"),
+        Some(EmbedType::EndmatterYaml)
+    );
+    // Plain markdown opens no archetype.
+    assert_eq!(fig::detect("# just markdown\n"), None);
+    assert_eq!(fig::detect(""), None);
+    // Detect + inner_format resolves the parser for the detected content.
+    let kind = fig::detect("```fig\nk = v\n```\n").unwrap();
+    assert_eq!(kind.inner_format(), Format::Fig);
+}
+
+#[test]
+fn detect_recognizes_an_unterminated_fence() {
+    // Open-delimiter-only sniff: the archetype is still recognized, so the
+    // follow-up extract reports the real error instead of "nothing found".
+    let unterminated = "---\nk: v\nno close\n";
+    let kind = fig::detect(unterminated).unwrap();
+    assert_eq!(kind, EmbedType::FrontmatterYaml);
+    assert!(fig::Embed::extract(unterminated, kind).is_err());
+}
+
+#[test]
 fn extract_exposes_region_spans_and_slices() {
     let e = fig::Embed::extract(NOTE, EmbedType::FrontmatterYaml).unwrap();
     assert_eq!(e.content(), "title: Hello\n# keep this comment\ntags:\n- a\n- b\n");

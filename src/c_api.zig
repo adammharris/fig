@@ -1286,6 +1286,16 @@ fn embedTypeOf(t: c_int) ?Embed.Type {
     };
 }
 
+/// `embedTypeOf`'s inverse — total, since every `Embed.Type` has a C mirror.
+fn figEmbedTypeOf(t: Embed.Type) FigEmbedType {
+    return switch (t) {
+        .FrontmatterYaml => .frontmatter_yaml,
+        .FrontmatterJson => .frontmatter_json,
+        .EndmatterYaml => .endmatter_yaml,
+        .FrontmatterFig => .frontmatter_fig,
+    };
+}
+
 fn toFigSpan(s: Span) FigSpan {
     return .{ .start = s.start, .end = s.end };
 }
@@ -1312,6 +1322,27 @@ pub export fn fig_embed_extract(
     if (regionCovers(size, "content")) out.content = toFigSpan(region.content);
     if (regionCovers(size, "close_fence")) out.close_fence = toFigSpan(region.close_fence);
     if (regionCovers(size, "body")) out.body = toFigSpan(region.body);
+    return .ok;
+}
+
+/// Best-effort sniff of which embed archetype `input` uses (see `Embed.detect`):
+/// try each known archetype's OPEN delimiter and report the first that matches.
+/// Only the open delimiter is checked — an unterminated block is still
+/// *recognized* as its archetype, so the caller's follow-up `fig_embed_extract`
+/// / `fig_embed_open` surfaces the real parse error instead of a misleading
+/// "nothing found". Writes the detected `FigEmbedType` to `out_embed_type` and
+/// returns `ok`; `not_found` when `input` opens none of them (the out param is
+/// left untouched). Detection is delimiter-only, so it works regardless of
+/// which inner formats this build compiles in.
+pub export fn fig_embed_detect(
+    input_ptr: ?[*]const u8,
+    input_len: usize,
+    out_embed_type: ?*c_int,
+) FigStatus {
+    const out = out_embed_type orelse return .invalid_argument;
+    const input = sliceOf(input_ptr, input_len) orelse return .invalid_argument;
+    const t = Embed.detect(input) orelse return .not_found;
+    out.* = @intFromEnum(figEmbedTypeOf(t));
     return .ok;
 }
 
@@ -3047,6 +3078,37 @@ test "embed c abi locates a ```fig fenced frontmatter block (extract-only)" {
     try std.testing.expectEqual(FigStatus.ok, fig_embed_extract(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &region));
     try std.testing.expectEqualStrings("k = v\n", md[region.content.start..region.content.end]);
     try std.testing.expectEqualStrings("body\n", md[region.body.start..region.body.end]);
+}
+
+test "embed c abi detects each archetype by its open delimiter" {
+    const cases = [_]struct { src: []const u8, want: FigEmbedType }{
+        .{ .src = "---\nk: v\n---\nbody\n", .want = .frontmatter_yaml },
+        .{ .src = ";;;\n{\"k\": 1}\n;;;\nbody\n", .want = .frontmatter_json },
+        .{ .src = "```fig\nk = v\n```\nbody\n", .want = .frontmatter_fig },
+        .{ .src = "body\n```endmatter\nk: v\n```\n", .want = .endmatter_yaml },
+    };
+    for (cases) |case| {
+        var out: c_int = -1;
+        try std.testing.expectEqual(FigStatus.ok, fig_embed_detect(case.src.ptr, case.src.len, &out));
+        try std.testing.expectEqual(@intFromEnum(case.want), out);
+    }
+}
+
+test "embed c abi detect: not_found leaves out untouched; unterminated still detects" {
+    // Plain markdown — no archetype opens it.
+    const plain = "# just a note\n";
+    var out: c_int = -7;
+    try std.testing.expectEqual(FigStatus.not_found, fig_embed_detect(plain.ptr, plain.len, &out));
+    try std.testing.expectEqual(@as(c_int, -7), out);
+    // An unterminated fence is still recognized (open-delimiter-only sniff), so
+    // the follow-up extract reports the real error rather than not_found.
+    const unterminated = "---\nk: v\nno close\n";
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_detect(unterminated.ptr, unterminated.len, &out));
+    try std.testing.expectEqual(@intFromEnum(FigEmbedType.frontmatter_yaml), out);
+    var region: FigRegion = .{ .size = @sizeOf(FigRegion), .open_fence = undefined, .content = undefined, .close_fence = undefined, .body = undefined };
+    try std.testing.expectEqual(FigStatus.parse_error, fig_embed_extract(unterminated.ptr, unterminated.len, out, &region));
+    // Null out param is invalid, not a crash.
+    try std.testing.expectEqual(FigStatus.invalid_argument, fig_embed_detect(plain.ptr, plain.len, null));
 }
 
 test "embed c abi fig_embed_open edits a ```fig fenced frontmatter block" {
