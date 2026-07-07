@@ -268,11 +268,13 @@ pub const Help = struct {
 
     pub fn convert(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} convert --output <format> [--input <format>] [--dry-run | --diff] <file>
-            \\       {s} convert --to-embed <archetype> [--embed <archetype>] [--dry-run | --diff] <file>
-            \\  Convert a file in place — `fmt`'s twin for when the target format
-            \\  differs from the source. Exactly one of --output/--to-embed picks
-            \\  the target; the other flag group is unused (rejected together).
+            \\Usage: {s} convert --output <format> [--input <format>] [--write | --diff] <file>
+            \\       {s} convert --to-embed <archetype> [--embed <archetype>] [--write | --diff] <file>
+            \\  Convert a file — `fmt`'s twin for when the target format differs
+            \\  from the source. Exactly one of --output/--to-embed picks the
+            \\  target; the other flag group is unused (rejected together).
+            \\  Like `get`, it prints the converted result to stdout by default;
+            \\  pass --write to write it back to <file> in place instead.
             \\
             \\  Whole-file mode (--output): parse the whole file as --input (else the
             \\    extension, else sniffed from its contents) and re-emit it as
@@ -296,11 +298,10 @@ pub const Help = struct {
             \\    (;;;/JSON), frontmatter-fig (```fig fenced block), or endmatter
             \\    (trailing ```endmatter block).
             \\
-            \\  --dry-run: print the converted result to stdout instead of writing
-            \\    it back; exit 1 if conversion would change the file, 0 if it's
-            \\    already in the target format.
-            \\  --diff: like --dry-run, but print a unified diff instead of the
-            \\    whole converted file.
+            \\  -w, --write: write the converted result back to <file> in place
+            \\    (skipped if it's already byte-identical) instead of printing it.
+            \\  --diff: print a unified diff of the change instead of the whole
+            \\    converted file. Combine with --write to write AND see what changed.
             \\  --compact / --pretty: single-line vs multi-line output (default pretty).
             \\  --indent N / --width N: as in `get`/`fmt`.
             \\  --strip-comments: drop comments instead of carrying them across formats.
@@ -310,7 +311,7 @@ pub const Help = struct {
             \\    converting away from YAML.
             \\  -q, --quiet: suppress warnings on stderr.
             \\  --strict: treat any warning as an error (exit non-zero, no write).
-            \\  reads stdin when <file> is `-`, but only with --dry-run/--diff.
+            \\  reads stdin when <file> is `-`, but only without --write.
             \\
         , .{ binary_name, binary_name });
         try term.writer.flush();

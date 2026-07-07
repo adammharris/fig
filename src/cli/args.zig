@@ -793,7 +793,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
         var lossless = false;
         var quiet = false;
         var strict = false;
-        var dry_run = false;
+        var write = false;
         var diff_mode = false;
         var requested_help = false;
         var serialize: fig.AST.SerializeOptions = .{};
@@ -803,8 +803,11 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
         while (args.next()) |arg| {
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 requested_help = true;
+            } else if (std.mem.eql(u8, arg, "--write") or std.mem.eql(u8, arg, "-w")) {
+                write = true;
             } else if (std.mem.eql(u8, arg, "--dry-run")) {
-                dry_run = true;
+                log.err("convert prints to stdout by default; pass --write/-w to write in place instead.\n", .{});
+                return ArgError.MissingConvertArgument;
             } else if (std.mem.eql(u8, arg, "--diff")) {
                 diff_mode = true;
             } else if (std.mem.eql(u8, arg, "--compact")) {
@@ -892,10 +895,6 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
             log.err("convert takes a single file, not a path within it: {s}\n", .{positionals.items[1]});
             return ArgError.MissingConvertArgument;
         }
-        if (!requested_help and dry_run and diff_mode) {
-            log.err("--dry-run and --diff are mutually exclusive.\n", .{});
-            return ArgError.MissingConvertArgument;
-        }
         if (!requested_help and output_override != null and to_embed_override != null) {
             log.err("--output and --to-embed are mutually exclusive: whole-file conversion picks the target format directly, embed-archetype conversion picks it via the archetype.\n", .{});
             return ArgError.MissingConvertArgument;
@@ -935,7 +934,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                 .serialize = serialize,
                 .quiet = quiet,
                 .strict = strict,
-                .dry_run = dry_run,
+                .write = write,
                 .diff = diff_mode,
             } };
         } else {
@@ -964,7 +963,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                 .serialize = serialize,
                 .quiet = quiet,
                 .strict = strict,
-                .dry_run = dry_run,
+                .write = write,
                 .diff = diff_mode,
             } };
         }

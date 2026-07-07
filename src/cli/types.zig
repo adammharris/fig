@@ -250,8 +250,8 @@ pub const FmtOptions = struct {
 };
 
 pub const ConvertOptions = struct {
-    /// The file to convert in place. `-` reads stdin — only valid with
-    /// `dry_run`/`diff`, same restriction as `fmt`.
+    /// The file to convert. `-` reads stdin — only valid without `--write`
+    /// (there is nowhere to write an in-place result back to).
     file: []const u8,
     requested_help: bool = false,
     /// Whole-file mode (`--output`): parse as `from`, re-emit as `to`.
@@ -288,11 +288,14 @@ pub const ConvertOptions = struct {
     serialize: fig.AST.SerializeOptions = .{},
     quiet: bool = false,
     strict: bool = false,
-    /// Print the converted result to stdout instead of writing it back,
-    /// and exit 1 if the conversion would change the file's bytes.
-    dry_run: bool = false,
-    /// Like `dry_run`, but print a unified diff instead of the whole
-    /// converted file.
+    /// Write the converted result back to `file` in place (skipped when the
+    /// bytes are already identical). Without this, `convert` never touches
+    /// disk — it just prints, like `get`. Combinable with `diff`: writes the
+    /// file AND prints the unified diff of what changed.
+    write: bool = false,
+    /// Print a unified diff of the change instead of the whole converted
+    /// file. Independent of `write` — with neither flag, the whole converted
+    /// document prints to stdout.
     diff: bool = false,
 };
 

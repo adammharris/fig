@@ -679,23 +679,45 @@ pub fn runFmt(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
     }
 }
 
+/// Finish a `convert` invocation given the original `content` and the
+/// `result` it converts to: write `result` back to `input` in place when
+/// `write` is set (skipped if the bytes are already identical), then print
+/// either a unified diff (`show_diff`) or the whole `result` to stdout — the
+/// whole result only when neither `write` nor `show_diff` fired, so `--write`
+/// alone stays silent (like `fmt`) and `--write --diff` shows what changed
+/// without also dumping the full file. Shared by both of `runConvert`'s modes
+/// (whole-file and `--to-embed`), which differ only in how `result` is produced.
+fn finishConvert(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, input: Io.File, file_path: []const u8, content: []const u8, result: []const u8, write: bool, show_diff: bool) !void {
+    const changed = !std.mem.eql(u8, content, result);
+    if (write and changed) {
+        try input.writePositionalAll(io, result, 0);
+        try input.setLength(io, result.len);
+    }
+    if (show_diff) {
+        try diff.unifiedDiff(a, stdout_term.writer, file_path, content, result, 3);
+        try stdout_term.writer.flush();
+    } else if (!write) {
+        try stdout_term.writer.writeAll(result);
+        try stdout_term.writer.flush();
+    }
+}
+
 pub fn runConvert(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_term: *Io.Terminal, binary_name: []const u8, opts: types.ConvertOptions) !void {
     if (opts.requested_help) {
         try Help.convert(stdout_term, binary_name);
         return;
     }
-    const preview_only = opts.dry_run or opts.diff;
     const is_stdin = std.mem.eql(u8, opts.file, "-");
-    if (!preview_only and is_stdin) {
+    if (opts.write and is_stdin) {
         try stderr_term.writer.print(
-            "error: cannot convert stdin in place; pass --dry-run or --diff to print the converted result instead.\n",
+            "error: cannot write stdin in place; omit --write to print the converted result instead.\n",
             .{},
         );
         try stderr_term.writer.flush();
         std.process.exit(2);
     }
 
-    const input = try fileio.getInput(io, opts.file, if (preview_only) .read_only else .read_write);
+    const input = try fileio.getInput(io, opts.file, if (opts.write) .read_write else .read_only);
     defer if (!is_stdin) input.close(io);
 
     const content = try fileio.readAll(a, io, input);
@@ -730,20 +752,7 @@ pub fn runConvert(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             opts.strict,
         );
         const out = try fig.Embed.retype(a, content, region, to_embed_type, converted_inner);
-
-        const changed = !std.mem.eql(u8, content, out);
-        if (opts.diff) {
-            try diff.unifiedDiff(a, stdout_term.writer, opts.file, content, out, 3);
-            try stdout_term.writer.flush();
-            if (changed) std.process.exit(1);
-        } else if (opts.dry_run) {
-            try stdout_term.writer.writeAll(out);
-            try stdout_term.writer.flush();
-            if (changed) std.process.exit(1);
-        } else if (changed) {
-            try input.writePositionalAll(io, out, 0);
-            try input.setLength(io, out.len);
-        }
+        try finishConvert(a, io, stdout_term, input, opts.file, content, out, opts.write, opts.diff);
         return;
     }
 
@@ -763,18 +772,5 @@ pub fn runConvert(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         opts.quiet,
         opts.strict,
     );
-    const changed = !std.mem.eql(u8, content, converted);
-
-    if (opts.diff) {
-        try diff.unifiedDiff(a, stdout_term.writer, opts.file, content, converted, 3);
-        try stdout_term.writer.flush();
-        if (changed) std.process.exit(1);
-    } else if (opts.dry_run) {
-        try stdout_term.writer.writeAll(converted);
-        try stdout_term.writer.flush();
-        if (changed) std.process.exit(1);
-    } else if (changed) {
-        try input.writePositionalAll(io, converted, 0);
-        try input.setLength(io, converted.len);
-    }
+    try finishConvert(a, io, stdout_term, input, opts.file, content, converted, opts.write, opts.diff);
 }
