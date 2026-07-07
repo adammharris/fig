@@ -55,6 +55,14 @@ const Line = struct {
     }
 };
 
+/// The exclusive end of a physical line's content given the position `nl` of
+/// its terminating `\n` (or `source.len` if it has none): trims a trailing
+/// `\r` so `\r\n` is treated as one line break rather than a break preceded by
+/// a `\r` of content.
+fn trimCR(source: []const u8, start: usize, nl: usize) usize {
+    return if (nl > start and source[nl - 1] == '\r') nl - 1 else nl;
+}
+
 tokens: std.ArrayList(Token) = .empty,
 i: usize = 0,
 pending_block: ?PendingBlock = null,
@@ -275,10 +283,14 @@ fn getLine(self: *Tokenizer) TokenizeError!?Line {
         self.i += 1;
     }
 
-    const end = self.i;
+    const raw_end = self.i;
     if (self.i < self.source.len and self.source[self.i] == '\n') {
         self.i += 1;
     }
+    // `\r\n` is a single line break, not a line break plus a trailing `\r` of
+    // content: trim it so CRLF input doesn't leak a stray `\r` into scalars,
+    // comments, and the like.
+    const end = trimCR(self.source, start, raw_end);
 
     // Indentation is leading spaces only. A tab after them is separation or
     // scalar content (YAML forbids tabs *as* indentation, but allows them as
@@ -575,9 +587,10 @@ fn tabIndentedStructure(self: *const Tokenizer, line: Line) bool {
 }
 
 fn remainderLine(self: *const Tokenizer, pos: usize) Line {
-    var end = pos;
-    while (end < self.source.len and self.source[end] != '\n') end += 1;
-    const newline_end = if (end < self.source.len) end + 1 else end;
+    var nl = pos;
+    while (nl < self.source.len and self.source[nl] != '\n') nl += 1;
+    const newline_end = if (nl < self.source.len) nl + 1 else nl;
+    const end = trimCR(self.source, pos, nl);
     return .{ .start = pos, .content_start = pos, .end = end, .newline_end = newline_end };
 }
 
@@ -640,9 +653,10 @@ fn gatherPlainContinuation(self: *Tokenizer, line: Line, floor: ?usize) Tokenize
 
     while (probe < self.source.len) {
         const line_start = probe;
-        var end = line_start;
-        while (end < self.source.len and self.source[end] != '\n') end += 1;
-        const newline_end = if (end < self.source.len) end + 1 else end;
+        var nl = line_start;
+        while (nl < self.source.len and self.source[nl] != '\n') nl += 1;
+        const newline_end = if (nl < self.source.len) nl + 1 else nl;
+        const end = trimCR(self.source, line_start, nl);
 
         var spaces = line_start;
         while (spaces < end and self.source[spaces] == ' ') spaces += 1;
@@ -708,11 +722,17 @@ fn flowPlainEnd(self: *const Tokenizer, start: usize) usize {
                 if (i < source.len and source[i] == '#') break;
             },
             ',', '[', ']', '{', '}' => break,
+            '\r' => {
+                // A lone `\r` or the `\r` of a `\r\n` break is never scalar
+                // content; leave `last_content` where it is and let the `\n`
+                // case (next iteration, if any) handle the actual fold.
+                i += 1;
+            },
             ':' => {
                 // A `:` is a value indicator (and so ends the scalar) when
                 // followed by whitespace/EOL or, in flow, a `,`/`]`/`}`.
                 const next: u8 = if (i + 1 < source.len) source[i + 1] else 0;
-                if (next == 0 or next == ' ' or next == '\t' or next == '\n' or
+                if (next == 0 or next == ' ' or next == '\t' or next == '\n' or next == '\r' or
                     next == ',' or next == ']' or next == '}') break;
                 i += 1;
                 last_content = i;
@@ -972,9 +992,13 @@ fn consumeBlockBody(self: *Tokenizer, info: PendingBlock) TokenizeError!void {
 
     while (self.i < self.source.len) {
         const line_start = self.i;
-        var end = line_start;
-        while (end < self.source.len and self.source[end] != '\n') end += 1;
-        const newline_end = if (end < self.source.len) end + 1 else end;
+        var nl = line_start;
+        while (nl < self.source.len and self.source[nl] != '\n') nl += 1;
+        const newline_end = if (nl < self.source.len) nl + 1 else nl;
+        // Only affects the indent/blank classification below, not the token
+        // span (`last_end`), which still runs through `newline_end` and so
+        // preserves the raw `\r\n` bytes for the parser's line-by-line decode.
+        const end = trimCR(self.source, line_start, nl);
 
         var spaces = line_start;
         while (spaces < end and self.source[spaces] == ' ') spaces += 1;
@@ -1048,7 +1072,9 @@ fn multilineQuotedEnd(self: *const Tokenizer, start: usize, floor: ?usize) Token
             while (spaces < source.len and source[spaces] == ' ') spaces += 1;
             var ws = line_start;
             while (ws < source.len and isBlank(source[ws])) ws += 1;
-            const blank = ws >= source.len or source[ws] == '\n';
+            // The `\r` of a `\r\n` break makes an otherwise-blank line look
+            // like it has content; treat it as blank too.
+            const blank = ws >= source.len or source[ws] == '\n' or source[ws] == '\r';
             if (!blank) {
                 // Indentation is measured in spaces; a tab after them is
                 // separation. Under-indentation (too few spaces) is the error.
@@ -1086,7 +1112,10 @@ fn docMarkerAt(self: *const Tokenizer, pos: usize) bool {
     if (c != '-' and c != '.') return false;
     if (self.source[pos + 1] != c or self.source[pos + 2] != c) return false;
     const after = pos + 3;
-    return after >= self.source.len or self.source[after] == '\n' or isBlank(self.source[after]);
+    // `\r` is accepted here too so a marker followed by a `\r\n` break (not
+    // just a bare `\n`) is still recognized.
+    return after >= self.source.len or self.source[after] == '\n' or
+        self.source[after] == '\r' or isBlank(self.source[after]);
 }
 
 /// True when only a document-start marker and trivia have been emitted so far —
@@ -1736,6 +1765,44 @@ test "yaml hash starts a comment only after whitespace" {
             tok(.comment, 2, 4),
             tok(.newline, 4, 5),
             tok(.end_of_file, 5, 5),
+        },
+    );
+}
+
+test "yaml CRLF line endings are a single break, not a trailing \\r" {
+    // `\r\n` must not leave a `\r` dangling on the scalar/comment before it —
+    // the newline token itself is what carries both bytes.
+    try testTokenizer(
+        "value: -3\r\n",
+        &.{
+            tok(.scalar, 0, 5),
+            tok(.colon, 5, 6),
+            tok(.whitespace, 6, 7),
+            tok(.scalar, 7, 9),
+            tok(.newline, 9, 11),
+            tok(.end_of_file, 11, 11),
+        },
+    );
+
+    try testTokenizer(
+        "a #b\r\n",
+        &.{
+            tok(.scalar, 0, 1),
+            tok(.comment, 2, 4),
+            tok(.newline, 4, 6),
+            tok(.end_of_file, 6, 6),
+        },
+    );
+
+    // A document marker followed by `\r\n` is still recognized as one.
+    try testTokenizer(
+        "---\r\nx\r\n",
+        &.{
+            tok(.doc_start, 0, 3),
+            tok(.newline, 3, 5),
+            tok(.scalar, 5, 6),
+            tok(.newline, 6, 8),
+            tok(.end_of_file, 8, 8),
         },
     );
 }

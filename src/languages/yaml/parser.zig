@@ -1099,7 +1099,11 @@ const LineIter = struct {
         if (self.done) return null;
         const start = self.i;
         while (self.i < self.source.len and self.source[self.i] != '\n') self.i += 1;
-        const line = self.source[start..self.i];
+        // `\r\n` is a single line break: exclude a trailing `\r` from the
+        // returned line so it doesn't get decoded as content.
+        var end = self.i;
+        if (end > start and self.source[end - 1] == '\r') end -= 1;
+        const line = self.source[start..end];
         if (self.i < self.source.len) self.i += 1 else self.done = true;
         return line;
     }
@@ -1787,6 +1791,12 @@ fn foldPlainScalar(self: *Parser, source: []const u8) ParserError![]const u8 {
     errdefer out.deinit(self.allocator);
     var i: usize = 0;
     while (i < source.len) {
+        // `\r\n` is a single line break: drop the `\r` and let the `\n` case
+        // below (next iteration) do the actual fold.
+        if (source[i] == '\r' and i + 1 < source.len and source[i + 1] == '\n') {
+            i += 1;
+            continue;
+        }
         if (source[i] == '\n') {
             i = try foldFlowBreak(&out, self.allocator, source, i);
             continue;
@@ -1811,6 +1821,12 @@ fn getSingleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
 
     var index: usize = 0;
     while (index < inner.len) {
+        // `\r\n` is a single line break: drop the `\r` and let the `\n` case
+        // below (next iteration) do the actual fold.
+        if (inner[index] == '\r' and index + 1 < inner.len and inner[index + 1] == '\n') {
+            index += 1;
+            continue;
+        }
         if (inner[index] == '\n') {
             index = try foldFlowBreak(&decoded, self.allocator, inner, index);
             continue;
@@ -1847,6 +1863,9 @@ fn foldFlowBreak(out: *std.ArrayList(u8), allocator: std.mem.Allocator, inner: [
     var breaks: usize = 1;
     while (true) {
         while (i < inner.len and (inner[i] == ' ' or inner[i] == '\t')) i += 1;
+        // A blank continuation line ending in `\r\n` is still just one break:
+        // step past the `\r` so the check below sees the `\n`.
+        if (i < inner.len and inner[i] == '\r' and i + 1 < inner.len and inner[i + 1] == '\n') i += 1;
         if (i < inner.len and inner[i] == '\n') {
             breaks += 1;
             i += 1;
@@ -1878,6 +1897,12 @@ fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
     var index: usize = 0;
     while (index < inner.len) {
         const char = inner[index];
+        // `\r\n` is a single line break: drop the `\r` and let the `\n` case
+        // below (next iteration) do the actual fold.
+        if (char == '\r' and index + 1 < inner.len and inner[index + 1] == '\n') {
+            index += 1;
+            continue;
+        }
         if (char == '\n') {
             index = try foldFlowBreak(&decoded, self.allocator, inner, index);
             continue;
@@ -1892,7 +1917,8 @@ fn getDoubleQuotedString(self: *Parser, source: []const u8) ParserError![]const 
         if (index >= inner.len) return ParseError.UnclosedString;
 
         // An escaped line break joins the lines directly, dropping the leading
-        // whitespace of the continuation.
+        // whitespace of the continuation. `\r\n` counts as one break here too.
+        if (inner[index] == '\r' and index + 1 < inner.len and inner[index + 1] == '\n') index += 1;
         if (inner[index] == '\n') {
             index += 1;
             while (index < inner.len and (inner[index] == ' ' or inner[index] == '\t')) index += 1;
@@ -2989,6 +3015,18 @@ test "yaml multi-line plain scalar blank line becomes newline" {
     try testing.expectEqualSlices(u8, "one two\nthree", (try doc.ast.getValByPath(&.{.{ .key = "desc" }})).kind.string);
 }
 
+test "yaml CRLF root scalar drops the trailing \\r" {
+    const doc = try Parser.parse(testing.allocator, "Root\r\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "Root", doc.ast.nodes[doc.ast.root].kind.string);
+}
+
+test "yaml CRLF multi-line plain scalar folds without a stray \\r" {
+    const doc = try Parser.parse(testing.allocator, "desc: one\r\n  two\r\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "one two", (try doc.ast.getValByPath(&.{.{ .key = "desc" }})).kind.string);
+}
+
 test "yaml multi-line plain scalar as sequence entry" {
     const input =
         \\- one
@@ -3019,6 +3057,13 @@ test "yaml multi-line double-quoted scalar folds breaks" {
         \\
     ;
     const doc = try Parser.parse(testing.allocator, input, .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const msg = try doc.ast.getValByPath(&.{.{ .key = "msg" }});
+    try testing.expectEqualSlices(u8, "one two\nthree", msg.kind.string);
+}
+
+test "yaml CRLF double-quoted scalar folds a blank line without a stray \\r" {
+    const doc = try Parser.parse(testing.allocator, "msg: \"one\r\n  two\r\n\r\n  three\"\r\n", .v1_2_2);
     defer doc.deinit(testing.allocator);
     const msg = try doc.ast.getValByPath(&.{.{ .key = "msg" }});
     try testing.expectEqualSlices(u8, "one two\nthree", msg.kind.string);
@@ -3088,6 +3133,13 @@ test "yaml literal block scalar preserves line breaks" {
     try testing.expectEqualSlices(u8, "line one\nline two\n", desc.kind.string);
     const next = try doc.ast.getValByPath(&.{.{ .key = "next" }});
     try testing.expectEqualSlices(u8, "x", next.kind.string);
+}
+
+test "yaml CRLF literal block scalar strips \\r from each line" {
+    const doc = try Parser.parse(testing.allocator, "desc: |\r\n  line one\r\n  line two\r\n", .v1_2_2);
+    defer doc.deinit(testing.allocator);
+    const desc = try doc.ast.getValByPath(&.{.{ .key = "desc" }});
+    try testing.expectEqualSlices(u8, "line one\nline two\n", desc.kind.string);
 }
 
 test "yaml folded block scalar folds line breaks" {
