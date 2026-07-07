@@ -160,6 +160,9 @@ impl From<SerializeOptions> for ffi::FigSerializeOptions {
             strip_comments: u8::from(o.strip_comments),
             lossless: u8::from(o.lossless),
             width: o.width,
+            // Not a public style option — the editors' splice path sets this
+            // directly (see `value_text`).
+            flow: 0,
         }
     }
 }

@@ -340,7 +340,7 @@ export function readCString(ptr: number): string {
 // byte size, so the core reads every field we set). All fields are written
 // explicitly; passing NULL (ptr 0) instead would select all defaults.
 const SERIALIZE_OPTIONS_SIZE = 12;
-export function encodeOptions(frame: Frame, options?: SerializeOptions): number {
+export function encodeOptions(frame: Frame, options?: SerializeOptions, flow = false): number {
   const pretty = options?.pretty === false ? 0 : 1;
   const indent = options?.indent ?? 2;
   const strip = options?.stripComments ? 1 : 0;
@@ -351,7 +351,9 @@ export function encodeOptions(frame: Frame, options?: SerializeOptions): number 
       SERIALIZE_OPTIONS_SIZE, 0, 0, 0, // u32 size (LE)
       pretty, indent, strip, lossless,
       width & 0xff, (width >> 8) & 0xff, // u16 width (LE) at offset 8
-      0, 0, // padding to the 12-byte struct size
+      // `flow` (fig fragments render containers inline; set by the editors'
+      // splice path, not a public style option) at offset 10, then padding.
+      flow ? 1 : 0, 0,
     ]),
   );
 }

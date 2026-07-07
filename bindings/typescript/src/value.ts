@@ -220,7 +220,7 @@ function emitNumber(handle: number, text: string, isFloat: boolean, frame: Frame
 /** Render a value to `format` via fig's serializer. Accepts a {@link Value} tree
  *  or any plain JS value (converted with {@link fromJS}). `options` controls
  *  output style such as compact vs. pretty-printed JSON. */
-export function serialize(value: Value | JsInput, format: Format, options?: SerializeOptions): string {
+export function serialize(value: Value | JsInput, format: Format, options?: SerializeOptions, flow = false): string {
   const node: Value = isValue(value) ? value : fromJS(value as JsInput);
   const frame = new Frame();
   const outValue = frame.alloc(4); // *FigValue out-pointer
@@ -230,7 +230,7 @@ export function serialize(value: Value | JsInput, format: Format, options?: Seri
     try {
       const scratch = frame.alloc(8); // out_id / out_ptr+out_len
       const root = build(handle, node, frame, scratch);
-      const optsPtr = encodeOptions(frame, options);
+      const optsPtr = encodeOptions(frame, options, flow);
       check(fig.fig_value_serialize_opts(handle, root, format, optsPtr, scratch, scratch + 4), "fig_value_serialize_opts");
       return readOutSlice(scratch);
     } finally {
@@ -245,7 +245,10 @@ export function serialize(value: Value | JsInput, format: Format, options?: Seri
  *  single trailing newline stripped (the editor re-frames context at the site).
  *  Mirrors the Rust binding's `value_text`. */
 export function valueText(value: Value | JsInput, format: Format, options?: SerializeOptions): string {
-  const s = serialize(value, format, options);
+  // Spliced text lands inline (`key = <text>`): fig-dialect containers must
+  // render as flow, since their block spellings only parse as standalone
+  // lines and would re-read as a bare string after the splice.
+  const s = serialize(value, format, options, format === Format.Fig);
   return s.endsWith("\n") ? s.slice(0, -1) : s;
 }
 

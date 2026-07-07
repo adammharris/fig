@@ -310,6 +310,22 @@ test("detect sniffs the embed archetype by its open delimiter", () => {
   assert.equal(detect("---\nk: v\nno close\n"), EmbedType.FrontmatterYaml);
 });
 
+test("fig-dialect container splices render flow and round-trip", () => {
+  using em = Embed.open("```fig\nt = x\n```\nbody\n", EmbedType.FrontmatterFig);
+  em.set(["contents"], ["a.md", "b.md"]);
+  em.set(["meta"], { k: 1 });
+  const rendered = em.render();
+  assert.ok(rendered.includes("contents = [a.md, b.md]"), rendered);
+  assert.ok(rendered.includes("meta = { k = 1 }"), rendered);
+  // Re-parses as containers, not bare strings.
+  const [content] = split(rendered, EmbedType.FrontmatterFig)!;
+  const v = parse<Record<string, unknown>>(content, Format.Fig);
+  assert.deepEqual(v["contents"], ["a.md", "b.md"]);
+  assert.deepEqual(v["meta"], { k: 1 });
+  // Whole-document Map serialization is unchanged (block sections).
+  assert.equal(serialize({ title: "T" }, Format.Fig), "title = T\n");
+});
+
 test("Embed.replaceBody swaps the body, composing with edits", () => {
   using fm = Embed.open("---\ntitle: Hi\n---\nold body\n", EmbedType.FrontmatterYaml);
   fm.replaceValue(["title"], "Hello");

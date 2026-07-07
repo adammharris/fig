@@ -147,6 +147,18 @@ impl Value {
     /// Render to `format`, with `options` controlling output style such as
     /// compact vs. pretty-printed JSON.
     pub fn serialize_with(&self, format: Format, options: SerializeOptions) -> Result<String, Error> {
+        self.serialize_ffi(format, options.into())
+    }
+
+    /// The raw-options serialize path. Exists so crate-internal callers (the
+    /// editors' `value_text`) can set ABI-level options that the public
+    /// [`SerializeOptions`] deliberately does not expose (`flow` — inline is a
+    /// property of where the text is spliced, not a caller style preference).
+    pub(crate) fn serialize_ffi(
+        &self,
+        format: Format,
+        ffi_options: ffi::FigSerializeOptions,
+    ) -> Result<String, Error> {
         let mut raw = ptr::null_mut();
         // Safety: `raw` is a valid out-pointer; create sets it or returns non-ok.
         Error::from_status(unsafe { ffi::fig_value_create(&mut raw) })?;
@@ -158,7 +170,6 @@ impl Value {
         let mut ptr_out: *const u8 = ptr::null();
         let mut len: usize = 0;
         let ffi_format: ffi::FigFormat = format.into();
-        let ffi_options: ffi::FigSerializeOptions = options.into();
         Error::from_status(unsafe {
             ffi::fig_value_serialize_opts(
                 guard.0,
@@ -270,7 +281,16 @@ fn build(handle: *mut ffi::FigValue, value: &Value) -> Result<ffi::FigNodeId, Er
 /// the trailing newline the serializer appends (the editor owns newline
 /// framing).
 pub(crate) fn value_text(value: &Value, format: Format) -> Result<String, Error> {
-    let mut s = value.serialize(format)?;
+    // The text is spliced inline (`key = <text>`), so for the fig dialect a
+    // container must render as flow — its block spelling (`* ` element lines,
+    // section headers) only parses as standalone lines and would re-read as a
+    // bare string after the splice. Other formats keep their defaults: their
+    // block spellings splice correctly (YAML) or don't arise.
+    let mut ffi_options: crate::ffi::FigSerializeOptions = SerializeOptions::default().into();
+    if format == Format::Fig {
+        ffi_options.flow = 1;
+    }
+    let mut s = value.serialize_ffi(format, ffi_options)?;
     if s.ends_with('\n') {
         s.pop();
     }

@@ -135,6 +135,23 @@ const RootMode = enum { document, fragment };
 /// bare scalar/null root (see `printFragment`). A root map is emitted as
 /// sections; a root sequence as zero-marker `*` elements.
 fn root(self: *Printer, id: AST.Node.Id, mode: RootMode) Error!void {
+    // A fragment destined for an inline splice (`key = <fragment>`, requested
+    // via `options.flow`) has no valid block spelling: `* ` element lines and
+    // section headers only parse as standalone lines, so a block container
+    // spliced inline re-reads as a bare string (docs/spec.md § 6.3's bracket
+    // commitment is the only inline container syntax). Flow is the one
+    // spelling that survives the round-trip; scalar fragments fall through
+    // unchanged.
+    if (mode == .fragment and self.options.flow) {
+        switch (self.ast.nodes[id].kind) {
+            .mapping, .sequence => {
+                try self.flowValue(id);
+                try self.writer.writeByte('\n');
+                return;
+            },
+            else => {},
+        }
+    }
     switch (self.ast.nodes[id].kind) {
         .mapping => {
             try self.emitSections(id);

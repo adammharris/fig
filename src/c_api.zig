@@ -2183,6 +2183,16 @@ pub const FigSerializeOptions = extern struct {
     /// so older callers (smaller `size`) keep the 80-column default. Two bytes, so
     /// the struct gains trailing padding to a 12-byte size.
     width: u16 = 80,
+    /// `fig_value_serialize_opts` + `FIG_FORMAT_FIG` only: nonzero renders a
+    /// container root as inline *flow* (`[a, b]` / `{ k = v }`) instead of the
+    /// block spelling. This is the option the language bindings' editor splice
+    /// paths set — a fragment spliced after `key = ` has no valid block
+    /// spelling in the fig dialect, so flow is the only round-trippable form.
+    /// Zero (default): unchanged block rendering. Appended after `width`; it
+    /// occupies what was the 12-byte layout's trailing padding, so the struct
+    /// size does not change — a zero-initialized older caller reads as the
+    /// default (off), matching the other appended fields' forward-compat rule.
+    flow: u8 = 0,
 };
 
 /// Whether a caller-reported options `size` fully covers `field`. Fields beyond
@@ -2204,6 +2214,7 @@ fn serializeOptionsOf(options: ?*const FigSerializeOptions) AST.SerializeOptions
     if (optionCovers(o.size, "indent")) out.indent = if (o.indent == 0) 2 else o.indent;
     if (optionCovers(o.size, "strip_comments")) out.strip_comments = o.strip_comments != 0;
     if (optionCovers(o.size, "width")) out.width = if (o.width == 0) 80 else o.width;
+    if (optionCovers(o.size, "flow")) out.flow = o.flow != 0;
     return out;
 }
 
@@ -3380,6 +3391,35 @@ test "value c abi serialize options carry TOML width through to the inline/secti
     const opts: FigSerializeOptions = .{ .width = 8 };
     try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.toml), &opts, &ptr, &len));
     try std.testing.expectEqualStrings("[point]\nx = 1\ny = 2\n", ptr[0..len]);
+}
+
+test "value c abi flow option renders fig-dialect container fragments inline" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    var out_value: ?*FigValue = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_create(&out_value));
+    defer fig_value_destroy(out_value);
+
+    // ["a.md", "b.md"] — the shape the editors splice after `key = `.
+    var id: FigNodeId = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "a.md", 4, &id));
+    const a = id;
+    try std.testing.expectEqual(FigStatus.ok, fig_value_string(out_value, "b.md", 4, &id));
+    const b = id;
+    const items = [_]FigNodeId{ a, b };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_seq(out_value, &items, items.len, &id));
+    const root = id;
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+
+    // flow set: the inline spelling — the only one that survives a splice.
+    const flow_opts: FigSerializeOptions = .{ .flow = 1 };
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize_opts(out_value, root, @intFromEnum(FigFormat.fig), &flow_opts, &ptr, &len));
+    try std.testing.expectEqualStrings("[a.md, b.md]\n", ptr[0..len]);
+
+    // flow unset (default): unchanged block rendering.
+    try std.testing.expectEqual(FigStatus.ok, fig_value_serialize(out_value, root, @intFromEnum(FigFormat.fig), &ptr, &len));
+    try std.testing.expectEqualStrings("* a.md\n* b.md\n", ptr[0..len]);
 }
 
 test "value c abi rejects an out-of-range child id" {

@@ -264,6 +264,42 @@ fn detect_sniffs_each_archetype() {
 }
 
 #[test]
+fn fig_dialect_container_splices_render_flow_and_round_trip() {
+    // A container value spliced into a fig-dialect embed must render as flow
+    // (`[a, b]` / `{ k = v }`): the block spellings only parse as standalone
+    // lines, so a block splice after `key = ` re-reads as a bare string.
+    let mut em = Embed::open(b"```fig\nt = x\n```\nbody\n", EmbedType::FrontmatterFig).unwrap();
+    em.set_value(
+        &[Segment::Key("contents")],
+        fig::Value::Seq(vec![fig::Value::Str("a.md".into()), fig::Value::Str("b.md".into())]),
+    )
+    .unwrap();
+    em.set_value(
+        &[Segment::Key("meta")],
+        fig::Value::Map(vec![(fig::Value::Str("k".into()), fig::Value::Int(1))]),
+    )
+    .unwrap();
+    let rendered = em.render().unwrap().to_string();
+    assert!(rendered.contains("contents = [a.md, b.md]"), "{rendered}");
+    assert!(rendered.contains("meta = { k = 1 }"), "{rendered}");
+
+    // And the result re-parses as the containers, not strings.
+    let (content, _) = fig::split(&rendered, EmbedType::FrontmatterFig).unwrap();
+    let doc = fig::Document::parse(content.as_bytes(), Format::Fig).unwrap();
+    let v = doc.to_value().unwrap();
+    let fig::Value::Map(entries) = &v else { panic!("{v:?}") };
+    let contents = entries.iter().find(|(k, _)| k == &fig::Value::Str("contents".into()));
+    assert!(
+        matches!(contents, Some((_, fig::Value::Seq(items))) if items.len() == 2),
+        "{v:?}"
+    );
+
+    // Whole-document serialization of a Map is unchanged (still block sections).
+    let map = fig::Value::Map(vec![(fig::Value::Str("title".into()), fig::Value::Str("T".into()))]);
+    assert_eq!(map.serialize(Format::Fig).unwrap(), "title = T\n");
+}
+
+#[test]
 fn detect_recognizes_an_unterminated_fence() {
     // Open-delimiter-only sniff: the archetype is still recognized, so the
     // follow-up extract reports the real error instead of "nothing found".

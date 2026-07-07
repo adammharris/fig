@@ -79,6 +79,17 @@ pub const SerializeOptions = struct {
     /// (default): canonical, zero-indent output — unchanged from before this
     /// field existed.
     fig_indent: bool = false,
+    /// fig only, fragment path only: render a container root as inline *flow*
+    /// (`[a, b]` / `{ k = v }`) instead of the block spelling. The editors'
+    /// splice path sets this: a fragment spliced after `key = ` has NO valid
+    /// block spelling in the fig dialect (`* ` element lines and section
+    /// headers only parse as standalone lines — a block sequence spliced
+    /// inline re-reads as a bare string), so flow is the only spelling that
+    /// survives the round-trip. `false` (default): unchanged behavior —
+    /// `serializeFragmentWith(.fig)` keeps rendering a mapping root as block
+    /// sections (callers do treat that output as a whole document, which flow
+    /// would break). Ignored by every other format and by the document path.
+    flow: bool = false,
 };
 
 /// `self`, or a comment-stripped *view* of it when `options.strip_comments` is

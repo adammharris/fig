@@ -17,8 +17,8 @@ extern "C" {
 // also exposed as a string by fig_version_string().
 // ============================================================================
 #define FIG_VERSION_MAJOR 2
-#define FIG_VERSION_MINOR 1
-#define FIG_VERSION_PATCH 1
+#define FIG_VERSION_MINOR 2
+#define FIG_VERSION_PATCH 0
 #define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
                          (uint32_t)FIG_VERSION_PATCH)
@@ -610,6 +610,16 @@ typedef struct FigSerializeOptions {
   // 0 => default 80. Appended after `lossless`; older callers (smaller `size`)
   // keep the 80-column default. uint16_t, so the struct pads to a 12-byte size.
   uint16_t width;
+  // fig_value_serialize_opts + FIG_FORMAT_FIG only: nonzero renders a container
+  // root as inline *flow* ([a, b] / { k = v }) instead of the block spelling.
+  // This is what the bindings' editor splice paths set: a fragment spliced
+  // after `key = ` has no valid block spelling in the fig dialect (`* ` element
+  // lines and section headers only parse as standalone lines), so flow is the
+  // only round-trippable form. Zero (default): unchanged block rendering.
+  // Appended after `width`; it occupies what was the 12-byte layout's trailing
+  // padding, so sizeof does not change -- a zero-initialized older caller reads
+  // as the default (off), per the same forward-compat rule as the fields above.
+  uint8_t flow;
 } FigSerializeOptions;
 
 // As fig_value_serialize, but `options` (NULL => defaults) controls output style

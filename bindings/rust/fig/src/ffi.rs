@@ -215,6 +215,11 @@ pub struct FigSerializeOptions {
     pub strip_comments: u8,
     pub lossless: u8,
     pub width: u16,
+    /// fig-format fragments only: nonzero renders a container root as inline
+    /// flow (`[a, b]` / `{ k = v }`). Set by the editors' splice path (see
+    /// `value_text`); not exposed on the public `SerializeOptions` — inline is
+    /// a property of *where* the text goes, not a caller style preference.
+    pub flow: u8,
 }
 
 /// One lossy event from `fig_*_diagnose`, pulled by index via `fig_*_warning`.
