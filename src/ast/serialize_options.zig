@@ -18,9 +18,13 @@ const TomlPrinter = if (build_options.lang_toml) @import("../languages/toml/prin
 const ZonPrinter = if (build_options.lang_zon) @import("../languages/zon/printer.zig") else void;
 const FigPrinter = if (build_options.lang_fig) @import("../languages/fig/printer.zig") else void;
 const XmlPrinter = if (build_options.lang_xml) @import("../languages/xml/printer.zig") else void;
-// The canonical form is the AST's own 1:1 encoding — always compiled in (no
-// language gate), so it needs no `void` fallback or comptime guard below.
-const CanonicalPrinter = @import("../canonical/printer.zig");
+// The canonical form is the AST's own 1:1 oracle encoding. It is not exposed
+// through the C ABI or any binding, so it is opt-in (`-Dcanonical=true`) like
+// xml — but ALWAYS compiled for a test build (`is_test`), since the suite leans
+// on it as a comparison oracle. When gated out, `CanonicalPrinter` is `void`
+// and the guarded arms below are never analyzed, so its code never compiles in.
+const canonical_enabled = build_options.lang_canonical or @import("builtin").is_test;
+const CanonicalPrinter = if (canonical_enabled) @import("../canonical/printer.zig") else void;
 
 /// The canonical output format families. `canonical` (formerly `native`) is the
 /// AST's own 1:1 oracle encoding; `fig` is the human-facing authoring dialect
@@ -136,7 +140,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
-        .canonical => CanonicalPrinter.print(writer, ast),
+        .canonical => if (comptime canonical_enabled) CanonicalPrinter.print(writer, ast) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
@@ -163,7 +167,7 @@ pub fn serializeFragmentWith(self: *const AST, writer: *Writer, format: Serializ
         .toml => if (comptime build_options.lang_toml) TomlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.print(writer, ast, options) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
-        .canonical => CanonicalPrinter.print(writer, ast),
+        .canonical => if (comptime canonical_enabled) CanonicalPrinter.print(writer, ast) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.printFragment(writer, ast, options) else error.FormatDisabled,
     };
 }
@@ -185,7 +189,7 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .toml => if (comptime build_options.lang_toml) TomlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) ZonPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) XmlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
-        .canonical => CanonicalPrinter.printNode(writer, ast, id, 0),
+        .canonical => if (comptime canonical_enabled) CanonicalPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
     };
 }

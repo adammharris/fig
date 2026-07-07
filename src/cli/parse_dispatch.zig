@@ -14,6 +14,11 @@ const args_mod = @import("args.zig");
 const Format = types.Format;
 const Io = std.Io;
 
+/// The canonical oracle format is opt-in (`-Dcanonical=true`) and otherwise
+/// compiled out of the CLI — but always present in a test build. Mirrors the
+/// `canonical_enabled` gate in `ast/serialize_options.zig`.
+const canonical_enabled = build_options.lang_canonical or @import("builtin").is_test;
+
 /// Per-language version/dialect to parse under. Each field defaults to its
 /// language's `default_type`, so `parseSliceAs(fmt, .{}, …)` behaves exactly as
 /// before — only `check --spec` overrides a field. JSON strictness is carried by
@@ -90,7 +95,7 @@ pub fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, co
         } else error.FormatDisabled,
         .zon => if (comptime build_options.lang_zon) fig.Language.ZON.Parser.parse(allocator, content, fig.Language.ZON.default_type) else error.FormatDisabled,
         .xml => if (comptime build_options.lang_xml) fig.Language.XML.Parser.parse(allocator, content, fig.Language.XML.default_type) else error.FormatDisabled,
-        .canonical => fig.Canonical.parse(allocator, content),
+        .canonical => if (comptime canonical_enabled) fig.Canonical.parse(allocator, content) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) blk: {
             var local: fig.Language.FIG.Parser.Report = .{};
             const r = reports.fig orelse &local;

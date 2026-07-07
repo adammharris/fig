@@ -14,8 +14,8 @@ use std::ptr::NonNull;
 
 use crate::editor::{Segment, borrow_str, to_ffi_keys, to_ffi_path};
 use crate::error::Error;
-use crate::value::{Value, value_text};
-use crate::{Format, ffi};
+use crate::value::{Value, value_text, value_text_with};
+use crate::{Format, SerializeOptions, ffi};
 
 /// Which embedded config to open. Each fixes both the host delimiters and the
 /// inner format, mirroring fig's `Embed.Type`.
@@ -267,6 +267,71 @@ impl Embed {
     /// entry); a missing intermediate container surfaces as [`Error::NotFound`].
     pub fn set_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
         let val = value_text(&value.into(), self.inner)?;
+        let p = to_ffi_path(path);
+        let status =
+            unsafe { ffi::fig_embed_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        Error::from_status(status)
+    }
+
+    // ── value edits with a layout knob (block-vs-inline containers) ─────────
+    //
+    // Embed twins of `Editor`'s `*_with` methods (see there): render `value`
+    // with `options` so a block map/sequence lands as a nested section under
+    // the target key inside the fence — the fig-frontmatter case that could
+    // previously only be spliced per-key as inline flow.
+
+    /// Replace the value at `path`, rendering `value` with `options` (a block
+    /// map/sequence lands as a nested section).
+    pub fn replace_value_with(
+        &mut self,
+        path: &[Segment],
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let repl = value_text_with(&value.into(), self.inner, options)?;
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_embed_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Insert `key: value` into the mapping at `path`, rendering `value` with
+    /// `options` (a block map/sequence lands as a nested section).
+    pub fn insert_value_with(
+        &mut self,
+        path: &[Segment],
+        key: &str,
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let key_text = value_text(&Value::Str(key.to_string()), self.inner)?;
+        let val = value_text_with(&value.into(), self.inner, options)?;
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_embed_insert_key(
+                self.ptr(),
+                p.as_ptr(),
+                p.len(),
+                key_text.as_ptr(),
+                key_text.len(),
+                val.as_ptr(),
+                val.len(),
+            )
+        };
+        Error::from_status(status)
+    }
+
+    /// Upsert the value at `path`, rendering `value` with `options` (a block
+    /// map/sequence lands as a nested section). The width-aware twin of
+    /// [`set_value`](Self::set_value).
+    pub fn set_value_with(
+        &mut self,
+        path: &[Segment],
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let val = value_text_with(&value.into(), self.inner, options)?;
         let p = to_ffi_path(path);
         let status =
             unsafe { ffi::fig_embed_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };

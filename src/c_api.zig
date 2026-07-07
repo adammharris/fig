@@ -3138,6 +3138,26 @@ test "embed c abi fig_embed_open edits a ```fig fenced frontmatter block" {
     try std.testing.expectEqualStrings("```fig\nk = w\n```\nbody\n", ptr[0..len]);
 }
 
+test "embed c abi fig_embed_set splices a block map into a ```fig fence" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    // Regression for the colophon follow-up: a block-map value CAN now be
+    // spliced into a fenced embed — it re-frames as a nested section under the
+    // key rather than failing (previously the caller had to fall back to
+    // per-key flow inserts).
+    const md = "```fig\ntitle = hi\n```\nbody\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(md.ptr, md.len, @intFromEnum(FigEmbedType.frontmatter_fig), &out_fm));
+    defer fig_embed_destroy(out_fm);
+
+    const path = [_]FigPathSegment{keySeg("registry")};
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_set(out_fm, &path, 1, "a = 1\nb = 2\n", 12));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    try std.testing.expectEqualStrings("```fig\ntitle = hi\nregistry\n> a = 1\n> b = 2\n```\nbody\n", ptr[0..len]);
+}
+
 test "embed c abi region size-gate leaves uncovered fields untouched" {
     const md = "---\nk: v\n---\nbody\n";
     // A caller whose `size` reaches only through `content` must not have its

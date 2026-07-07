@@ -300,6 +300,37 @@ fn fig_dialect_container_splices_render_flow_and_round_trip() {
 }
 
 #[test]
+fn fig_dialect_block_map_splices_into_a_fence_with_the_width_knob() {
+    // The `*_with` twin honors the layout knob: a block map value lands as a
+    // nested section under its key inside a ```fig``` fence — the colophon case
+    // that plain `set_value` (forced inline flow) could not express.
+    use fig::SerializeOptions;
+    let mut em = Embed::open(b"```fig\ntitle = hi\n```\nbody\n", EmbedType::FrontmatterFig).unwrap();
+    em.set_value_with(
+        &[Segment::Key("registry")],
+        fig::Value::Map(vec![
+            (fig::Value::Str("a".into()), fig::Value::Int(1)),
+            (fig::Value::Str("b".into()), fig::Value::Int(2)),
+        ]),
+        SerializeOptions::default().width(1),
+    )
+    .unwrap();
+    let rendered = em.render().unwrap().to_string();
+    assert_eq!(rendered, "```fig\ntitle = hi\nregistry\n> a = 1\n> b = 2\n```\nbody\n");
+
+    // It re-parses as the nested map, not a string.
+    let (content, _) = fig::split(&rendered, EmbedType::FrontmatterFig).unwrap();
+    let doc = fig::Document::parse(content.as_bytes(), Format::Fig).unwrap();
+    let v = doc.to_value().unwrap();
+    let fig::Value::Map(entries) = &v else { panic!("{v:?}") };
+    let registry = entries.iter().find(|(k, _)| k == &fig::Value::Str("registry".into()));
+    assert!(
+        matches!(registry, Some((_, fig::Value::Map(inner))) if inner.len() == 2),
+        "{v:?}"
+    );
+}
+
+#[test]
 fn detect_recognizes_an_unterminated_fence() {
     // Open-delimiter-only sniff: the archetype is still recognized, so the
     // follow-up extract reports the real error instead of "nothing found".

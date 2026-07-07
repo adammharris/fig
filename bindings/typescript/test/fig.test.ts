@@ -250,6 +250,16 @@ test("Embed edits a ```fig fenced frontmatter block, fences and body intact", ()
   assert.equal(fm.render(), "```fig\ntitle = Yo\n```\nbody\n");
 });
 
+test("Embed setWith splices a block map into a ```fig fence (width knob)", () => {
+  using fm = Embed.open("```fig\ntitle = hi\n```\nbody\n", EmbedType.FrontmatterFig);
+  fm.setWith(["registry"], { a: 1, b: 2 }, { width: 1 });
+  assert.equal(fm.render(), "```fig\ntitle = hi\nregistry\n> a = 1\n> b = 2\n```\nbody\n");
+  // Plain set still freezes a container inline as flow.
+  using flow = Embed.open("```fig\ntitle = hi\n```\nbody\n", EmbedType.FrontmatterFig);
+  flow.set(["registry"], { a: 1, b: 2 });
+  assert.equal(flow.render(), "```fig\ntitle = hi\nregistry = { a = 1, b = 2 }\n```\nbody\n");
+});
+
 test("Embed edits YAML frontmatter, fences and body intact", () => {
   using fm = Embed.open("---\ntitle: Hi\n# keep\ntags:\n- x\n---\n# Body\ntext\n", EmbedType.FrontmatterYaml);
   fm.insertValue([], "author", "me");

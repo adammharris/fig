@@ -67,6 +67,8 @@ const Document = @import("../../document.zig");
 const Span = @import("../../util/span.zig");
 const editor = @import("../../editor.zig");
 const Fig = @import("fig.zig").Language;
+const Printer = @import("printer.zig");
+const Writer = std.Io.Writer;
 const log = std.log.scoped(.editor);
 
 const FigEditor = editor.Editor(Fig);
@@ -83,6 +85,98 @@ const isFlow = editor.isFlow;
 /// style, with no separate bookkeeping.
 fn linePrefix(source: []const u8, content_start: usize) []const u8 {
     return source[lineStartBefore(source, content_start)..content_start];
+}
+
+// ============================================================================
+// block-container value framing (the fig arm of `replaceValAtPath`/`insertKey`)
+// ============================================================================
+
+/// If `value_text` is a fig BLOCK-container fragment — a section body (`a = 1`
+/// lines) or `*`-element list that has no inline `key = <value>` spelling —
+/// return it re-printed as a block body at marker depth `depth` (caller frees).
+/// Inline values return null: flow containers (`{ … }` / `[ … ]`), single-line
+/// scalars, and multi-line `'''`/`"""` block strings all splice directly after
+/// `key = `. A fragment that fails to parse, or parses to a non-container,
+/// likewise returns null so the caller keeps the plain inline splice and lets
+/// the reparse-rollback net (`replaceAtSpan`) report any real error.
+///
+/// Fig markers are an absolute depth ruler measured from column 0 (`> ` per
+/// level), so re-printing the fragment's root at `depth` — one level below the
+/// key it hangs under — yields body lines that carry their own full marker run
+/// and need no further indentation. This is what lets a caller splice a block
+/// map/sequence into a document (e.g. a fenced embed) instead of freezing every
+/// short map inline as flow.
+fn blockBody(self: *FigEditor, depth: usize, value_text: []const u8) ?[]u8 {
+    const t = std.mem.trim(u8, value_text, " \t\r\n");
+    // Inline forms keep the direct splice: flow braces/brackets, quoted or
+    // block-string scalars, and any single-line value.
+    if (t.len == 0 or t[0] == '{' or t[0] == '[' or t[0] == '\'' or t[0] == '"') return null;
+    if (std.mem.indexOfScalar(u8, t, '\n') == null) return null;
+
+    var parser: Fig.Parser = .{ .allocator = self.allocator };
+    var frag = Fig.parse(&parser, value_text, Fig.default_type) catch return null;
+    defer frag.deinit(self.allocator);
+    switch (frag.ast.nodes[frag.ast.root].kind) {
+        .mapping, .sequence => {},
+        else => return null, // a multi-line scalar is still an inline value
+    }
+
+    var w: Writer.Allocating = .init(self.allocator);
+    defer w.deinit();
+    Printer.printNode(&w.writer, &frag.ast, frag.ast.root, depth, .{}) catch return null;
+    return self.allocator.dupe(u8, w.written()) catch return null;
+}
+
+/// The number of `>` marker cells on the line that `content_start` sits on —
+/// the marker depth of a key/element already written there. A block value that
+/// hangs under it prints one level deeper (`depth + 1`).
+fn markerDepth(source: []const u8, content_start: usize) usize {
+    return std.mem.count(u8, source[lineStartBefore(source, content_start)..content_start], ">");
+}
+
+/// Append a mapping entry's value tail after an already-written `<prefix><key>`:
+/// ` = <value>` for an inline value, or a newline plus the value re-framed as a
+/// block section (see `blockBody`) one level below the key at marker depth
+/// `key_depth`. No trailing newline is appended (the caller adds the line's own).
+fn appendKeyValueTail(self: *FigEditor, out: *std.ArrayList(u8), key_depth: usize, value_text: []const u8) !void {
+    if (blockBody(self, key_depth + 1, value_text)) |body| {
+        defer self.allocator.free(body);
+        try out.append(self.allocator, '\n');
+        // printNode ends every line (the last included) with '\n'; the caller
+        // supplies the entry's own line break, so drop the printed trailing one.
+        try out.appendSlice(self.allocator, std.mem.trimEnd(u8, body, "\n"));
+    } else {
+        try out.appendSlice(self.allocator, " = ");
+        try out.appendSlice(self.allocator, value_text);
+    }
+}
+
+/// Replace a mapping key's value, re-framing a block-container replacement onto
+/// the following lines as a nested section (`key` header + `> …` body) rather
+/// than splicing it into the old value's inline slot — which has no valid fig
+/// spelling for a block map/sequence. An inline replacement (flow container or
+/// scalar) keeps the direct span splice. This is fig's twin of YAML's
+/// `reframeMappingValue`; the generic engine routes here for any fig mapping
+/// value edit. A trailing comment on the rewritten entry line is not preserved
+/// when re-framing (rare on a machine-spliced value); the reparse net still
+/// guards correctness.
+pub fn reframeMappingValue(self: *FigEditor, parsed: Document, path: []const AST.PathSegment, val_span: Span, replacement: []const u8) !void {
+    const source = self.source.items;
+    const key_node = try parsed.ast.getKeyByPath(path);
+    const key_span = parsed.span(key_node);
+    const depth = markerDepth(source, key_span.start);
+    if (blockBody(self, depth + 1, replacement)) |body| {
+        defer self.allocator.free(body);
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.allocator);
+        try out.append(self.allocator, '\n');
+        try out.appendSlice(self.allocator, std.mem.trimEnd(u8, body, "\n"));
+        // Replace `= <old value>` (from just past the key through the old value's
+        // end) with the re-framed block; the key and its marker prefix stay put.
+        try self.replaceAtSpan(Span.init(key_span.end, val_span.end), out.items);
+        return;
+    }
+    try self.replaceAtSpan(val_span, replacement);
 }
 
 // ============================================================================
@@ -129,8 +223,10 @@ fn spliceKeyLine(self: *FigEditor, insert_at: usize, prefix: []const u8, key_tex
     if (insert_at > 0 and source[insert_at - 1] != '\n') try out.append(self.allocator, '\n');
     try out.appendSlice(self.allocator, prefix);
     try out.appendSlice(self.allocator, key_text);
-    try out.appendSlice(self.allocator, " = ");
-    try out.appendSlice(self.allocator, value_text);
+    // A block-container value hangs under the key as a section one level below
+    // its marker depth (the leading `>` run copied into `prefix`); an inline
+    // value follows `key = ` directly.
+    try appendKeyValueTail(self, &out, std.mem.count(u8, prefix, ">"), value_text);
     try out.append(self.allocator, '\n');
     try self.replaceAtSpan(Span.init(insert_at, insert_at), out.items);
 }
@@ -582,6 +678,45 @@ test "fig replace value nested under marker depth" {
     defer ed.deinit();
     try ed.replaceValAtPath(&.{ .{ .key = "database" }, .{ .key = "pool" }, .{ .key = "size" } }, "20");
     try expectFigSource(&ed, "database\n> host = localhost\n> pool\n> > size = 20\n");
+}
+
+test "fig set: a block-map value re-frames as a nested section (not an inline splice)" {
+    // The colophon case: splice a whole block map as a new key's value. A block
+    // container has no valid inline `key = <block>` spelling, so it descends
+    // under a `registry` header with its entries one marker level deeper.
+    var ed = try newFigEditor("title = hi\n");
+    defer ed.deinit();
+    try ed.set(&.{.{ .key = "registry" }}, "a = 1\nb = 2\n");
+    try expectFigSource(&ed, "title = hi\nregistry\n> a = 1\n> b = 2\n");
+}
+
+test "fig replace: an inline scalar value re-frames into a block map" {
+    var ed = try newFigEditor("registry = old\ntitle = hi\n");
+    defer ed.deinit();
+    try ed.replaceValAtPath(&.{.{ .key = "registry" }}, "a = 1\nb = 2\n");
+    try expectFigSource(&ed, "registry\n> a = 1\n> b = 2\ntitle = hi\n");
+}
+
+test "fig set: a block value under an existing depth-1 key nests one level deeper" {
+    var ed = try newFigEditor("server\n> port = 8080\n");
+    defer ed.deinit();
+    try ed.set(&.{ .{ .key = "server" }, .{ .key = "opts" } }, "x = 1\ny = 2\n");
+    try expectFigSource(&ed, "server\n> port = 8080\n> opts\n> > x = 1\n> > y = 2\n");
+}
+
+test "fig set: a block-sequence value re-frames as `> *` element lines" {
+    var ed = try newFigEditor("title = hi\n");
+    defer ed.deinit();
+    try ed.set(&.{.{ .key = "items" }}, "* a\n* b\n");
+    try expectFigSource(&ed, "title = hi\nitems\n> * a\n> * b\n");
+}
+
+test "fig set: a flow-map value still splices inline (unchanged)" {
+    // A `{ … }` fragment has a valid inline spelling, so it is NOT re-framed.
+    var ed = try newFigEditor("title = hi\n");
+    defer ed.deinit();
+    try ed.set(&.{.{ .key = "m" }}, "{ a = 1, b = 2 }");
+    try expectFigSource(&ed, "title = hi\nm = { a = 1, b = 2 }\n");
 }
 
 test "fig rename a leaf key" {

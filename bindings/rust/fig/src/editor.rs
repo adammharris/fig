@@ -14,8 +14,8 @@
 use std::ptr::NonNull;
 
 use crate::error::Error;
-use crate::value::{Value, value_text};
-use crate::{Format, ffi};
+use crate::value::{Value, value_text, value_text_with};
+use crate::{Format, SerializeOptions, ffi};
 
 /// One step of a path into a document: a mapping key or a sequence index.
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +156,75 @@ impl Editor {
     /// entry); a missing intermediate container surfaces as [`Error::NotFound`].
     pub fn set_value(&mut self, path: &[Segment], value: impl Into<Value>) -> Result<(), Error> {
         let val = value_text(&value.into(), self.format)?;
+        let p = to_ffi_path(path);
+        let status =
+            unsafe { ffi::fig_editor_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };
+        Error::from_status(status)
+    }
+
+    // ── value edits with a layout knob (block-vs-inline containers) ─────────
+    //
+    // The plain `replace_value`/`insert_value`/`set_value` above render a fig
+    // container value as inline flow (`k = { … }`) — the only spelling a bare
+    // inline splice can carry. These `*_with` twins instead honor `options`
+    // (notably `width`): a map/sequence that does not fit renders as a BLOCK
+    // section, which the core editor re-frames under the target key
+    // (`key` header + `> …` body). This is the width knob for splices — e.g. a
+    // short map you want to land one-record-per-line rather than frozen inline.
+    // For non-fig formats they behave like the plain methods, plus `options`.
+
+    /// Replace the value at `path`, rendering `value` with `options` (see the
+    /// `*_with` note above — a block map/sequence lands as a nested section).
+    pub fn replace_value_with(
+        &mut self,
+        path: &[Segment],
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let repl = value_text_with(&value.into(), self.format, options)?;
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_editor_replace_val(self.ptr(), p.as_ptr(), p.len(), repl.as_ptr(), repl.len())
+        };
+        Error::from_status(status)
+    }
+
+    /// Insert `key: value` into the mapping at `path`, rendering `value` with
+    /// `options` (a block map/sequence lands as a nested section).
+    pub fn insert_value_with(
+        &mut self,
+        path: &[Segment],
+        key: &str,
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let key_text = value_text(&Value::Str(key.to_string()), self.format)?;
+        let val = value_text_with(&value.into(), self.format, options)?;
+        let p = to_ffi_path(path);
+        let status = unsafe {
+            ffi::fig_editor_insert_key(
+                self.ptr(),
+                p.as_ptr(),
+                p.len(),
+                key_text.as_ptr(),
+                key_text.len(),
+                val.as_ptr(),
+                val.len(),
+            )
+        };
+        Error::from_status(status)
+    }
+
+    /// Upsert the value at `path`, rendering `value` with `options` (a block
+    /// map/sequence lands as a nested section). The width-aware twin of
+    /// [`set_value`](Self::set_value).
+    pub fn set_value_with(
+        &mut self,
+        path: &[Segment],
+        value: impl Into<Value>,
+        options: SerializeOptions,
+    ) -> Result<(), Error> {
+        let val = value_text_with(&value.into(), self.format, options)?;
         let p = to_ffi_path(path);
         let status =
             unsafe { ffi::fig_editor_set(self.ptr(), p.as_ptr(), p.len(), val.as_ptr(), val.len()) };

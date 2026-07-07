@@ -8,9 +8,9 @@
 // value-taking edit renders its `Value` through fig's serializer (stripping the
 // trailing newline) and lets the Zig editor re-frame indentation at the splice
 // site; the `*Raw` variants pass already-serialized text straight through.
-import { check, Format } from "./types.ts";
+import { check, Format, type SerializeOptions } from "./types.ts";
 import { Frame, encodePath, encodeKeyList, encodeIndexList, readOutSlice, Status, type Segment } from "./ffi.ts";
-import { V, valueText, type JsInput, type Value } from "./value.ts";
+import { V, valueText, valueTextWith, type JsInput, type Value } from "./value.ts";
 
 /** The bound C ABI edit functions a concrete editor supplies. */
 export interface EditFns {
@@ -76,6 +76,33 @@ export abstract class Editable {
    *  intermediate container throws `NotFound`. */
   set(path: readonly Segment[], value: Value | JsInput): void {
     this.setRaw(path, valueText(value, this.textFormat));
+  }
+
+  // ── value edits with a layout knob (block-vs-inline containers) ─────────
+  //
+  // The plain methods above render a fig container value as inline flow
+  // (`k = { … }`) — the only spelling a bare inline splice can carry. These
+  // `*With` twins honor `options` (notably `width`): a map/sequence that does
+  // not fit renders as a BLOCK section, which the core editor re-frames under
+  // the target key (`key` header + `> …` body). The width knob for splices —
+  // e.g. landing a short map one-record-per-line instead of frozen inline.
+
+  /** Replace the value at `path`, rendering `value` with `options` (a block
+   *  map/sequence lands as a nested section). */
+  replaceValueWith(path: readonly Segment[], value: Value | JsInput, options?: SerializeOptions): void {
+    this.replaceValueRaw(path, valueTextWith(value, this.textFormat, options));
+  }
+
+  /** Insert `key: value` into the mapping at `path`, rendering `value` with
+   *  `options` (a block map/sequence lands as a nested section). */
+  insertValueWith(path: readonly Segment[], key: string, value: Value | JsInput, options?: SerializeOptions): void {
+    this.insertValueRaw(path, key, valueTextWith(value, this.textFormat, options));
+  }
+
+  /** Upsert the value at `path`, rendering `value` with `options` (a block
+   *  map/sequence lands as a nested section). The width-aware twin of `set`. */
+  setWith(path: readonly Segment[], value: Value | JsInput, options?: SerializeOptions): void {
+    this.setRaw(path, valueTextWith(value, this.textFormat, options));
   }
 
   /** Append `value` to the sequence at `path`. */

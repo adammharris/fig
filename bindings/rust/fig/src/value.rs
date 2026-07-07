@@ -297,6 +297,30 @@ pub(crate) fn value_text(value: &Value, format: Format) -> Result<String, Error>
     Ok(s)
 }
 
+/// Render `value` as splice text honoring `options` — the "width knob" path
+/// behind the `*_with` editor/embed methods.
+///
+/// Unlike [`value_text`], the fig dialect's inline-flow override is NOT forced:
+/// a container renders in its natural, width-driven layout, so a block map or
+/// sequence spells as a section body (`a = 1` / `* x` lines) instead of freezing
+/// inline as flow (`{ a = 1 }`). The core editor re-frames such a block value
+/// under the target key (adding the marker run), which the plain inline splice
+/// cannot express. `options.width` then tunes how eagerly nested containers
+/// break to block. Non-fig formats are unaffected by the flow bit and simply
+/// honor `options` as usual.
+pub(crate) fn value_text_with(
+    value: &Value,
+    format: Format,
+    options: SerializeOptions,
+) -> Result<String, Error> {
+    let ffi_options: crate::ffi::FigSerializeOptions = options.into(); // flow = 0
+    let mut s = value.serialize_ffi(format, ffi_options)?;
+    if s.ends_with('\n') {
+        s.pop();
+    }
+    Ok(s)
+}
+
 /// Parse a numeric scalar's raw text into a `Value`, classifying by `is_float`
 /// (the node's kind). Integers try `i64` then `u64`, falling back to float when
 /// out of range, matching how the serde deserializer widens.

@@ -26,7 +26,7 @@ const abi_version: u8 = 1;
 /// alongside the Rust/npm floor checks), since the CLI always embeds
 /// whatever core it's built against. Surfaced via `fig version`, which prints
 /// both numbers.
-const cli_version = std.SemanticVersion.parse("3.0.1") catch
+const cli_version = std.SemanticVersion.parse("3.3.0") catch
     @compileError("invalid cli_version");
 
 /// The current "epoch" — a marketing name that changes far less often than
@@ -67,6 +67,12 @@ pub fn build(b: *std.Build) void {
     const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
     const enable_xml = b.option(bool, "xml", "Include XML support (opt-in; default off)") orelse false;
     const enable_fig = b.option(bool, "fig", "Include the fig authoring dialect support") orelse true;
+    // The canonical form is the AST's own 1:1 oracle encoding — invaluable in
+    // tests but not exposed through the C ABI or any binding, so shipping it in
+    // the default library/CLI/wasm is dead weight for everyone but the test
+    // suite. Opt-in like xml (`-Dcanonical=true`); the code still compiles for
+    // ANY test build regardless, gated as `lang_canonical or @import("builtin").is_test`.
+    const enable_canonical = b.option(bool, "canonical", "Include the canonical oracle format (opt-in; default off — used mainly by the test suite)") orelse false;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
@@ -81,6 +87,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_zon", enable_zon);
     options.addOption(bool, "lang_xml", enable_xml);
     options.addOption(bool, "lang_fig", enable_fig);
+    options.addOption(bool, "lang_canonical", enable_canonical);
     // Library version surfaced through the C ABI (`fig_version` /
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one
     // canonical package version — and split into the components the ABI's

@@ -117,6 +117,15 @@ pub fn Editor(comptime Language: type) type {
                 try yaml_edit.reframeMappingValue(self, parsed, path, span, replacement);
                 return;
             }
+            // Fig's twin: a block map/sequence value has no inline `key = <block>`
+            // spelling (section headers / `> ` / `* ` lines only parse
+            // standalone), so re-frame it onto the following lines as a nested
+            // section. An inline value (flow container / scalar) keeps the direct
+            // splice inside `reframeMappingValue`.
+            if (Language == Fig and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .key) {
+                try fig_edit.reframeMappingValue(self, parsed, path, span, replacement);
+                return;
+            }
             try self.replaceAtSpan(span, replacement);
         }
 

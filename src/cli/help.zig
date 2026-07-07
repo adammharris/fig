@@ -150,7 +150,9 @@ pub const Help = struct {
             \\  -o, --output:   output format (defaults to the input format)
             \\  canonical: the AST's 1:1 oracle text encoding; usable as input or
             \\    output, e.g. to inspect how any document parses. (Owns no file
-            \\    extension — select it explicitly.)
+            \\    extension — select it explicitly.) Compiled in only with
+            \\    `-Dcanonical=true` (opt-in, off by default — it is a
+            \\    test/debugging oracle, not exposed through the C ABI or bindings).
             \\  fig: the human-facing authoring dialect (`.figl`; `.fig` still
             \\    accepted); lossy at the edges (non-string keys, YAML refs) —
             \\    use `canonical`/`--lossless` for those. `-o fig` prints in
@@ -285,7 +287,7 @@ pub const Help = struct {
             \\  -i, --input, -o, --output: json, json5, yaml, toml, zon, xml, canonical,
             \\    fig. `-o xml` requires the document to convert to have exactly one
             \\    root key (see `get --help`'s `xml:` entry); xml is compiled in only
-            \\    with `-Dxml=true`.
+            \\    with `-Dxml=true`, and canonical only with `-Dcanonical=true`.
             \\
             \\  Embed-archetype mode (--to-embed): rehouse a host document's
             \\    embedded region from one archetype's fence-and-content convention

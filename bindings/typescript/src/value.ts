@@ -252,6 +252,18 @@ export function valueText(value: Value | JsInput, format: Format, options?: Seri
   return s.endsWith("\n") ? s.slice(0, -1) : s;
 }
 
+/** Serialize a value for splicing with a layout knob — the `*With` editor
+ *  methods' text path (mirrors the Rust binding's `value_text_with`). Unlike
+ *  {@link valueText}, the fig-dialect flow override is NOT forced: a container
+ *  renders in its natural, width-driven layout, so a block map/sequence spells
+ *  as a section body (`a = 1` / `* x` lines) that the core editor re-frames
+ *  under the target key. `options.width` tunes how eagerly nested containers
+ *  break to block. */
+export function valueTextWith(value: Value | JsInput, format: Format, options?: SerializeOptions): string {
+  const s = serialize(value, format, options, false);
+  return s.endsWith("\n") ? s.slice(0, -1) : s;
+}
+
 /** Report what serializing `value` to `format` would silently lose (values/
  *  comments dropped or degraded). The built value has no source envelopes, so
  *  `options.lossless` is ignored. Returns one {@link Warning} per lossy event
