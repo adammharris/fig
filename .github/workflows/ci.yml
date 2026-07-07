@@ -51,16 +51,18 @@ jobs:
   # the editor, the #[derive] macros, serde impls, cargo features) — the contract
   # the Zig `semver-check` cannot see, since none of it crosses the C ABI. Like
   # semver-check it is version-aware: it only fails if the API delta exceeds what
-  # the crate's current version bump allows, and it diffs against the same `v*`
-  # tag baseline (not crates.io) so the two checks share one source of truth.
+  # the crate's current version bump allows. It diffs against the most recent
+  # `rust/v*` tag (not crates.io) — the Rust crate's own release line, distinct
+  # from `semver-check`'s `core/v*` baseline, since the crate and the core move
+  # independently (see "Independent versioning" in docs/VERSIONING.md).
   rust-semver:
     name: Rust — cargo-semver-checks
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
       with:
-        # Needs full history + tags: the baseline is the most recent `v*` tag,
-        # discovered the same way semver-check discovers it.
+        # Needs full history + tags: the baseline is the most recent `rust/v*`
+        # tag, discovered the same way semver-check discovers its own baseline.
         fetch-depth: 0
     # build.rs compiles the fig core with `zig build`, so building the crate's
     # rustdoc (current AND the baseline rev) needs Zig.
@@ -87,9 +89,9 @@ jobs:
       working-directory: bindings/rust
       run: |
         set -euo pipefail
-        tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+        tag="$(git describe --tags --abbrev=0 --match 'rust/v*' 2>/dev/null || true)"
         if [ -z "$tag" ]; then
-          echo "cargo-semver-checks: no v* tag found — skipping (nothing to diff against)."
+          echo "cargo-semver-checks: no rust/v* tag found — skipping (nothing to diff against)."
           exit 0
         fi
         echo "cargo-semver-checks: baseline $tag"

@@ -394,13 +394,16 @@ pub fn build(b: *std.Build) void {
 
     // Cross-artifact version floor. fig versions each artifact independently —
     // the Zig core (build.zig.zon), the CLI binary (`cli_version` above, in
-    // this file), the Rust crate (bindings/rust/Cargo.toml), and the npm
-    // package (bindings/typescript/package.json) move on their own SemVer
-    // tracks so a binding-only (or CLI-only) change need not bump the core.
-    // The one invariant: every artifact's version must be >= the core version
-    // it embeds, so a breaking core bump always pulls the others' major up
-    // and none can silently ship a newer core behind an older-looking number.
-    // This tool enforces that floor. Run: zig build version-floor.
+    // this file), the Rust crate (bindings/rust/Cargo.toml), the npm package
+    // (bindings/typescript/package.json), and the fig-wasi npm package
+    // (bindings/wasi/package.json) move on their own SemVer tracks so a
+    // binding-only (or CLI-only) change need not bump the core. The one
+    // invariant: every artifact's version must be >= the core version it
+    // embeds, so a breaking core bump always pulls the others' major up and
+    // none can silently ship a newer core behind an older-looking number
+    // (fig-wasi additionally must equal `cli_version` exactly, since it's a
+    // repackaging of the CLI, not an independent binding). This tool
+    // enforces both. Run: zig build version-floor.
     const version_floor = b.addExecutable(.{
         .name = "version_floor",
         .root_module = b.createModule(.{
@@ -410,12 +413,13 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const version_floor_run = b.addRunArtifact(version_floor);
-    // Cache-keyed on the four manifests it compares (build.zig carries the
+    // Cache-keyed on the five manifests it compares (build.zig carries the
     // CLI's own version — see `cli_version` above).
     version_floor_run.addFileArg(b.path("build.zig.zon"));
     version_floor_run.addFileArg(b.path("build.zig"));
     version_floor_run.addFileArg(b.path("bindings/rust/Cargo.toml"));
     version_floor_run.addFileArg(b.path("bindings/typescript/package.json"));
+    version_floor_run.addFileArg(b.path("bindings/wasi/package.json"));
     const version_floor_step = b.step("version-floor", "Check each binding's version is >= the core version it embeds");
     version_floor_step.dependOn(&version_floor_run.step);
 
@@ -467,20 +471,24 @@ pub fn build(b: *std.Build) void {
     check_step.dependOn(check_figl_step);
 
     // cargo-semver-checks guards the native Rust public surface. Mirror CI: pick
-    // the most recent `v*` tag as the baseline and skip cleanly when there is
-    // none yet (a fresh repo has nothing to diff against). Runs in bindings/rust;
-    // requires a nightly toolchain (cargo-semver-checks reads rustdoc JSON) and
-    // the cargo-semver-checks subcommand installed. git state is not a declared
-    // input, so it must never be served from cache.
+    // the most recent `rust/v*` tag as the baseline — the Rust crate's own
+    // release line, distinct from `semver-check`'s `core/v*` baseline, since the
+    // crate versions independently of the core (see "Independent versioning" in
+    // docs/VERSIONING.md) — and skip cleanly when there is none yet (a fresh
+    // repo, or one that hasn't cut a Rust release yet, has nothing to diff
+    // against). Runs in bindings/rust; requires a nightly toolchain
+    // (cargo-semver-checks reads rustdoc JSON) and the cargo-semver-checks
+    // subcommand installed. git state is not a declared input, so it must never
+    // be served from cache.
     const cargo_semver_script =
         \\set -eu
         \\if ! command -v cargo-semver-checks >/dev/null 2>&1; then
         \\  echo "cargo-semver-checks: not installed — skipping (install: cargo install cargo-semver-checks)."
         \\  exit 0
         \\fi
-        \\tag="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+        \\tag="$(git describe --tags --abbrev=0 --match 'rust/v*' 2>/dev/null || true)"
         \\if [ -z "$tag" ]; then
-        \\  echo "cargo-semver-checks: no v* tag found — skipping (nothing to diff against)."
+        \\  echo "cargo-semver-checks: no rust/v* tag found — skipping (nothing to diff against)."
         \\  exit 0
         \\fi
         \\echo "cargo-semver-checks: baseline $tag"

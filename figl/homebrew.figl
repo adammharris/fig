@@ -27,8 +27,12 @@ name = Homebrew
 # 1. Create the tap repo `adammharris/homebrew-tap` (already done).
 # 2. Add a HOMEBREW_TAP_TOKEN secret: a PAT with contents:write on the tap
 # (already done).
+#
+# Runs on the `cli/v*.*.*` tag — see "Release tagging" in docs/VERSIONING.md
+# for the full per-artifact tag scheme (this workflow only cares about the
+# CLI's own line, since it ships the CLI binary).
 on
-> push.tags = [v*.*.*]
+> push.tags = [cli/v*.*.*]
 > workflow_dispatch = null
 
 permissions.contents = write # the binary jobs attach assets to the GitHub Release
@@ -122,7 +126,7 @@ jobs.bump-formula.steps[]
 > # second copy here just to template it.
 > name = Compute checksums and render the Homebrew formula
 > run = '''
-version="${GITHUB_REF_NAME#v}"
+version="${GITHUB_REF_NAME#cli/v}"
 base="https://github.com/adammharris/fig/releases/download/${GITHUB_REF_NAME}"
 mac_arm64_sha=$(curl -sL "$base/fig-macos-arm64.tar.gz" | sha256sum | cut -d' ' -f1)
 mac_x64_sha=$(curl -sL "$base/fig-macos-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
@@ -137,22 +141,22 @@ class Fig < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/adammharris/fig/releases/download/v$version/fig-macos-arm64.tar.gz"
+      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-macos-arm64.tar.gz"
       sha256 "$mac_arm64_sha"
     end
     on_intel do
-      url "https://github.com/adammharris/fig/releases/download/v$version/fig-macos-x86_64.tar.gz"
+      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-macos-x86_64.tar.gz"
       sha256 "$mac_x64_sha"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/adammharris/fig/releases/download/v$version/fig-linux-aarch64.tar.gz"
+      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-linux-aarch64.tar.gz"
       sha256 "$linux_arm64_sha"
     end
     on_intel do
-      url "https://github.com/adammharris/fig/releases/download/v$version/fig-linux-x86_64.tar.gz"
+      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-linux-x86_64.tar.gz"
       sha256 "$linux_x64_sha"
     end
   end
@@ -181,7 +185,7 @@ git add Formula/fig.rb
 if git diff --cached --quiet; then
   echo "Formula unchanged — skipping commit"
 else
-  git commit -m "fig ${GITHUB_REF_NAME#v}"
+  git commit -m "fig ${GITHUB_REF_NAME#cli/v}"
   git push
 fi
 

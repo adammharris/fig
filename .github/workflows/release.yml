@@ -14,10 +14,25 @@ name: Release (npm + crates.io)
 # module (`zig build wasi`) run under Node's built-in (also experimental)
 # WASI support. See docs/npm-wasi.md.
 #
-# LIVE on every `v*.*.*` tag push (also runnable by hand via
-# `workflow_dispatch`). The crate carries the `license`, `description`, and
-# `readme` crates.io needs (the README and license text are vendored in from
-# the repo root by the `vendor-rust` step that runs before `cargo publish`).
+# Each job below LIVE on its own tag line (also runnable by hand via
+# `workflow_dispatch`, which runs every job unconditionally):
+# - `crate` (crates.io: fig + fig-macros)   -> `rust/v*.*.*`
+# - `npm` (@adammharris/fig, the TS library) -> `npm/v*.*.*`
+# - `npm-wasi` (@adammharris/fig-wasi)       -> `cli/v*.*.*`
+# See "Release tagging" in docs/VERSIONING.md for the full per-artifact tag
+# scheme (there's also a `core/v*.*.*` line that nothing here listens for —
+# it exists for `zig fetch` + the ABI semver baseline, not npm/crates.io).
+# The crate carries the `license`, `description`, and `readme` crates.io
+# needs (the README and license text are vendored in from the repo root by
+# the `vendor-rust` step that runs before `cargo publish`).
+#
+# `rust/*` and `npm/*` are independent tracks with no required relation to
+# their tag's version beyond the cross-artifact floor (`zig build
+# version-floor`, checked in each job below): they publish whatever their own
+# manifest says and no-op if that exact version is already out. `fig-wasi` is
+# the odd one out — it's a repackaging of the CLI itself, so it stays pinned
+# exactly to `cli_version` (enforced both by its own job's check below and by
+# `version-floor`), and rides the `cli/` tag rather than getting its own line.
 #
 # Required repository secrets:
 # NPM_TOKEN             — npm automation token with publish rights (not yet
@@ -28,12 +43,13 @@ name: Release (npm + crates.io)
 # CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights (already set)
 on:
   workflow_dispatch: {}
-  push: { tags: [v*.*.*] }
+  push: { tags: [cli/v*.*.*, rust/v*.*.*, npm/v*.*.*] }
 permissions: { id-token: write, contents: read }
 jobs:
   crate:
     name: Publish crate (crates.io)
     runs-on: ubuntu-latest
+    if: startsWith(github.ref_name, 'rust/') || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@v4
     # build.rs compiles the core, and `vendor-rust` bundles the Zig source into
@@ -41,16 +57,11 @@ jobs:
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
     - uses: dtolnay/rust-toolchain@stable
-    - name: Verify tag matches the canonical version
-      if: github.ref_type == 'tag'
-      run: |
-        canonical=$(grep -E '^\s*\.version\s*=' build.zig.zon | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-        tag="${GITHUB_REF_NAME#v}"
-        if [ "$canonical" != "$tag" ]; then
-          echo "::error::tag $GITHUB_REF_NAME ($tag) != build.zig.zon version ($canonical)"
-          exit 1
-        fi
-        echo "version $canonical matches tag $GITHUB_REF_NAME"
+    # The crate is an independent track (see the header comment above) — this
+    # only checks it (and everything else) stays >= the core it embeds, not
+    # that it equals the tag.
+    - name: Verify the cross-artifact version floor
+      run: zig build version-floor
     # --all-features so the serde- and derive-gated integration tests also run
     # (they are not in the default feature set).
     - run: cargo test --workspace --all-features --locked
@@ -96,6 +107,7 @@ jobs:
   npm:
     name: Publish package (npm) — fig (library)
     runs-on: ubuntu-latest
+    if: startsWith(github.ref_name, 'npm/') || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@v4
     - uses: mlugg/setup-zig@v2
@@ -109,16 +121,11 @@ jobs:
         registry-url: https://registry.npmjs.org
         cache: npm
         cache-dependency-path: bindings/typescript/package-lock.json
-    - name: Verify tag matches the package version
-      if: github.ref_type == 'tag'
-      run: |
-        pkg=$(node -p "require('./bindings/typescript/package.json').version")
-        tag="${GITHUB_REF_NAME#v}"
-        if [ "$pkg" != "$tag" ]; then
-          echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
-          exit 1
-        fi
-        echo "version $pkg matches tag $GITHUB_REF_NAME"
+    # The npm package is an independent track (see the header comment above) —
+    # this only checks it (and everything else) stays >= the core it embeds,
+    # not that it equals the tag.
+    - name: Verify the cross-artifact version floor
+      run: zig build version-floor
     - run: npm ci
       working-directory: bindings/typescript
     - run: npm run build
@@ -146,6 +153,7 @@ jobs:
   npm-wasi:
     name: Publish package (npm) — fig-wasi (experimental)
     runs-on: ubuntu-latest
+    if: startsWith(github.ref_name, 'cli/') || github.event_name == 'workflow_dispatch'
     steps:
     - uses: actions/checkout@v4
     - uses: mlugg/setup-zig@v2
@@ -156,11 +164,17 @@ jobs:
         registry-url: https://registry.npmjs.org
         cache: npm
         cache-dependency-path: bindings/wasi/package-lock.json
+    # fig-wasi repackages the CLI itself, so — unlike the crate/npm jobs above —
+    # it stays pinned exactly to the CLI's version, checked two ways: the floor
+    # tool's exact-equality pin (cli_version), and this tag check (the tag IS
+    # cli_version by convention — see the header comment above).
+    - name: Verify the cross-artifact version floor
+      run: zig build version-floor
     - name: Verify tag matches the package version
       if: github.ref_type == 'tag'
       run: |
         pkg=$(node -p "require('./bindings/wasi/package.json').version")
-        tag="${GITHUB_REF_NAME#v}"
+        tag="${GITHUB_REF_NAME#cli/v}"
         if [ "$pkg" != "$tag" ]; then
           echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
           exit 1

@@ -14,9 +14,11 @@ name = Release binaries
 # cross-compilation means no per-target native runner (and no Docker/QEMU) is
 # needed, unlike most C/C++ cross-release setups.
 #
-# Runs on the same `v*.*.*` tag as homebrew.yml and release.yml.
+# Runs on the same `cli/v*.*.*` tag as homebrew.yml (see "Release tagging" in
+# docs/VERSIONING.md for the full per-artifact tag scheme — this workflow only
+# cares about the CLI's own line, since it ships CLI binaries).
 on
-> push.tags = [v*.*.*]
+> push.tags = [cli/v*.*.*]
 > workflow_dispatch = null
 
 permissions.contents = write # attaches assets to the GitHub Release
