@@ -68,13 +68,30 @@ fn logFn(
     t.writer.flush() catch {};
 }
 
-// The version of the linked fig core, so the CLI never drifts from the library
-// it ships. Sourced from `build.zig` (the same numbers `fig_version` exposes).
-const version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
+// The core library's version — the same numbers `fig_version` exposes over
+// the C ABI — sourced from `build.zig`'s `version` (parsed from
+// build.zig.zon). Independent of `cli_version` below; see
+// docs/VERSIONING.md's "Independent versioning" section for why the CLI and
+// the core it embeds move on separate SemVer tracks.
+const core_version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
     build_options.version_major,
     build_options.version_minor,
     build_options.version_patch,
 });
+
+// The CLI binary's OWN version (`cli_version` in build.zig) — its
+// compatibility contract is flags/defaults/exit codes, not the library API,
+// so it moves independently of `core_version` above (only ever floored by
+// it — see `zig build version-floor`).
+const cli_version = std.fmt.comptimePrint("{d}.{d}.{d}", .{
+    build_options.cli_version_major,
+    build_options.cli_version_minor,
+    build_options.cli_version_patch,
+});
+
+// The current marketing epoch (`epoch` in build.zig) — purely cosmetic, no
+// compatibility meaning; see `fig version`'s output.
+const epoch = build_options.epoch;
 
 pub fn main(init: std.process.Init) !void {
     // Respected environment variables
@@ -153,7 +170,7 @@ pub fn main(init: std.process.Init) !void {
     // Now, act on config
     return switch (config.action) {
         .help => actions.runHelp(&stderr_terminal, config.binary_name),
-        .version => actions.runVersion(&stdout_terminal, version),
+        .version => actions.runVersion(&stdout_terminal, cli_version, core_version, epoch),
         .edit => actions.runEdit(a, io, &stdout_terminal, config.binary_name, config.options.edit),
         .set => actions.runSet(a, io, &stdout_terminal, &stderr_terminal, config.binary_name, config.options.set),
         .insert => actions.runInsert(a, io, &stdout_terminal, &stderr_terminal, config.binary_name, config.options.insert),

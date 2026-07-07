@@ -2,25 +2,27 @@
 //! its OWN SemVer track —
 //!
 //!   * the Zig core + C ABI   -> `.version` in build.zig.zon
+//!   * the CLI binary         -> `cli_version` in build.zig
 //!   * the Rust crate         -> `[workspace.package] version` in bindings/rust/Cargo.toml
 //!   * the npm package        -> `"version"` in bindings/typescript/package.json
 //!
-//! so a binding-only change (a Rust convenience method, a TS typing fix) can bump
-//! that binding without forcing a core release, and vice versa. The one invariant
-//! tying the tracks together: a binding's version must be >= the core version it
-//! embeds. Both bindings compile/bundle the core from this same tree, so the core
-//! they embed is exactly build.zig.zon's `.version`. Enforcing `binding >= core`
+//! so a binding-only (or CLI-only) change (a Rust convenience method, a TS typing
+//! fix, a CLI flag redesign) can bump that artifact without forcing a core
+//! release, and vice versa. The one invariant tying the tracks together: every
+//! artifact's version must be >= the core version it embeds. All three (CLI,
+//! Rust, npm) compile/bundle the core from this same tree, so the core they
+//! embed is exactly build.zig.zon's `.version`. Enforcing `artifact >= core`
 //! guarantees two things:
 //!
-//!   * a BREAKING core bump (major) pulls every binding's major up with it — a
-//!     binding can't keep an older-looking number while shipping a newer core;
-//!   * reading a binding's version is never an underestimate of the core inside.
+//!   * a BREAKING core bump (major) pulls every artifact's major up with it — an
+//!     artifact can't keep an older-looking number while shipping a newer core;
+//!   * reading an artifact's version is never an underestimate of the core inside.
 //!
-//! It does NOT require equality: a binding may run ahead of the core for
-//! binding-only releases. This replaces the old hand-mirrored "all four versions
-//! must match" rule. Per-language SemVer tools (zig build semver-check for the C
-//! ABI, cargo-semver-checks for the Rust API) still guard each surface's own
-//! compatibility; this only enforces the floor between them.
+//! It does NOT require equality: an artifact may run ahead of the core for
+//! artifact-only releases (this is exactly what a CLI-only flag-breaking change
+//! looks like — see docs/VERSIONING.md). Per-language SemVer tools (zig build
+//! semver-check for the C ABI, cargo-semver-checks for the Rust API) still guard
+//! each surface's own compatibility; this only enforces the floor between them.
 //!
 //! It ALSO enforces one Rust-internal consistency rule: the `fig-macros` version
 //! pin in `[workspace.dependencies]` must equal the workspace package version.
@@ -29,7 +31,8 @@
 //! publish a `fig` that depends on the wrong `fig-macros`. (Unlike the core floor,
 //! this is exact equality — it's a pin, not a floor.)
 //!
-//! Usage (driven by build.zig): version-floor <build.zig.zon> <Cargo.toml> <package.json>
+//! Usage (driven by build.zig):
+//!   version-floor <build.zig.zon> <build.zig> <Cargo.toml> <package.json>
 
 const std = @import("std");
 
@@ -45,15 +48,18 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next(); // argv0
     const zon_path = args.next() orelse return error.MissingArgument;
+    const build_zig_path = args.next() orelse return error.MissingArgument;
     const cargo_path = args.next() orelse return error.MissingArgument;
     const pkg_path = args.next() orelse return error.MissingArgument;
 
     const cwd = std.Io.Dir.cwd();
     const zon = try cwd.readFileAlloc(io, zon_path, arena, .limited(max_file));
+    const build_zig = try cwd.readFileAlloc(io, build_zig_path, arena, .limited(max_file));
     const cargo = try cwd.readFileAlloc(io, cargo_path, arena, .limited(max_file));
     const pkg = try cwd.readFileAlloc(io, pkg_path, arena, .limited(max_file));
 
     const core_str = zonVersion(zon) orelse return fail("build.zig.zon", "no `.version` field");
+    const cli_str = buildZigCliVersion(build_zig) orelse return fail("build.zig", "no `cli_version` field");
     const rust_str = cargoWorkspaceVersion(cargo) orelse return fail("Cargo.toml", "no `[workspace.package] version`");
     const ts_str = jsonVersion(pkg) orelse return fail("package.json", "no `\"version\"` field");
 
@@ -61,20 +67,26 @@ pub fn main(init: std.process.Init) !void {
         return fail("Cargo.toml", "no `fig-macros` version pin in [workspace.dependencies]");
 
     const core = std.SemanticVersion.parse(core_str) catch return fail("build.zig.zon", "unparseable `.version`");
+    const cli = std.SemanticVersion.parse(cli_str) catch return fail("build.zig", "unparseable `cli_version`");
     const rust = std.SemanticVersion.parse(rust_str) catch return fail("Cargo.toml", "unparseable version");
     const ts = std.SemanticVersion.parse(ts_str) catch return fail("package.json", "unparseable version");
 
     std.debug.print("version-floor: core (build.zig.zon) {s}\n", .{core_str});
+    std.debug.print("  cli (build.zig cli_version)  {s}\n", .{cli_str});
     std.debug.print("  rust crate (Cargo.toml)      {s}  (fig-macros pin {s})\n", .{ rust_str, macros_pin });
     std.debug.print("  npm package (package.json)   {s}\n", .{ts_str});
 
     var failed = false;
+    if (cli.order(core) == .lt) {
+        std.debug.print("  FAIL: cli {s} < core {s} (an artifact must be >= the core it embeds)\n", .{ cli_str, core_str });
+        failed = true;
+    }
     if (rust.order(core) == .lt) {
-        std.debug.print("  FAIL: rust crate {s} < core {s} (a binding must be >= the core it embeds)\n", .{ rust_str, core_str });
+        std.debug.print("  FAIL: rust crate {s} < core {s} (an artifact must be >= the core it embeds)\n", .{ rust_str, core_str });
         failed = true;
     }
     if (ts.order(core) == .lt) {
-        std.debug.print("  FAIL: npm package {s} < core {s} (a binding must be >= the core it embeds)\n", .{ ts_str, core_str });
+        std.debug.print("  FAIL: npm package {s} < core {s} (an artifact must be >= the core it embeds)\n", .{ ts_str, core_str });
         failed = true;
     }
     if (!std.mem.eql(u8, macros_pin, rust_str)) {
@@ -83,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (failed) std.process.exit(1);
-    std.debug.print("version-floor: OK (bindings >= embedded core; fig-macros pin matches)\n", .{});
+    std.debug.print("version-floor: OK (cli/bindings >= embedded core; fig-macros pin matches)\n", .{});
 }
 
 fn fail(file: []const u8, why: []const u8) noreturn {
@@ -95,6 +107,16 @@ fn fail(file: []const u8, why: []const u8) noreturn {
 fn zonVersion(text: []const u8) ?[]const u8 {
     const at = std.mem.indexOf(u8, text, ".version") orelse return null;
     return quotedAfter(text, at + ".version".len);
+}
+
+/// The quoted version string passed to `std.SemanticVersion.parse(...)` in
+/// `build.zig`'s `const cli_version = std.SemanticVersion.parse("X.Y.Z") ...`
+/// declaration. Anchors on the `cli_version` identifier (not just `parse(`,
+/// since `version` above is parsed the same way) then takes the first quoted
+/// string after it.
+fn buildZigCliVersion(text: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, text, "cli_version") orelse return null;
+    return quotedAfter(text, at + "cli_version".len);
 }
 
 /// The version under `[workspace.package]` in a Cargo.toml: the first

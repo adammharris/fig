@@ -15,6 +15,31 @@ const version = std.SemanticVersion.parse(@import("build.zig.zon").version) catc
 /// ABI diff against the last release tag is breaking.
 const abi_version: u8 = 1;
 
+/// The `fig` CLI binary's OWN SemVer track — independent of `.version` above,
+/// the same way the Rust crate and npm package are independent of it (see
+/// "Independent versioning" in docs/VERSIONING.md). The CLI's compatibility
+/// contract is its flags/defaults/exit codes, not the library API or the C
+/// ABI, so a CLI-only breaking change (e.g. flipping a flag's default) bumps
+/// this without forcing a core/ABI release, and vice versa — a core-only
+/// change doesn't force a CLI bump. The one invariant tying it to core: it
+/// must stay >= `version` above (enforced by `zig build version-floor`,
+/// alongside the Rust/npm floor checks), since the CLI always embeds
+/// whatever core it's built against. Surfaced via `fig version`, which prints
+/// both numbers.
+const cli_version = std.SemanticVersion.parse("3.0.0") catch
+    @compileError("invalid cli_version");
+
+/// The current "epoch" — a marketing name that changes far less often than
+/// `version`'s major (see docs/VERSIONING.md: "major releases are not
+/// sacred," so this exists precisely to give users a stable, human-facing
+/// handle across a run of otherwise-eager SemVer bumps). Purely cosmetic —
+/// no compatibility contract, so it lives here as a bare constant (like
+/// `abi_version`/`cli_version`) rather than in build.zig.zon (a
+/// toolchain-parsed package manifest with its own schema) or the C ABI (which
+/// only ever exposes things a consumer might actually branch on). Surfaced
+/// only by the CLI's `fig version`.
+const epoch = "Sierra";
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -67,6 +92,14 @@ pub fn build(b: *std.Build) void {
     // The binary C ABI contract version, surfaced through `fig_abi_version()`.
     // `zig build abi-check` asserts bindings/c/include/fig.h's FIG_ABI_VERSION matches this.
     options.addOption(u8, "abi_version", abi_version);
+    // The CLI's own version (see `cli_version`'s doc comment above), surfaced
+    // by `fig version` alongside the embedded core version.
+    options.addOption(u8, "cli_version_major", @intCast(cli_version.major));
+    options.addOption(u8, "cli_version_minor", @intCast(cli_version.minor));
+    options.addOption(u8, "cli_version_patch", @intCast(cli_version.patch));
+    // The current marketing epoch (see `epoch`'s doc comment above),
+    // surfaced only by `fig version` — no ABI/library counterpart.
+    options.addOption([]const u8, "epoch", epoch);
 
     // Build the options module once and share the single instance across every
     // target. Calling `addOptions` per-module would generate a fresh module from
@@ -360,13 +393,14 @@ pub fn build(b: *std.Build) void {
     semver_check_step.dependOn(&semver_check_run.step);
 
     // Cross-artifact version floor. fig versions each artifact independently —
-    // the Zig core (build.zig.zon), the Rust crate (bindings/rust/Cargo.toml),
-    // and the npm package (bindings/typescript/package.json) move on their own
-    // SemVer tracks so a binding-only change need not bump the core. The one
-    // invariant: a binding's version must be >= the core version it embeds, so a
-    // breaking core bump always pulls the bindings' major up and a binding can
-    // never silently ship a newer core behind an older-looking number. This tool
-    // enforces that floor. Run: zig build version-floor.
+    // the Zig core (build.zig.zon), the CLI binary (`cli_version` above, in
+    // this file), the Rust crate (bindings/rust/Cargo.toml), and the npm
+    // package (bindings/typescript/package.json) move on their own SemVer
+    // tracks so a binding-only (or CLI-only) change need not bump the core.
+    // The one invariant: every artifact's version must be >= the core version
+    // it embeds, so a breaking core bump always pulls the others' major up
+    // and none can silently ship a newer core behind an older-looking number.
+    // This tool enforces that floor. Run: zig build version-floor.
     const version_floor = b.addExecutable(.{
         .name = "version_floor",
         .root_module = b.createModule(.{
@@ -376,8 +410,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const version_floor_run = b.addRunArtifact(version_floor);
-    // Cache-keyed on the three manifests it compares.
+    // Cache-keyed on the four manifests it compares (build.zig carries the
+    // CLI's own version — see `cli_version` above).
     version_floor_run.addFileArg(b.path("build.zig.zon"));
+    version_floor_run.addFileArg(b.path("build.zig"));
     version_floor_run.addFileArg(b.path("bindings/rust/Cargo.toml"));
     version_floor_run.addFileArg(b.path("bindings/typescript/package.json"));
     const version_floor_step = b.step("version-floor", "Check each binding's version is >= the core version it embeds");

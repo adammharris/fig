@@ -29,8 +29,14 @@ pub fn runHelp(stderr_term: *Io.Terminal, binary_name: []const u8) !void {
     try Help.general(stderr_term, binary_name);
 }
 
-pub fn runVersion(stdout_term: *Io.Terminal, version: []const u8) !void {
-    try stdout_term.writer.print("{s}\n", .{version});
+/// Print the CLI's own version alongside the core library version it embeds
+/// and its marketing epoch — two independent SemVer tracks (see
+/// docs/VERSIONING.md; a CLI-only breaking change bumps `cli_version`
+/// without requiring a `core_version`/ABI release, and vice versa) plus one
+/// purely cosmetic label (`epoch` has no compatibility meaning — it's the
+/// core's marketing name, not a version number).
+pub fn runVersion(stdout_term: *Io.Terminal, cli_version: []const u8, core_version: []const u8, epoch: []const u8) !void {
+    try stdout_term.writer.print("fig {s} (core {s} \"{s}\")\n", .{ cli_version, core_version, epoch });
     try stdout_term.writer.flush();
 }
 
