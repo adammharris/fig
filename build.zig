@@ -89,7 +89,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "fig",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             .target = target,
             .optimize = optimize,
             .strip = strip,
@@ -194,7 +194,7 @@ pub fn build(b: *std.Build) void {
     const wasi_cli = b.addExecutable(.{
         .name = "fig-wasi",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/cli/main.zig"),
             .target = wasi_target,
             .optimize = .ReleaseSmall,
             .strip = true,

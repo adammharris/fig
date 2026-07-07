@@ -341,7 +341,7 @@ try ed.reorderContainers(&.{ "database", "logging" });
 frontmatter, or a YAML endmatter block — without touching an `Editor`
 directly; you compose it with `Editor` yourself for edits (there is no
 combined "embedded editor" type at this layer — see the CLI's `applyToEmbed`
-in `src/main.zig` for the exact pattern this section follows).
+in `src/cli/edit_ops.zig` for the exact pattern this section follows).
 
 Read-only extraction:
 
