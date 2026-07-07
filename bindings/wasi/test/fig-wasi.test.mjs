@@ -30,9 +30,15 @@ function withTempDir(fn) {
   }
 }
 
-test("version prints the core version", () => {
+// Format is `fig <cli-version> (core <core-version> "<epoch>")` — see
+// src/cli/actions.zig's runVersion and docs/VERSIONING.md. The CLI and core
+// versions move independently, so this doesn't pin either number, just the
+// shape.
+const VERSION_RE = /^fig \d+\.\d+\.\d+ \(core \d+\.\d+\.\d+ "[^"]+"\)$/;
+
+test("version prints the CLI and core version", () => {
   const out = run(["version"]);
-  assert.match(out.trim(), /^\d+\.\d+\.\d+$/);
+  assert.match(out.trim(), VERSION_RE);
 });
 
 test("get converts YAML to JSON", () => {
@@ -106,7 +112,7 @@ test("does not hang when stdin is an open pipe that is never closed and never ne
       new Promise((_, reject) => setTimeout(() => reject(new Error("timed out: hung waiting on unrelated stdin")), 5000)),
     ]);
     assert.equal(result.code, 0);
-    assert.match(out.trim(), /^\d+\.\d+\.\d+$/);
+    assert.match(out.trim(), VERSION_RE);
   } finally {
     child.kill();
   }
