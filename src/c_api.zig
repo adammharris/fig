@@ -640,6 +640,8 @@ fn figExtKindOf(kind: AST.Node.Kind.Extended.ExtKind) FigExtKind {
         .enum_literal => .enum_literal,
         .char_literal => .char_literal,
         .number_special => .number_special,
+        .plist_date => .plist_date,
+        .plist_data => .plist_data,
     };
 }
 
@@ -1937,6 +1939,8 @@ pub const FigExtKind = enum(c_int) {
     enum_literal = 4,
     char_literal = 5,
     number_special = 6,
+    plist_date = 7,
+    plist_data = 8,
 };
 
 const ValueHandle = struct {
@@ -1968,6 +1972,8 @@ fn extKindOf(kind: c_int) ?AST.Node.Kind.Extended.ExtKind {
         @intFromEnum(FigExtKind.enum_literal) => .enum_literal,
         @intFromEnum(FigExtKind.char_literal) => .char_literal,
         @intFromEnum(FigExtKind.number_special) => .number_special,
+        @intFromEnum(FigExtKind.plist_date) => .plist_date,
+        @intFromEnum(FigExtKind.plist_data) => .plist_data,
         else => null,
     };
 }
@@ -2372,8 +2378,9 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             // `languages/xml/printer.zig`), so an envelope couldn't preserve
             // anything an envelope-free print doesn't already lose. INI is the
             // same story (no C ABI `FigFormat.ini` exists yet either). All
-            // four fall through to decode-only (no envelope on output).
-            .canonical, .fig, .xml, .ini, .dotenv, .properties => null,
+            // four fall through to decode-only (no envelope on output). plist
+            // is the same story too (also no C ABI `FigFormat.plist`).
+            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist => null,
         };
         const decoded = try arena.create(AST);
         decoded.* = try Lossless.decode(arena, base_ast);

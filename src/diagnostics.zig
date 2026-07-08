@@ -342,6 +342,20 @@ fn valueLoss(format: Format, kind: AST.Node.Kind, depth: usize) ?Loss {
             .mapping => if (!is_root) return .{ .code = .value_dropped, .note = "table" } else return null,
             else => return null,
         },
+        // plist has native `boolean`/`integer`/`real`/`string`, unlimited
+        // mapping/sequence nesting, and its own two extended kinds — the only
+        // thing it can't hold at all is `null` (the DTD has no null type).
+        // An extended kind OTHER than plist's own two (a TOML datetime, a
+        // ZON enum/char literal, a JSON5 non-finite float) degrades to a
+        // plain string, same as XML's blanket treatment.
+        .plist => switch (kind) {
+            .null_ => return .{ .code = .value_dropped, .note = "null" },
+            .extended => |e| switch (e.kind) {
+                .plist_date, .plist_data => return null,
+                else => return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            },
+            else => return null,
+        },
     }
 }
 
@@ -361,7 +375,7 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
         // `: char`, so `valueLoss(.fig, …)` returns null.)
         .char_literal => switch (format) {
             .toml => "integer",
-            .xml => "string",
+            .xml, .plist => "string",
             else => "number",
         },
         // Non-finite floats quote in plain JSON/JSONC; elsewhere they degrade to
@@ -371,6 +385,10 @@ fn degradedNote(format: Format, ext: ExtKind) []const u8 {
             .json, .jsonc => "quoted string",
             else => "string",
         },
+        // plist's own two extended kinds have no foreign representation
+        // beyond a plain string (a JSON/YAML/TOML/... printer just emits
+        // their text verbatim, same treatment as an unrecognized datetime).
+        .plist_date, .plist_data => "string",
     };
 }
 
@@ -390,6 +408,8 @@ fn rootScalarNote(kind: AST.Node.Kind) []const u8 {
             .char_literal => "char",
             .number_special => "number",
             .offset_datetime, .local_datetime, .local_date, .local_time => "datetime",
+            .plist_date => "date",
+            .plist_data => "data",
         },
         .mapping, .sequence, .keyvalue => unreachable,
     };
@@ -405,10 +425,11 @@ fn dropNote(kind: AST.Node.Kind) []const u8 {
 /// Whether `format` emits comments at all in this mode. Plain JSON never does;
 /// JSON5/JSONC/ZON only in pretty (multi-line) output; YAML/TOML/canonical
 /// always. XML never does — the reader has no comment syntax, so an XML-sourced
-/// AST never carries any, and the printer emits none.
+/// AST never carries any, and the printer emits none. plist is the same story
+/// as XML (its reader shares XML's tokenizer, which skips `<!-- -->` entirely).
 fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
-        .json, .xml => false,
+        .json, .xml, .plist => false,
         .json5, .jsonc, .zon => pretty,
         .yaml, .toml, .canonical, .fig, .ini, .dotenv, .properties => true,
     };
@@ -416,12 +437,12 @@ fn commentsEmitted(format: Format, pretty: bool) bool {
 
 /// Whether `format` has block-comment syntax (`/* … */`). Only the JSON5 family
 /// and canonical do; YAML/TOML/ZON/fig/INI degrade a block comment to a line
-/// run; XML has no comments at all (moot — `commentsEmitted` already excludes
-/// it).
+/// run; XML/plist have no comments at all (moot — `commentsEmitted` already
+/// excludes both).
 fn blockComments(format: Format) bool {
     return switch (format) {
         .json5, .jsonc, .canonical => true,
-        .json, .yaml, .toml, .zon, .fig, .xml, .ini, .dotenv, .properties => false,
+        .json, .yaml, .toml, .zon, .fig, .xml, .ini, .dotenv, .properties, .plist => false,
     };
 }
 

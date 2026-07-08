@@ -21,6 +21,7 @@ const XmlPrinter = if (build_options.lang_xml) @import("../languages/xml/printer
 const IniPrinter = if (build_options.lang_ini) @import("../languages/ini/printer.zig") else void;
 const DotenvPrinter = if (build_options.lang_dotenv) @import("../languages/dotenv/printer.zig") else void;
 const PropertiesPrinter = if (build_options.lang_properties) @import("../languages/properties/printer.zig") else void;
+const PlistPrinter = if (build_options.lang_plist) @import("../languages/plist/printer.zig") else void;
 // The canonical form is the AST's own 1:1 oracle encoding. It is not exposed
 // through the C ABI or any binding, so it is opt-in (`-Dcanonical=true`) like
 // xml — but ALWAYS compiled for a test build (`is_test`), since the suite leans
@@ -34,7 +35,7 @@ const CanonicalPrinter = if (canonical_enabled) @import("../canonical/printer.zi
 /// (lossy at the edges — see src/languages/fig/DESIGN.md). `xml` requires its
 /// AST root to be a one-entry mapping (see `languages/xml/printer.zig`'s
 /// header) — anything else is `RootNotSingleElement`, not a silent fallback.
-pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, xml, canonical, fig, ini, dotenv, properties };
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, xml, canonical, fig, ini, dotenv, properties, plist };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -150,6 +151,7 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .ini => if (comptime build_options.lang_ini) IniPrinter.print(writer, ast, options) else error.FormatDisabled,
         .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.print(writer, ast, options) else error.FormatDisabled,
         .properties => if (comptime build_options.lang_properties) PropertiesPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .plist => if (comptime build_options.lang_plist) PlistPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
 
@@ -180,6 +182,7 @@ pub fn serializeFragmentWith(self: *const AST, writer: *Writer, format: Serializ
         .ini => if (comptime build_options.lang_ini) IniPrinter.print(writer, ast, options) else error.FormatDisabled,
         .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.print(writer, ast, options) else error.FormatDisabled,
         .properties => if (comptime build_options.lang_properties) PropertiesPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .plist => if (comptime build_options.lang_plist) PlistPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
 
@@ -205,5 +208,6 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .ini => if (comptime build_options.lang_ini) IniPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .properties => if (comptime build_options.lang_properties) PropertiesPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .plist => if (comptime build_options.lang_plist) PlistPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
     };
 }

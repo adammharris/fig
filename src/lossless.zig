@@ -68,6 +68,7 @@ pub fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
                 .offset_datetime, .local_datetime, .local_date, .local_time => false,
                 .number_special => false,
                 .enum_literal, .char_literal => true,
+                .plist_date, .plist_data => true,
             },
             // ZON has enum and char literals natively; datetimes and the
             // non-finite floats it does not.
@@ -75,6 +76,7 @@ pub fn needsEnvelope(target: Target, kind: AST.Node.Kind) bool {
                 .enum_literal, .char_literal => false,
                 .offset_datetime, .local_datetime, .local_date, .local_time => true,
                 .number_special => true,
+                .plist_date, .plist_data => true,
             },
             // Neither JSON nor YAML's core schema has any of these.
             .json, .yaml => true,

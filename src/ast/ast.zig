@@ -304,6 +304,15 @@ pub const Node = struct {
                 /// `text` is the source lexeme verbatim, sign included. No JSON
                 /// number can hold these, so they ride in an extended scalar.
                 number_special,
+                /// A plist `<date>` — `text` is the raw ISO-8601-ish timestamp
+                /// (plist's DTD-documented subset), kept verbatim like the TOML
+                /// datetimes above.
+                plist_date,
+                /// A plist `<data>` — `text` is the base64 payload with all
+                /// whitespace (plists commonly wrap it across lines) stripped,
+                /// so the bytes are the intrinsic value, same convention as
+                /// every other extended scalar.
+                plist_data,
             };
             pub fn eql(self: Extended, other: Extended) bool {
                 return self.kind == other.kind and util.eql(u8, self.text, other.text);

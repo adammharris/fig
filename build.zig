@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
     const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
+    const run_plist_conformance = b.option(bool, "plist-conformance", "Run plist conformance tests") orelse false;
 
     // Per-language feature gates. Any format can be compiled out to shrink the
     // binary and drop its parser/printer — including JSON, now that the native
@@ -70,6 +71,10 @@ pub fn build(b: *std.Build) void {
     const enable_ini = b.option(bool, "ini", "Include INI support") orelse true;
     const enable_dotenv = b.option(bool, "dotenv", "Include dotenv (.env) support") orelse true;
     const enable_properties = b.option(bool, "properties", "Include Java .properties support") orelse true;
+    // plist (XML variant only so far): same reasoning as xml — newest, least
+    // battle-tested format (no conformance harness wired up yet — see
+    // `src/languages/plist/conformance.zig`), opt-in via `-Dplist=true`.
+    const enable_plist = b.option(bool, "plist", "Include Apple XML property list support (opt-in; default off)") orelse false;
     // The canonical form is the AST's own 1:1 oracle encoding — invaluable in
     // tests but not exposed through the C ABI or any binding, so shipping it in
     // the default library/CLI/wasm is dead weight for everyone but the test
@@ -83,6 +88,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
     options.addOption(bool, "xml_conformance", run_xml_conformance);
+    options.addOption(bool, "plist_conformance", run_plist_conformance);
     // Language gates, consumed across the codebase as `build_options.lang_*`.
     options.addOption(bool, "lang_json", enable_json);
     options.addOption(bool, "lang_yaml", enable_yaml);
@@ -93,6 +99,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_ini", enable_ini);
     options.addOption(bool, "lang_dotenv", enable_dotenv);
     options.addOption(bool, "lang_properties", enable_properties);
+    options.addOption(bool, "lang_plist", enable_plist);
     options.addOption(bool, "lang_canonical", enable_canonical);
     // Library version surfaced through the C ABI (`fig_version` /
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one

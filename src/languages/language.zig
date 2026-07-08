@@ -18,6 +18,7 @@ pub const FIG = if (build_options.lang_fig) @import("fig/fig.zig").Language else
 pub const INI = if (build_options.lang_ini) @import("ini/ini.zig").Language else void;
 pub const DOTENV = if (build_options.lang_dotenv) @import("dotenv/dotenv.zig").Language else void;
 pub const PROPERTIES = if (build_options.lang_properties) @import("properties/properties.zig").Language else void;
+pub const PLIST = if (build_options.lang_plist) @import("plist/plist.zig").Language else void;
 
 /// A format `detect` can recognize. The `jsonc` dialect and `canonical` are
 /// deliberately excluded: jsonc overlaps json/json5 on most input, and
@@ -27,7 +28,7 @@ pub const PROPERTIES = if (build_options.lang_properties) @import("properties/pr
 /// content — it only wins detection on input that is either invalid for
 /// every stricter format, or uses fig-only structural syntax (`>` section
 /// depth, `*` elements, `+` continuations, `[]` group headers).
-pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig, ini, dotenv, properties };
+pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig, ini, dotenv, properties, plist };
 
 /// Best-effort content sniffing: try each COMPILED-IN parser and return the
 /// first that accepts `input`, or null if none do (also what an
@@ -54,6 +55,18 @@ pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
     }
     if (comptime build_options.lang_zon) {
         if (tryParse(ZON, allocator, input, ZON.default_type)) return .zon;
+    }
+    if (comptime build_options.lang_plist) {
+        // plist's DTD vocabulary (`<dict>`/`<array>`/`<key>`/...) is a STRICT
+        // SUBSET of well-formed XML: the generic XML reader below would also
+        // happily accept any real plist document, just folding it into a
+        // differently-shaped AST (attribute/`#text` folding, no typed
+        // scalars). So plist must get first claim, or a compiled-in XML
+        // reader would starve it completely — the reverse isn't a problem:
+        // plist's own grammar rejects anything outside its fixed element
+        // vocabulary (`error.UnknownElement`), so ordinary XML falls through
+        // to the `.xml` branch below untouched.
+        if (tryParse(PLIST, allocator, input, PLIST.default_type)) return .plist;
     }
     if (comptime build_options.lang_xml) {
         if (tryParse(XML, allocator, input, XML.default_type)) return .xml;
@@ -131,6 +144,9 @@ test "detect identifies each compiled-in format by content" {
     if (comptime build_options.lang_zon) {
         try std.testing.expectEqual(Detected.zon, detect(a, ".{ .x = 1 }").?);
     }
+    if (comptime build_options.lang_plist) {
+        try std.testing.expectEqual(Detected.plist, detect(a, "<dict><key>a</key><string>b</string></dict>").?);
+    }
     if (comptime build_options.lang_xml) {
         try std.testing.expectEqual(Detected.xml, detect(a, "<r/>").?);
     }
@@ -178,4 +194,14 @@ test "detect: plain `key = value` prefers TOML over fig despite fig accepting it
     // fig's root-level dotted assignment accepts the exact same shape TOML
     // does; TOML is tried first, so it wins the tie.
     try std.testing.expectEqual(Detected.toml, detect(a, "x = 1\n").?);
+}
+
+test "detect: a plist document prefers plist over generic xml despite xml accepting it too" {
+    const a = std.testing.allocator;
+    if (comptime !build_options.lang_plist or !build_options.lang_xml) return error.SkipZigTest;
+    // Any well-formed plist is also well-formed generic XML; plist is tried
+    // first, so it wins. Ordinary XML that isn't plist-shaped still falls
+    // through to `.xml`.
+    try std.testing.expectEqual(Detected.plist, detect(a, "<dict><key>a</key><string>b</string></dict>").?);
+    try std.testing.expectEqual(Detected.xml, detect(a, "<r/>").?);
 }

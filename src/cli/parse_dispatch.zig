@@ -51,7 +51,7 @@ pub fn resolveSpec(format: Format, spec_str: ?[]const u8) error{UnsupportedSpec}
             .{ .yaml = .v1_1 }
         else
             error.UnsupportedSpec,
-        .json, .jsonc, .json5, .zon, .xml, .canonical, .fig, .gron, .ini, .dotenv, .properties => error.UnsupportedSpec,
+        .json, .jsonc, .json5, .zon, .xml, .canonical, .fig, .gron, .ini, .dotenv, .properties, .plist => error.UnsupportedSpec,
     };
 }
 
@@ -112,6 +112,7 @@ pub fn parseSliceAs(format: Format, spec: Spec, allocator: std.mem.Allocator, co
         .ini => if (comptime build_options.lang_ini) fig.Language.INI.Parser.parse(allocator, content, fig.Language.INI.default_type) else error.FormatDisabled,
         .dotenv => if (comptime build_options.lang_dotenv) fig.Language.DOTENV.Parser.parse(allocator, content, fig.Language.DOTENV.default_type) else error.FormatDisabled,
         .properties => if (comptime build_options.lang_properties) fig.Language.PROPERTIES.Parser.parse(allocator, content, fig.Language.PROPERTIES.default_type) else error.FormatDisabled,
+        .plist => if (comptime build_options.lang_plist) fig.Language.PLIST.Parser.parse(allocator, content, fig.Language.PLIST.default_type) else error.FormatDisabled,
     };
 }
 
@@ -142,6 +143,7 @@ pub fn mapDetected(d: fig.Language.Detected) Format {
         .ini => .ini,
         .dotenv => .dotenv,
         .properties => .properties,
+        .plist => .plist,
     };
 }
 

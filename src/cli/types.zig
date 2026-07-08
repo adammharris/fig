@@ -26,7 +26,7 @@ const gron = @import("gron.zig");
 // `reorderTables` — library-level only, same as TOML's). `gron` is a CLI-only
 // echo format with no
 // `AST.SerializeFormat` counterpart.
-pub const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, canonical, fig, gron, ini, dotenv, properties };
+pub const Format = enum { json, jsonc, json5, yaml, yml, toml, zon, xml, canonical, fig, gron, ini, dotenv, properties, plist };
 
 pub const CliAction = enum {
     help,

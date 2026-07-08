@@ -1041,6 +1041,11 @@ fn writeExtended(self: *Printer, e: AST.Node.Kind.Extended) Error!void {
         // `: char =` annotation `writeTypeAnnotation` emits (char is never
         // flow-eligible, so it always reaches here in annotated block position).
         .char_literal => try writeCharLiteral(self.writer, e.text),
+        // plist date/data text is always flow-safe bare content (no `,[]{}`,
+        // never line-initial here since a `key = `/`* ` marker always
+        // precedes it) — same untagged raw-passthrough treatment as a
+        // datetime above.
+        .plist_date, .plist_data => try self.writer.writeAll(e.text),
     }
 }
 

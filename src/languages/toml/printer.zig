@@ -438,6 +438,9 @@ fn writeExtended(w: *Writer, ext: AST.Node.Kind.Extended) Error!void {
         .char_literal => try w.writeAll(ext.text),
         // JSON5 `Infinity`/`NaN` map onto TOML's native lowercase float forms.
         .number_special => try w.writeAll(tomlSpecial(ext.text)),
+        // plist's date/data have no TOML primitive; degrade to a string, same
+        // as a ZON enum literal.
+        .plist_date, .plist_data => try writeBasicString(w, ext.text),
     }
 }
 

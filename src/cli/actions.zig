@@ -84,6 +84,8 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
         // dotenv, .properties: same story as INI.
         .dotenv => return error.UnsupportedDotenvEdit,
         .properties => return error.UnsupportedPropertiesEdit,
+        // plist: same story as XML/INI — reader + printer only so far.
+        .plist => return error.UnsupportedPlistEdit,
         // JSON5 is read/serialize only so far; comment-preserving
         // in-place editing of it is not wired yet.
         .json5 => return error.UnsupportedJson5Edit,
@@ -355,8 +357,11 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
             // collapses to element/attribute text regardless (see
             // `languages/xml/printer.zig`), so an envelope couldn't
             // preserve anything a plain print doesn't already lose. INI is
-            // the same story (also no typed scalars of its own).
-            .canonical, .fig, .xml, .ini, .dotenv, .properties => null,
+            // the same story (also no typed scalars of its own). plist DOES
+            // have typed scalars, but has no `Lossless.Target` envelope of
+            // its own yet either — a separate future phase, same boundary
+            // as XML/INI/dotenv/properties today.
+            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist => null,
         };
         const decoded = try a.create(fig.AST);
         decoded.* = try fig.Lossless.decode(a, base_ast);
@@ -393,6 +398,7 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
         .ini => .ini,
         .dotenv => .dotenv,
         .properties => .properties,
+        .plist => .plist,
         .gron => unreachable, // handled by the early return above
     };
 
@@ -512,6 +518,7 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             .ini => return error.UnsupportedIniEdit,
             .dotenv => return error.UnsupportedDotenvEdit,
             .properties => return error.UnsupportedPropertiesEdit,
+            .plist => return error.UnsupportedPlistEdit,
             .canonical => return error.UnsupportedCanonicalEdit,
             .fig => if (comptime build_options.lang_fig)
                 try edit_ops.getCommentFromFile(fig.Language.FIG, a, io, input, opts.path, opts.inline_comment, fig.Language.FIG.default_type)
@@ -564,6 +571,7 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         .ini => return error.UnsupportedIniEdit,
         .dotenv => return error.UnsupportedDotenvEdit,
         .properties => return error.UnsupportedPropertiesEdit,
+        .plist => return error.UnsupportedPlistEdit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)
             try edit_ops.applyToFile(fig.Language.FIG, a, io, input, opts.path, opts.text, op, fig.Language.FIG.default_type)
