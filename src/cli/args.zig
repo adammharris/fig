@@ -509,59 +509,24 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                     log.err("Missing format value after {s}\n", .{arg});
                     return ArgError.MissingGetArgument;
                 };
-                if (std.mem.eql(u8, fmt, "json")) {
-                    input_override = .json;
-                } else if (std.mem.eql(u8, fmt, "jsonc")) {
-                    input_override = .jsonc;
-                } else if (std.mem.eql(u8, fmt, "json5")) {
-                    input_override = .json5;
-                } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
-                    input_override = .yaml;
-                } else if (std.mem.eql(u8, fmt, "toml")) {
-                    input_override = .toml;
-                } else if (std.mem.eql(u8, fmt, "zon")) {
-                    input_override = .zon;
-                } else if (std.mem.eql(u8, fmt, "xml")) {
-                    input_override = .xml;
-                } else if (std.mem.eql(u8, fmt, "canonical")) {
-                    input_override = .canonical;
-                } else if (std.mem.eql(u8, fmt, "fig")) {
-                    input_override = .fig;
-                } else if (std.mem.eql(u8, fmt, "gron")) {
-                    input_override = .gron;
-                } else {
+                // Delegate to the same enum-driven lookup `check`/`fmt`/`convert`
+                // use, so this never again drifts out of sync with `Format` as
+                // formats are added (this used to be its own hand-rolled chain
+                // of literal comparisons — see git blame — which is exactly how
+                // it silently fell behind when ini/dotenv/properties were added).
+                input_override = parseFormatName(fmt) orelse {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
-                }
+                };
             } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "-o")) {
                 const fmt = args.next() orelse {
                     log.err("Missing format value after {s}\n", .{arg});
                     return ArgError.MissingGetArgument;
                 };
-                if (std.mem.eql(u8, fmt, "json")) {
-                    output_override = .json;
-                } else if (std.mem.eql(u8, fmt, "jsonc")) {
-                    output_override = .jsonc;
-                } else if (std.mem.eql(u8, fmt, "json5")) {
-                    output_override = .json5;
-                } else if (std.mem.eql(u8, fmt, "yaml") or std.mem.eql(u8, fmt, "yml")) {
-                    output_override = .yaml;
-                } else if (std.mem.eql(u8, fmt, "toml")) {
-                    output_override = .toml;
-                } else if (std.mem.eql(u8, fmt, "zon")) {
-                    output_override = .zon;
-                } else if (std.mem.eql(u8, fmt, "xml")) {
-                    output_override = .xml;
-                } else if (std.mem.eql(u8, fmt, "canonical")) {
-                    output_override = .canonical;
-                } else if (std.mem.eql(u8, fmt, "fig")) {
-                    output_override = .fig;
-                } else if (std.mem.eql(u8, fmt, "gron")) {
-                    output_override = .gron;
-                } else {
+                output_override = parseFormatName(fmt) orelse {
                     log.err("Unsupported format: {s}\n", .{fmt});
                     return ArgError.UnsupportedFileFormat;
-                }
+                };
             } else {
                 try positionals.append(allocator, arg);
             }

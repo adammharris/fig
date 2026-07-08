@@ -145,6 +145,21 @@ pub fn mapDetected(d: fig.Language.Detected) Format {
     };
 }
 
+/// Map a document-serialize `target` to its `fig.FlatStrip.Format` counterpart,
+/// or null for every format that isn't one of the three flat/shallow-only
+/// ones `FlatStrip` covers. `get`/`convert`'s lossy path use this to decide
+/// whether to run `FlatStrip.lossyStrip` before printing (mirroring how they
+/// hardcode `.toml` for `Lossless.lossyStrip`, just over three formats instead
+/// of one).
+pub fn flatStripFormat(target: fig.AST.SerializeFormat) ?fig.FlatStrip.Format {
+    return switch (target) {
+        .ini => .ini,
+        .dotenv => .dotenv,
+        .properties => .properties,
+        else => null,
+    };
+}
+
 /// Sniff `content` with `Language.detect`, emit an info-level log of what was
 /// inferred, and return it — the fallback when neither `--input` nor the file
 /// extension pinned the format. Errors (after a clear message) if nothing matches.

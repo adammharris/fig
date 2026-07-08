@@ -139,6 +139,40 @@ pub fn reportFigUnrepresentableRoot(term: *Io.Terminal) noreturn {
     std.process.exit(1);
 }
 
+/// Every OTHER way a printer can fail — a value/shape the target format has no
+/// spelling for at all (an array/nested table reaching INI/dotenv/`.properties`,
+/// a non-identifier dotenv key, an XML document with more than one root key,
+/// a non-string mapping key reaching TOML/ZON/XML, ...). Exhaustive over
+/// `fig.AST.SerializeError` so a NEW variant is a compile error here rather
+/// than silently falling through to a crash. `FigUnrepresentableRoot` is
+/// included for completeness (a call site that forgets to special-case it
+/// separately still gets a decent message) even though every current call
+/// site intercepts it first via `reportFigUnrepresentableRoot`'s more specific
+/// wording. Same reasoning as that function for why this exits here instead
+/// of letting the error escape to `main`'s top level: an escaping error
+/// prints nothing but a bare, unreadable Zig stack trace (see its doc).
+pub fn reportSerializeError(term: *Io.Terminal, err: fig.AST.SerializeError) noreturn {
+    const message: []const u8 = switch (err) {
+        error.WriteFailed => "failed to write output",
+        error.UnresolvedAlias => "an unresolved YAML alias reached the printer (internal error — please report this)",
+        error.NullUnsupported => "a `null` value has no representation in this output format",
+        error.NonStringKey => "a non-string mapping key has no representation in this output format",
+        error.FormatDisabled => "the requested format was not compiled into this build",
+        error.NestingTooDeep => "this document nests too deeply for the canonical printer's depth guard",
+        error.RootNotSingleElement => "an XML document's root must be a mapping with exactly one key",
+        error.NestedSequenceUnsupported => "an array with no enclosing key name has no XML representation",
+        error.InvalidElementName => "a mapping key is not a valid XML element name",
+        error.NonScalarValue => "an `@`-attribute or `#text` entry must be a plain scalar in XML",
+        error.UnexpectedNodeKind => "an internal fig printer error occurred (please report this)",
+        error.FigUnrepresentableRoot => "a scalar value cannot be the root of a .fig/.figl document; use canonical form or another output format instead (see docs/spec.md § 2)",
+        error.UnsupportedValue => "this document contains an array, or a table nested deeper than this format allows (INI: one level of `[section]`; dotenv/`.properties`: none)",
+        error.InvalidKey => "a mapping key is not valid in this output format (a dotenv key must be a bash identifier: `[A-Za-z_][A-Za-z0-9_]*`)",
+    };
+    term.writer.print("error: {s}\n", .{message}) catch {};
+    term.writer.flush() catch {};
+    std.process.exit(1);
+}
+
 /// Print every parse-time authoring warning in `warnings` (unless `--quiet`),
 /// then exit(2) if `--strict` and any fired — `get`'s shared `--quiet`/
 /// `--strict` contract for a language's authoring-time lints (fig's, JSON's

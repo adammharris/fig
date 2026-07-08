@@ -352,8 +352,12 @@ fn indexPath(arena: Allocator, parent: []const u8, i: usize) Error![]const u8 {
 }
 
 // ── Shared node-building helpers (duck-typed over Encoder/Decoder/Stripper) ──
+// `pub` so `flat_strip.zig`'s own Stripper (INI/dotenv/`.properties`'s
+// depth-based capability model doesn't fit `Target`'s scalar-kind shape — see
+// that file's module doc) can reuse this tree-copying plumbing instead of a
+// third copy of it.
 
-fn emit(self: anytype, kind: AST.Node.Kind) Error!Id {
+pub fn emit(self: anytype, kind: AST.Node.Kind) Error!Id {
     const id: Id = @intCast(self.out.items.len);
     try self.out.append(self.arena, .{ .id = id, .kind = kind, .next_sibling = null });
     // Keep the comment table parallel to `out`; synthetic nodes (envelope
@@ -366,7 +370,7 @@ fn emit(self: anytype, kind: AST.Node.Kind) Error!Id {
 /// Copy the comments bound to source node `src_id` onto the freshly emitted node
 /// `new_id`. The `leading` slice is re-duped into the arena; comment text borrows
 /// the source AST (which the arena outlives). Duck-typed over the three passes.
-fn carry(self: anytype, src_id: Id, new_id: Id) Error!void {
+pub fn carry(self: anytype, src_id: Id, new_id: Id) Error!void {
     const c = self.src.comments(src_id);
     if (c.isEmpty()) return;
     self.out_comments.items[new_id] = .{
@@ -405,7 +409,7 @@ fn copyMap(self: anytype, src_node: AST.Node) Error!Id {
 }
 
 /// Append `child` to container `container`, threading `next_sibling`.
-fn link(out: *std.ArrayList(AST.Node), container: Id, last: *?Id, child: Id, comptime kind: enum { sequence, mapping }) void {
+pub fn link(out: *std.ArrayList(AST.Node), container: Id, last: *?Id, child: Id, comptime kind: enum { sequence, mapping }) void {
     if (last.*) |p| {
         out.items[p].next_sibling = child;
     } else {

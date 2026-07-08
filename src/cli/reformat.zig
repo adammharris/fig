@@ -101,10 +101,18 @@ pub fn reformatSlice(
         // (already reported above) rather than aborting mid-print.
         const result = try fig.Lossless.lossyStrip(allocator, &doc.ast, doc.ast.root, .toml);
         if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
+    } else if (parse_dispatch.flatStripFormat(target)) |fmt| {
+        // `fmt` never converts format (always reads and writes the same one),
+        // so — unlike `convertSlice`'s twin below — there's no `--lossless` to
+        // gate this on: a value already unrepresentable in the source can only
+        // have gotten there via a lossless-envelope decode from a PRIOR
+        // conversion, and re-emitting the same format always strips it again.
+        const result = try fig.FlatStrip.lossyStrip(allocator, &doc.ast, doc.ast.root, fmt);
+        if (result.ast) |stripped| try stripped.serializeWith(&out.writer, target, serialize);
     } else {
         doc.ast.serializeWith(&out.writer, target, serialize) catch |err| switch (err) {
             error.FigUnrepresentableRoot => diag_report.reportFigUnrepresentableRoot(term),
-            else => return err,
+            else => |e| diag_report.reportSerializeError(term, e),
         };
     }
     return out.toOwnedSlice();
@@ -228,6 +236,8 @@ pub fn convertSlice(
         }
     }
 
+    const flat_strip_fmt: ?fig.FlatStrip.Format = if (!lossless) parse_dispatch.flatStripFormat(target) else null;
+
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
     if (target == .toml and !lossless) {
@@ -236,10 +246,16 @@ pub fn convertSlice(
         // (already reported above) rather than aborting mid-print.
         const result = try fig.Lossless.lossyStrip(allocator, ast, ast.root, .toml);
         if (result.ast) |stripped| try stripped.serializeWith(&out.writer, .toml, serialize);
+    } else if (flat_strip_fmt) |fmt| {
+        // INI/dotenv/.properties: same idea as TOML's null-stripping above,
+        // but depth-based (see `fig.FlatStrip`'s module doc); gated on
+        // `!lossless` for the same reason `get`'s twin path is — see there.
+        const result = try fig.FlatStrip.lossyStrip(allocator, ast, ast.root, fmt);
+        if (result.ast) |stripped| try stripped.serializeWith(&out.writer, target, serialize);
     } else {
         ast.serializeWith(&out.writer, target, serialize) catch |err| switch (err) {
             error.FigUnrepresentableRoot => diag_report.reportFigUnrepresentableRoot(term),
-            else => return err,
+            else => |e| diag_report.reportSerializeError(term, e),
         };
     }
     return out.toOwnedSlice();

@@ -432,6 +432,14 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
         }
     }
 
+    // `!opts.lossless` only: under `--lossless` these formats fall through to
+    // the plain print below and, having no envelope of their own (see
+    // `fig.FlatStrip`'s module doc), surface whatever they can't hold as a
+    // real error via `reportSerializeError` — `--lossless` means "don't
+    // silently drop data," so silently stripping under it would defeat the
+    // flag's whole point.
+    const flat_strip_fmt: ?fig.FlatStrip.Format = if (!opts.lossless) parse_dispatch.flatStripFormat(target) else null;
+
     if (target == .toml and !opts.lossless) {
         // TOML has no null. In lossy mode, rather than the printer
         // aborting mid-document on one, strip unrepresentable values up
@@ -442,15 +450,25 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
         if (result.ast) |stripped| {
             try stripped.serializeWith(stdout_term.writer, .toml, opts.serialize);
         }
+    } else if (flat_strip_fmt) |fmt| {
+        // INI/dotenv/.properties: same idea as TOML's null-stripping above,
+        // but the capability rule is DEPTH-based, not scalar-kind-based — an
+        // array, or a table nested past what the format allows, would
+        // otherwise abort the printer mid-document (already warned about
+        // above).
+        const result = try fig.FlatStrip.lossyStrip(a, ast, node_id, fmt);
+        if (result.ast) |stripped| {
+            try stripped.serializeWith(stdout_term.writer, target, opts.serialize);
+        }
     } else if (opts.path == null) {
         ast.serializeWith(stdout_term.writer, target, opts.serialize) catch |err| switch (err) {
             error.FigUnrepresentableRoot => diag_report.reportFigUnrepresentableRoot(stderr_term),
-            else => return err,
+            else => |e| diag_report.reportSerializeError(stderr_term, e),
         };
     } else {
         ast.serializeNodeWith(stdout_term.writer, target, node_id, opts.serialize) catch |err| switch (err) {
             error.FigUnrepresentableRoot => diag_report.reportFigUnrepresentableRoot(stderr_term),
-            else => return err,
+            else => |e| diag_report.reportSerializeError(stderr_term, e),
         };
     }
     try stdout_term.writer.flush();

@@ -8,6 +8,10 @@ pub const Document = @import("document.zig");
 pub const AST = @import("ast/ast.zig");
 pub const Embed = @import("embed.zig");
 pub const Lossless = @import("lossless.zig");
+/// Lossy-mode stripping for INI/dotenv/`.properties` — `Lossless`'s sibling
+/// for the three flat/shallow-only formats, whose capability model is
+/// depth-based rather than scalar-kind-based. See its module doc.
+pub const FlatStrip = @import("flat_strip.zig");
 /// Serialization diagnostics: report what a cross-format conversion would lose.
 pub const Diagnostics = @import("diagnostics.zig");
 /// Shared parse-diagnostic rendering (byte-offset → line/col, the
@@ -46,6 +50,7 @@ test {
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");
+    _ = @import("flat_strip.zig");
     _ = @import("diagnostics.zig");
     _ = @import("parse_diagnostic.zig");
     _ = @import("canonical/canonical.zig");
