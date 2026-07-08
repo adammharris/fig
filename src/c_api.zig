@@ -2379,8 +2379,9 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             // anything an envelope-free print doesn't already lose. INI is the
             // same story (no C ABI `FigFormat.ini` exists yet either). All
             // four fall through to decode-only (no envelope on output). plist
-            // is the same story too (also no C ABI `FigFormat.plist`).
-            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist => null,
+            // is the same story too (also no C ABI `FigFormat.plist`), as is
+            // NestedText (no C ABI `FigFormat.nestedtext` either).
+            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist, .nestedtext => null,
         };
         const decoded = try arena.create(AST);
         decoded.* = try Lossless.decode(arena, base_ast);

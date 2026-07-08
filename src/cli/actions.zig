@@ -120,6 +120,9 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             return error.FormatDisabled,
         // gron is a CLI-only get/echo format with no in-place editor.
         .gron => return error.UnsupportedGronEdit,
+        // NestedText: reader + printer + conformance only so far — see
+        // `edit_ops.applyStructuralEdit`'s matching arm.
+        .nestedtext => return error.UnsupportedNestedtextEdit,
     }
 }
 
@@ -378,8 +381,9 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
             // the same story (also no typed scalars of its own). plist DOES
             // have typed scalars, but has no `Lossless.Target` envelope of
             // its own yet either — a separate future phase, same boundary
-            // as XML/INI/dotenv/properties today.
-            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist => null,
+            // as XML/INI/dotenv/properties today. NestedText is the same
+            // story (also no typed scalars, no envelope of its own).
+            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist, .nestedtext => null,
         };
         const decoded = try a.create(fig.AST);
         decoded.* = try fig.Lossless.decode(a, base_ast);
@@ -417,6 +421,7 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
         .dotenv => .dotenv,
         .properties => .properties,
         .plist => .plist,
+        .nestedtext => .nestedtext,
         .gron => unreachable, // handled by the early return above
     };
 
@@ -561,6 +566,7 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             else
                 return error.FormatDisabled,
             .gron => return error.UnsupportedGronEdit,
+            .nestedtext => return error.UnsupportedNestedtextEdit,
         };
         // Print the comment followed by a newline. An absent comment (null)
         // and a present-but-empty one both print just the newline — the CLI
@@ -629,6 +635,7 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         else
             return error.FormatDisabled,
         .gron => return error.UnsupportedGronEdit,
+        .nestedtext => return error.UnsupportedNestedtextEdit,
     }
 }
 

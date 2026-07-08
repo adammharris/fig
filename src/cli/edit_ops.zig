@@ -274,7 +274,9 @@ pub fn emptyDocSeed(format: Format) ?[]const u8 {
         // single root-level key from an empty file is unaffected.)
         .yaml, .yml, .toml, .fig, .dotenv, .properties, .ini => "",
         .zon => ".{}\n",
-        .xml, .canonical, .gron, .plist => null,
+        // NestedText isn't wired into `Editor` yet (reader/printer/
+        // conformance only, so far) — no seed until that lands.
+        .xml, .canonical, .gron, .plist, .nestedtext => null,
     };
 }
 
@@ -352,6 +354,10 @@ pub fn applyStructuralEdit(
         else
             return error.FormatDisabled,
         .gron => return error.UnsupportedGronEdit,
+        // NestedText: reader + printer + conformance only so far — in-place
+        // editing (`Editor(NestedText)`) is a separate, not-yet-landed pass;
+        // see the module's own doc comment / the project's memory note.
+        .nestedtext => return error.UnsupportedNestedtextEdit,
     }
 }
 

@@ -101,6 +101,11 @@ pub fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     // `production` — pass `--input dotenv` explicitly for those.)
     if (std.mem.eql(u8, ext, "env")) return .{ .format = .dotenv };
 
+    // NestedText's conventional extension is `.nt`, which doesn't match the
+    // `Format.nestedtext` enum member name either — same `.env`-style
+    // special case.
+    if (std.mem.eql(u8, ext, "nt")) return .{ .format = .nestedtext };
+
     const format = std.meta.stringToEnum(Format, ext) orelse return null;
     return .{ .format = format };
 }

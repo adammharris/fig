@@ -65,6 +65,7 @@ pub fn reformatSlice(
         .dotenv => .dotenv,
         .properties => .properties,
         .plist => .plist,
+        .nestedtext => .nestedtext,
         .gron => unreachable, // rejected up front above
     };
 
@@ -186,7 +187,7 @@ pub fn convertSlice(
             // XML has no envelope of its own — see the matching comment on the
             // `.get` action's twin switch above. INI/dotenv/plist are the
             // same story.
-            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist => null,
+            .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist, .nestedtext => null,
         };
         const decoded = try allocator.create(fig.AST);
         decoded.* = try fig.Lossless.decode(allocator, base_ast);
@@ -210,6 +211,7 @@ pub fn convertSlice(
         .dotenv => .dotenv,
         .properties => .properties,
         .plist => .plist,
+        .nestedtext => .nestedtext,
         .gron => unreachable, // rejected up front above
     };
 

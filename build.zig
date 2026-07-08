@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
     const run_plist_conformance = b.option(bool, "plist-conformance", "Run plist conformance tests") orelse false;
+    const run_nestedtext_conformance = b.option(bool, "nestedtext-conformance", "Run NestedText conformance tests") orelse false;
 
     // Per-language feature gates. Any format can be compiled out to shrink the
     // binary and drop its parser/printer — including JSON, now that the native
@@ -88,6 +89,11 @@ pub fn build(b: *std.Build) void {
     // suite. Opt-in like xml (`-Dcanonical=true`); the code still compiles for
     // ANY test build regardless, gated as `lang_canonical or @import("builtin").is_test`.
     const enable_canonical = b.option(bool, "canonical", "Include the canonical oracle format (opt-in; default off — used mainly by the test suite)") orelse false;
+    // NestedText (nestedtext.org): reader + printer + editor, untyped-string
+    // scalars like INI. No conformance harness caveat like plist — the
+    // official test suite (vendored to `testdata/nestedtext/tests.json`) is
+    // wired up from the start. On by default like TOML/ZON/INI.
+    const enable_nestedtext = b.option(bool, "nestedtext", "Include NestedText support") orelse true;
 
     const options = b.addOptions();
     options.addOption(bool, "json_conformance", run_conformance);
@@ -95,6 +101,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
     options.addOption(bool, "plist_conformance", run_plist_conformance);
+    options.addOption(bool, "nestedtext_conformance", run_nestedtext_conformance);
     // Language gates, consumed across the codebase as `build_options.lang_*`.
     options.addOption(bool, "lang_json", enable_json);
     options.addOption(bool, "lang_yaml", enable_yaml);
@@ -107,6 +114,7 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_properties", enable_properties);
     options.addOption(bool, "lang_plist", enable_plist);
     options.addOption(bool, "lang_canonical", enable_canonical);
+    options.addOption(bool, "lang_nestedtext", enable_nestedtext);
     // Library version surfaced through the C ABI (`fig_version` /
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one
     // canonical package version — and split into the components the ABI's

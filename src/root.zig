@@ -47,6 +47,7 @@ test {
     _ = @import("languages/dotenv/dotenv.zig");
     _ = @import("languages/properties/properties.zig");
     _ = @import("languages/plist/plist.zig");
+    _ = @import("languages/nestedtext/nestedtext.zig");
     _ = @import("languages/shared/flat_map.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
@@ -73,5 +74,8 @@ test {
     }
     if (build_options.plist_conformance) {
         _ = @import("languages/plist/conformance.zig");
+    }
+    if (build_options.nestedtext_conformance) {
+        _ = @import("languages/nestedtext/conformance.zig");
     }
 }

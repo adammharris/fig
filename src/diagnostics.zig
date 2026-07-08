@@ -356,6 +356,19 @@ fn valueLoss(format: Format, kind: AST.Node.Kind, depth: usize) ?Loss {
             },
             else => return null,
         },
+        // NestedText: same "no typed scalars" story as INI/XML, but with
+        // UNRESTRICTED mapping/sequence nesting (unlike INI's depth-2 cap —
+        // see `languages/nestedtext/parser.zig`'s module doc). Its only
+        // hard loss is `null`: the whole document may itself be absent/empty
+        // (root `null_`, no loss), but a `null` value nested inside a
+        // container has no spelling (`languages/nestedtext/printer.zig`
+        // hard-errors `NullUnsupported` there, same as INI).
+        .nestedtext => switch (kind) {
+            .null_ => if (is_root) return null else return .{ .code = .value_dropped, .note = "null" },
+            .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
+            .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            else => return null,
+        },
     }
 }
 
@@ -431,7 +444,7 @@ fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
         .json, .xml, .plist => false,
         .json5, .jsonc, .zon => pretty,
-        .yaml, .toml, .canonical, .fig, .ini, .dotenv, .properties => true,
+        .yaml, .toml, .canonical, .fig, .ini, .dotenv, .properties, .nestedtext => true,
     };
 }
 
@@ -442,7 +455,7 @@ fn commentsEmitted(format: Format, pretty: bool) bool {
 fn blockComments(format: Format) bool {
     return switch (format) {
         .json5, .jsonc, .canonical => true,
-        .json, .yaml, .toml, .zon, .fig, .xml, .ini, .dotenv, .properties, .plist => false,
+        .json, .yaml, .toml, .zon, .fig, .xml, .ini, .dotenv, .properties, .plist, .nestedtext => false,
     };
 }
 

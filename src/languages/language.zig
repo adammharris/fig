@@ -19,6 +19,7 @@ pub const INI = if (build_options.lang_ini) @import("ini/ini.zig").Language else
 pub const DOTENV = if (build_options.lang_dotenv) @import("dotenv/dotenv.zig").Language else void;
 pub const PROPERTIES = if (build_options.lang_properties) @import("properties/properties.zig").Language else void;
 pub const PLIST = if (build_options.lang_plist) @import("plist/plist.zig").Language else void;
+pub const NESTEDTEXT = if (build_options.lang_nestedtext) @import("nestedtext/nestedtext.zig").Language else void;
 
 /// A format `detect` can recognize. The `jsonc` dialect and `canonical` are
 /// deliberately excluded: jsonc overlaps json/json5 on most input, and
@@ -28,7 +29,7 @@ pub const PLIST = if (build_options.lang_plist) @import("plist/plist.zig").Langu
 /// content — it only wins detection on input that is either invalid for
 /// every stricter format, or uses fig-only structural syntax (`>` section
 /// depth, `*` elements, `+` continuations, `[]` group headers).
-pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig, ini, dotenv, properties, plist };
+pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig, ini, dotenv, properties, plist, nestedtext };
 
 /// Best-effort content sniffing: try each COMPILED-IN parser and return the
 /// first that accepts `input`, or null if none do (also what an
@@ -109,6 +110,23 @@ pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
         // (see the test below); `.properties`'s real path to selection is
         // its extension, same as `.env`.
         if (tryParse(PROPERTIES, allocator, input, PROPERTIES.default_type)) return .properties;
+    }
+    if (comptime build_options.lang_nestedtext) {
+        // NestedText goes LAST, after even `.properties` — not because its
+        // own grammar is unusually permissive (it isn't: keys/values have
+        // real restrictions, unlike `.properties`'s "nearly any text"), but
+        // because a huge, ordinary swath of it — plain `key: value` lines
+        // and `- item` lists — is ALSO valid YAML, and parses to a MEANINGFULLY
+        // DIFFERENT tree there (YAML types `port: 80` as an integer;
+        // NestedText's `port` is the untyped string `"80"`). Trying this
+        // before YAML would silently change what today's `detect()` returns
+        // for ordinary plain-YAML content already relied upon elsewhere in
+        // this codebase — a real regression, not just an academic ambiguity
+        // — so NestedText only gets a turn once every stricter-or-equally-
+        // plausible format (including YAML) has already rejected the input.
+        // Its real path to selection is the `.nt` extension (see
+        // `cli/args.zig`), exactly like dotenv/`.properties` above.
+        if (tryParse(NESTEDTEXT, allocator, input, NESTEDTEXT.default_type)) return .nestedtext;
     }
     return null;
 }

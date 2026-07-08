@@ -24,8 +24,12 @@ It currently supports the following formats:
 - JSON (strict, JSONC, JSON5)
 - TOML (1.1 and 1.2)
 - ZON (Zig Object Notation)
-- XML (experimental, not included by default)
-- Fig (.figl), an in-house authoring dialect authored by yours truly!
+- NestedText (nestedtext.org)
+- Java `.properties`
+- dotenv `.dotenv`
+- INI `.ini`
+- Property list `.plist`
+- Fig `.figl`, an in-house authoring dialect authored by yours truly!
 
 And you can use `fig` in the following programming languages:
 
@@ -84,7 +88,7 @@ MIT or Apache 2.0, at your discretion. If you use `fig` in your work, I would lo
 
 I took the JSON test suite at `testdata/json` from [Nicolas Seriot's JSONTestSuite repository](https://github.com/nst/JSONTestSuite). I'm grateful that it is licensed under the MIT license, so I am allowed to use it for `fig`. A copy of the license is included in this repository at `testdata/json/LICENSE`.
 
-Likewise, test suite licenses are included for JSON5, TOML, and YAML. I am thankful for each of them.
+Likewise, test suite licenses are included for JSON5, TOML, YAML, and NestedText (the latter from [KenKundert/nestedtext_tests](https://github.com/KenKundert/nestedtext_tests), MIT). I am thankful for each of them.
 
 I am also thankful for the `toml-edit` Rust crate, which provided inspiration for the complex structural edits required by any format-preserving TOML editor.
 
