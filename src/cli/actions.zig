@@ -81,9 +81,18 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
         // INI is read/serialize only so far; comment-preserving in-place
         // editing of it is not wired yet.
         .ini => return error.UnsupportedIniEdit,
-        // dotenv, .properties: same story as INI.
-        .dotenv => return error.UnsupportedDotenvEdit,
-        .properties => return error.UnsupportedPropertiesEdit,
+        // dotenv/.properties: flat `KEY=value`, no nesting — the generic
+        // block-mapping editor handles them directly (see `Editor`'s
+        // `kv_sep`). The replacement is taken verbatim as a literal, same as
+        // YAML/TOML/fig/ZON (only the JSON family needs requoting).
+        .dotenv => if (comptime build_options.lang_dotenv)
+            try edit_ops.applyToFile(fig.Language.DOTENV, a, io, input, opts.path, opts.replacement, op, fig.Language.DOTENV.default_type)
+        else
+            return error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties)
+            try edit_ops.applyToFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.replacement, op, fig.Language.PROPERTIES.default_type)
+        else
+            return error.FormatDisabled,
         // plist: same story as XML/INI — reader + printer only so far.
         .plist => return error.UnsupportedPlistEdit,
         // JSON5 is read/serialize only so far; comment-preserving
@@ -516,8 +525,14 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
                 return error.FormatDisabled,
             .xml => return error.UnsupportedXmlEdit,
             .ini => return error.UnsupportedIniEdit,
-            .dotenv => return error.UnsupportedDotenvEdit,
-            .properties => return error.UnsupportedPropertiesEdit,
+            .dotenv => if (comptime build_options.lang_dotenv)
+                try edit_ops.getCommentFromFile(fig.Language.DOTENV, a, io, input, opts.path, opts.inline_comment, fig.Language.DOTENV.default_type)
+            else
+                return error.FormatDisabled,
+            .properties => if (comptime build_options.lang_properties)
+                try edit_ops.getCommentFromFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.inline_comment, fig.Language.PROPERTIES.default_type)
+            else
+                return error.FormatDisabled,
             .plist => return error.UnsupportedPlistEdit,
             .canonical => return error.UnsupportedCanonicalEdit,
             .fig => if (comptime build_options.lang_fig)
@@ -569,8 +584,14 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
         .ini => return error.UnsupportedIniEdit,
-        .dotenv => return error.UnsupportedDotenvEdit,
-        .properties => return error.UnsupportedPropertiesEdit,
+        .dotenv => if (comptime build_options.lang_dotenv)
+            try edit_ops.applyToFile(fig.Language.DOTENV, a, io, input, opts.path, opts.text, op, fig.Language.DOTENV.default_type)
+        else
+            return error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties)
+            try edit_ops.applyToFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.text, op, fig.Language.PROPERTIES.default_type)
+        else
+            return error.FormatDisabled,
         .plist => return error.UnsupportedPlistEdit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)

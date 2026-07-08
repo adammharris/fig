@@ -30,6 +30,12 @@ const Fig = @import("languages/fig/fig.zig").Language;
 // per-op helpers here; only `zon_edit.appendZonFieldName` (the ZON dotted-key
 // quoting rule, shared with the printer's) lives in its editor_helper module.
 const Zon = @import("languages/zon/zon.zig").Language;
+// dotenv/.properties are flat-only (no nesting, no flow, no block scalars):
+// the generic block-mapping path (`insertBlockKey`/`writeMapValue`) already
+// covers everything they need once the separator is right — no dedicated
+// editor_helper module, unlike TOML/YAML/Fig's structural quirks.
+const Dotenv = @import("languages/dotenv/dotenv.zig").Language;
+const Properties = @import("languages/properties/properties.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("languages/language.zig").validate(Language);
@@ -38,16 +44,18 @@ pub fn Editor(comptime Language: type) type {
 
         // Which leading-comment syntax this language uses, so the owned-comment
         // scan in delete/move (`commentBlockStart`) recognizes the right marker.
-        // JSON/JSONC/JSON5 and ZON use `//` (ZON, like Zig); YAML and TOML use
-        // `#`. Plain JSON has no comments, but `.slashes` is harmless there since
-        // no `//` line can exist.
+        // JSON/JSONC/JSON5 and ZON use `//` (ZON, like Zig); YAML, TOML,
+        // dotenv, and .properties use `#`. Plain JSON has no comments, but
+        // `.slashes` is harmless there since no `//` line can exist.
         const comment_style: CommentStyle = if (Language == json.Language or Language == Zon) .slashes else .hash;
 
         // The mapping key/value separator spliced by the generic flow-entry
-        // insert helpers (`insertFlowMapEntry`/`insertFlowEntry`). Every editable
-        // format but ZON writes `key: value`; ZON's struct-field syntax is
-        // `.key = value`.
-        const kv_sep: []const u8 = if (Language == Zon) " = " else ": ";
+        // insert helpers (`insertFlowMapEntry`/`insertFlowEntry`) AND by
+        // `writeMapValue`'s block-insert path. Every editable format but ZON
+        // and the flat `KEY=value` formats writes `key: value`; ZON's
+        // struct-field syntax is `.key = value`; dotenv/.properties always
+        // print a bare `=` with no surrounding spaces (see each printer.zig).
+        const kv_sep: []const u8 = if (Language == Zon) " = " else if (Language == Dotenv or Language == Properties) "=" else ": ";
 
         allocator: std.mem.Allocator,
         source: std.ArrayList(u8) = .empty,
@@ -995,10 +1003,25 @@ pub fn Editor(comptime Language: type) type {
 
         fn insertBlockKey(self: *Self, parsed: Document, mapping: AST.Node, key_text: []const u8, value_text: []const u8) !void {
             const source = self.source.items;
-            const last = (try parsed.ast.lastChild(&mapping)).?;
-            const key_node = (try parsed.ast.firstChildKey(&mapping)).?;
-            const col = columnOf(source, parsed.span(key_node).start);
-            const insert_at = lineEndAfter(source, parsed.span(last).end -| 1);
+            // Every currently-supported block-mapping language represents an
+            // empty mapping as `.null_` (promoted via `promoteNullToMapping`),
+            // never as a childless `.mapping` — so `lastChild`/`firstChildKey`
+            // have always found a real entry to anchor on. dotenv/.properties
+            // break that assumption: their root is unconditionally `.mapping`
+            // even for a totally empty (or comment-only) file, so the very
+            // first `insertKey` into a fresh file lands here with zero
+            // children. Fall back to column 0 and the mapping's own span end
+            // (its whole-file span for the flat formats' root) rather than
+            // unwrapping a null.
+            const maybe_last = try parsed.ast.lastChild(&mapping);
+            const col: usize = if (try parsed.ast.firstChildKey(&mapping)) |key_node|
+                columnOf(source, parsed.span(key_node).start)
+            else
+                0;
+            const insert_at = if (maybe_last) |last|
+                lineEndAfter(source, parsed.span(last).end -| 1)
+            else
+                parsed.span(mapping).end;
 
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
@@ -1097,11 +1120,15 @@ pub fn Editor(comptime Language: type) type {
             // scalar that would read as a dash is quoted, so this is safe.)
             const is_seq = std.mem.startsWith(u8, first_line, "- ") or std.mem.eql(u8, first_line, "-");
             if (is_block_scalar or (nl == null and !is_seq)) {
-                try out.appendSlice(self.allocator, ": ");
+                try out.appendSlice(self.allocator, kv_sep);
                 try reindentInto(out, self.allocator, v, col);
                 return;
             }
-            // Block collection value: descend onto the next lines.
+            // Block collection value: descend onto the next lines. Only
+            // reachable for languages with real nested block containers
+            // (YAML/JSON5/fig) — dotenv/.properties values are always a
+            // single line, so they never take this branch; the literal `:`
+            // below is that block-mapping syntax, not `kv_sep`.
             const child_col = if (is_seq) col else col + 2;
             try out.append(self.allocator, ':');
             var it = std.mem.splitScalar(u8, v, '\n');
@@ -1986,4 +2013,78 @@ test "fig set vivifies a nested path from an empty document" {
     const parsed = try ed.getParsed();
     const v = try parsed.ast.getValByPath(&.{ .{ .key = "a" }, .{ .key = "b" }, .{ .key = "c" } });
     try testing.expectEqualStrings("hi", v.kind.string);
+}
+
+// ── dotenv / .properties (flat `KEY=value`) ─────────────────────────────────
+//
+// Both are flat-only (root mapping, no nesting/sequences), so unlike
+// YAML/TOML/fig their root is never `.null_` — even a totally empty file
+// parses as an empty (childless) `.mapping`. That's exactly the case
+// `insertBlockKey` used to `.?`-unwrap into a panic on (see its comment);
+// these tests exercise that path directly via `set`'s from-empty seed, which
+// is also how the CLI's `set` on a freshly created file behaves.
+
+test "dotenv set seeds the first key into an empty document" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    try expectSet(Dotenv, .DOTENV, "", &.{.{ .key = "FOO" }}, "bar", "FOO=bar\n");
+}
+
+test "dotenv set inserts a second key using '=', no spaces" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    try expectSet(Dotenv, .DOTENV, "FOO=bar\n", &.{.{ .key = "BAZ" }}, "qux", "FOO=bar\nBAZ=qux\n");
+}
+
+test "dotenv set replaces an existing value" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    try expectSet(Dotenv, .DOTENV, "FOO=bar\n", &.{.{ .key = "FOO" }}, "baz", "FOO=baz\n");
+}
+
+test "dotenv deleteKey removes the only entry, leaving an empty file" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    var ed: Editor(Dotenv) = .{ .allocator = testing.allocator, .format = .DOTENV };
+    try ed.init("FOO=bar\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "FOO" }});
+    try testing.expectEqualStrings("", ed.source.items);
+    // Deleting down to empty round-trips back through the same from-empty
+    // insert path a from-scratch `set` would use.
+    try ed.set(&.{.{ .key = "AGAIN" }}, "v2");
+    try testing.expectEqualStrings("AGAIN=v2\n", ed.source.items);
+}
+
+test "dotenv comment ops use # and round-trip" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    var ed: Editor(Dotenv) = .{ .allocator = testing.allocator, .format = .DOTENV };
+    try ed.init("FOO=bar\n");
+    defer ed.deinit();
+    try ed.addLeadingComment(&.{.{ .key = "FOO" }}, "explaining foo");
+    try ed.setTrailingComment(&.{.{ .key = "FOO" }}, "inline note");
+    try testing.expectEqualStrings("# explaining foo\nFOO=bar # inline note\n", ed.source.items);
+    const leading = (try ed.getLeadingComment(&.{.{ .key = "FOO" }})).?;
+    defer testing.allocator.free(leading);
+    try testing.expectEqualStrings("explaining foo", leading);
+    const trailing = (try ed.getTrailingComment(&.{.{ .key = "FOO" }})).?;
+    defer testing.allocator.free(trailing);
+    try testing.expectEqualStrings("inline note", trailing);
+}
+
+test "properties set seeds the first key into an empty document" {
+    if (comptime !build_options.lang_properties) return error.SkipZigTest;
+    try expectSet(Properties, .PROPERTIES, "", &.{.{ .key = "foo" }}, "bar", "foo=bar\n");
+}
+
+test "properties set inserts a second key using '=', no spaces" {
+    if (comptime !build_options.lang_properties) return error.SkipZigTest;
+    try expectSet(Properties, .PROPERTIES, "foo=bar\n", &.{.{ .key = "baz" }}, "qux", "foo=bar\nbaz=qux\n");
+}
+
+test "properties deleteKey removes the only entry, leaving an empty file" {
+    if (comptime !build_options.lang_properties) return error.SkipZigTest;
+    var ed: Editor(Properties) = .{ .allocator = testing.allocator, .format = .PROPERTIES };
+    try ed.init("foo=bar\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "foo" }});
+    try testing.expectEqualStrings("", ed.source.items);
+    try ed.set(&.{.{ .key = "again" }}, "v2");
+    try testing.expectEqualStrings("again=v2\n", ed.source.items);
 }

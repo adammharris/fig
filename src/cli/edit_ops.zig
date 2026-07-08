@@ -266,9 +266,12 @@ pub fn jsonDialect(format: Format) fig.Language.JSON.Type {
 pub fn emptyDocSeed(format: Format) ?[]const u8 {
     return switch (format) {
         .json, .jsonc, .json5 => "{}\n",
-        .yaml, .yml, .toml, .fig => "",
+        // dotenv/.properties parse an empty file as an empty (but present)
+        // root mapping — same empty-string seed as YAML/TOML/fig — so `set`
+        // can create one from scratch and land its first key into it.
+        .yaml, .yml, .toml, .fig, .dotenv, .properties => "",
         .zon => ".{}\n",
-        .xml, .canonical, .gron, .ini, .dotenv, .properties, .plist => null,
+        .xml, .canonical, .gron, .ini, .plist => null,
     };
 }
 
@@ -308,8 +311,18 @@ pub fn applyStructuralEdit(
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
         .ini => return error.UnsupportedIniEdit,
-        .dotenv => return error.UnsupportedDotenvEdit,
-        .properties => return error.UnsupportedPropertiesEdit,
+        // dotenv/.properties: flat `KEY=value` only (no nesting/sequences),
+        // so the generic block-mapping editor covers every op the CLI
+        // exposes here — `=` separator + the first-insert-into-an-empty-
+        // mapping fix live in `Editor`'s `kv_sep`/`insertBlockKey`.
+        .dotenv => if (comptime build_options.lang_dotenv)
+            try applyToFile(fig.Language.DOTENV, allocator, io, input, path, text, op, fig.Language.DOTENV.default_type)
+        else
+            return error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties)
+            try applyToFile(fig.Language.PROPERTIES, allocator, io, input, path, text, op, fig.Language.PROPERTIES.default_type)
+        else
+            return error.FormatDisabled,
         .plist => return error.UnsupportedPlistEdit,
         .json5 => return error.UnsupportedJson5Edit,
         .canonical => return error.UnsupportedCanonicalEdit,
@@ -391,6 +404,56 @@ test "applyEdit set upserts a scalar and reconciles a sequence on YAML" {
         defer t.allocator.free(out);
         try t.expectEqualStrings("tags:\n- c # third\n- a # first\n- d\n", out);
     }
+}
+
+test "applyEdit performs the structural ops on dotenv, including from-empty insert" {
+    if (comptime !build_options.lang_dotenv) return error.SkipZigTest;
+    const t = std.testing;
+    const D = fig.Language.DOTENV;
+    const dia = D.default_type;
+
+    // insert_key into a brand-new (empty) document — the from-scratch `set`
+    // seed path, and the case that used to panic in `insertBlockKey` before
+    // it learned to handle a childless block mapping.
+    {
+        const out = try applyEdit(D, t.allocator, "", &.{}, "bar", .{ .insert_key = "FOO" }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("FOO=bar\n", out);
+    }
+    // insert_key into an existing document uses '=' with no surrounding spaces.
+    {
+        const out = try applyEdit(D, t.allocator, "FOO=bar\n", &.{}, "qux", .{ .insert_key = "BAZ" }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("FOO=bar\nBAZ=qux\n", out);
+    }
+    // delete_key down to empty, then set seeds it again.
+    {
+        var dk_path = [_]fig.AST.PathSegment{.{ .key = "FOO" }};
+        const dk = try applyEdit(D, t.allocator, "FOO=bar\n", &dk_path, "", .delete_key, dia);
+        defer t.allocator.free(dk);
+        try t.expectEqualStrings("", dk);
+
+        var set_path = [_]fig.AST.PathSegment{.{ .key = "AGAIN" }};
+        const out = try applyEdit(D, t.allocator, dk, &set_path, "v2", .set, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("AGAIN=v2\n", out);
+    }
+}
+
+test "applyEdit performs the structural ops on .properties, including from-empty insert" {
+    if (comptime !build_options.lang_properties) return error.SkipZigTest;
+    const t = std.testing;
+    const P = fig.Language.PROPERTIES;
+    const dia = P.default_type;
+
+    const out = try applyEdit(P, t.allocator, "", &.{}, "bar", .{ .insert_key = "foo" }, dia);
+    defer t.allocator.free(out);
+    try t.expectEqualStrings("foo=bar\n", out);
+}
+
+test "emptyDocSeed: dotenv/.properties seed empty like YAML/TOML/fig" {
+    try std.testing.expectEqualStrings("", emptyDocSeed(.dotenv).?);
+    try std.testing.expectEqualStrings("", emptyDocSeed(.properties).?);
 }
 
 test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
