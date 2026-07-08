@@ -93,6 +93,14 @@ pub fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
     if (std.mem.eql(u8, ext, "figl")) return .{ .format = .fig };
     if (std.mem.eql(u8, ext, "fig")) return .{ .format = .fig };
 
+    // A dotenv file is conventionally named exactly `.env` — this function's
+    // dot-split (on the LAST `.`) gives that an "extension" of literal `env`,
+    // which doesn't match the `Format.dotenv` enum member name the generic
+    // `stringToEnum` lookup below relies on. (A multi-suffix variant like
+    // `.env.production` isn't recognized here — its last-dot extension is
+    // `production` — pass `--input dotenv` explicitly for those.)
+    if (std.mem.eql(u8, ext, "env")) return .{ .format = .dotenv };
+
     const format = std.meta.stringToEnum(Format, ext) orelse return null;
     return .{ .format = format };
 }

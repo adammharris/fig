@@ -67,6 +67,9 @@ pub fn build(b: *std.Build) void {
     const enable_zon = b.option(bool, "zon", "Include ZON support") orelse true;
     const enable_xml = b.option(bool, "xml", "Include XML support (opt-in; default off)") orelse false;
     const enable_fig = b.option(bool, "fig", "Include the fig authoring dialect support") orelse true;
+    const enable_ini = b.option(bool, "ini", "Include INI support") orelse true;
+    const enable_dotenv = b.option(bool, "dotenv", "Include dotenv (.env) support") orelse true;
+    const enable_properties = b.option(bool, "properties", "Include Java .properties support") orelse true;
     // The canonical form is the AST's own 1:1 oracle encoding — invaluable in
     // tests but not exposed through the C ABI or any binding, so shipping it in
     // the default library/CLI/wasm is dead weight for everyone but the test
@@ -87,6 +90,9 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "lang_zon", enable_zon);
     options.addOption(bool, "lang_xml", enable_xml);
     options.addOption(bool, "lang_fig", enable_fig);
+    options.addOption(bool, "lang_ini", enable_ini);
+    options.addOption(bool, "lang_dotenv", enable_dotenv);
+    options.addOption(bool, "lang_properties", enable_properties);
     options.addOption(bool, "lang_canonical", enable_canonical);
     // Library version surfaced through the C ABI (`fig_version` /
     // `fig_version_string`). Parsed from `.version` in `build.zig.zon` — the one

@@ -18,6 +18,9 @@ const TomlPrinter = if (build_options.lang_toml) @import("../languages/toml/prin
 const ZonPrinter = if (build_options.lang_zon) @import("../languages/zon/printer.zig") else void;
 const FigPrinter = if (build_options.lang_fig) @import("../languages/fig/printer.zig") else void;
 const XmlPrinter = if (build_options.lang_xml) @import("../languages/xml/printer.zig") else void;
+const IniPrinter = if (build_options.lang_ini) @import("../languages/ini/printer.zig") else void;
+const DotenvPrinter = if (build_options.lang_dotenv) @import("../languages/dotenv/printer.zig") else void;
+const PropertiesPrinter = if (build_options.lang_properties) @import("../languages/properties/printer.zig") else void;
 // The canonical form is the AST's own 1:1 oracle encoding. It is not exposed
 // through the C ABI or any binding, so it is opt-in (`-Dcanonical=true`) like
 // xml — but ALWAYS compiled for a test build (`is_test`), since the suite leans
@@ -31,7 +34,7 @@ const CanonicalPrinter = if (canonical_enabled) @import("../canonical/printer.zi
 /// (lossy at the edges — see src/languages/fig/DESIGN.md). `xml` requires its
 /// AST root to be a one-entry mapping (see `languages/xml/printer.zig`'s
 /// header) — anything else is `RootNotSingleElement`, not a silent fallback.
-pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, xml, canonical, fig };
+pub const SerializeFormat = enum { json, jsonc, json5, yaml, toml, zon, xml, canonical, fig, ini, dotenv, properties };
 
 /// Knobs controlling how a value is rendered. The defaults reproduce fig's
 /// historical output (pretty-printed, two-space indent), so `.{}` is a no-op
@@ -120,6 +123,8 @@ pub const SerializeError = Writer.Error || error{
     NonScalarValue, // XML: an `@`-attribute or `#text` entry held a mapping/sequence
     UnexpectedNodeKind, // fig: a node kind reached a printer path that expects a container
     FigUnrepresentableRoot, // fig: a scalar/null value has no authoring spelling as a document root
+    UnsupportedValue, // INI/dotenv: a sequence/mapping value has no spelling there
+    InvalidKey, // dotenv: a mapping key is not a valid bash identifier
 };
 
 /// Render the whole AST to `writer` in the given format, using default options.
@@ -142,6 +147,9 @@ pub fn serializeWith(self: *const AST, writer: *Writer, format: SerializeFormat,
         .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .canonical => if (comptime canonical_enabled) CanonicalPrinter.print(writer, ast) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .ini => if (comptime build_options.lang_ini) IniPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties) PropertiesPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
 
@@ -169,6 +177,9 @@ pub fn serializeFragmentWith(self: *const AST, writer: *Writer, format: Serializ
         .xml => if (comptime build_options.lang_xml) XmlPrinter.print(writer, ast, options) else error.FormatDisabled,
         .canonical => if (comptime canonical_enabled) CanonicalPrinter.print(writer, ast) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.printFragment(writer, ast, options) else error.FormatDisabled,
+        .ini => if (comptime build_options.lang_ini) IniPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.print(writer, ast, options) else error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties) PropertiesPrinter.print(writer, ast, options) else error.FormatDisabled,
     };
 }
 
@@ -191,5 +202,8 @@ pub fn serializeNodeWith(self: *const AST, writer: *Writer, format: SerializeFor
         .xml => if (comptime build_options.lang_xml) XmlPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
         .canonical => if (comptime canonical_enabled) CanonicalPrinter.printNode(writer, ast, id, 0) else error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig) FigPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .ini => if (comptime build_options.lang_ini) IniPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .dotenv => if (comptime build_options.lang_dotenv) DotenvPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
+        .properties => if (comptime build_options.lang_properties) PropertiesPrinter.printNode(writer, ast, id, 0, options) else error.FormatDisabled,
     };
 }

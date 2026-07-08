@@ -268,7 +268,7 @@ pub fn emptyDocSeed(format: Format) ?[]const u8 {
         .json, .jsonc, .json5 => "{}\n",
         .yaml, .yml, .toml, .fig => "",
         .zon => ".{}\n",
-        .xml, .canonical, .gron => null,
+        .xml, .canonical, .gron, .ini, .dotenv, .properties => null,
     };
 }
 
@@ -307,6 +307,9 @@ pub fn applyStructuralEdit(
         else
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
+        .ini => return error.UnsupportedIniEdit,
+        .dotenv => return error.UnsupportedDotenvEdit,
+        .properties => return error.UnsupportedPropertiesEdit,
         .json5 => return error.UnsupportedJson5Edit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)

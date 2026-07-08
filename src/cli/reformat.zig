@@ -61,6 +61,9 @@ pub fn reformatSlice(
         .canonical => .canonical,
         .fig => .fig,
         .xml => .xml,
+        .ini => .ini,
+        .dotenv => .dotenv,
+        .properties => .properties,
         .gron => unreachable, // rejected up front above
     };
 
@@ -172,8 +175,8 @@ pub fn convertSlice(
             .toml => .toml,
             .zon => .zon,
             // XML has no envelope of its own — see the matching comment on the
-            // `.get` action's twin switch above.
-            .canonical, .fig, .xml => null,
+            // `.get` action's twin switch above. INI/dotenv are the same story.
+            .canonical, .fig, .xml, .ini, .dotenv, .properties => null,
         };
         const decoded = try allocator.create(fig.AST);
         decoded.* = try fig.Lossless.decode(allocator, base_ast);
@@ -193,6 +196,9 @@ pub fn convertSlice(
         .canonical => .canonical,
         .fig => .fig,
         .xml => .xml,
+        .ini => .ini,
+        .dotenv => .dotenv,
+        .properties => .properties,
         .gron => unreachable, // rejected up front above
     };
 

@@ -15,6 +15,9 @@ pub const TOML = if (build_options.lang_toml) @import("toml/toml.zig").Language 
 pub const ZON = if (build_options.lang_zon) @import("zon/zon.zig").Language else void;
 pub const XML = if (build_options.lang_xml) @import("xml/xml.zig").Language else void;
 pub const FIG = if (build_options.lang_fig) @import("fig/fig.zig").Language else void;
+pub const INI = if (build_options.lang_ini) @import("ini/ini.zig").Language else void;
+pub const DOTENV = if (build_options.lang_dotenv) @import("dotenv/dotenv.zig").Language else void;
+pub const PROPERTIES = if (build_options.lang_properties) @import("properties/properties.zig").Language else void;
 
 /// A format `detect` can recognize. The `jsonc` dialect and `canonical` are
 /// deliberately excluded: jsonc overlaps json/json5 on most input, and
@@ -24,21 +27,26 @@ pub const FIG = if (build_options.lang_fig) @import("fig/fig.zig").Language else
 /// content — it only wins detection on input that is either invalid for
 /// every stricter format, or uses fig-only structural syntax (`>` section
 /// depth, `*` elements, `+` continuations, `[]` group headers).
-pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig };
+pub const Detected = enum { json, json5, yaml, toml, zon, xml, fig, ini, dotenv, properties };
 
 /// Best-effort content sniffing: try each COMPILED-IN parser and return the
 /// first that accepts `input`, or null if none do (also what an
 /// all-languages-disabled build returns). Order matters because the grammars
 /// overlap — from most to least strict: JSON/JSON5, ZON, XML, TOML, then fig,
-/// then YAML. fig sits just before YAML, not after it: YAML is so permissive
-/// (a bare line is a valid plain scalar) that almost anything falls through to
-/// it, which would starve fig of a turn if it went last. fig itself overlaps
-/// TOML heavily (both accept plain `key = value`), so it is tried only after
-/// TOML has had first claim — a plain TOML-shaped document still resolves to
-/// `.toml`, and fig only wins on content TOML can't parse (its `>`/`*`/`+`/`[]`
-/// structural markers) or that is otherwise TOML-invalid. This is a heuristic,
-/// not a proof: input valid as more than one format resolves to the earliest
-/// candidate in this order.
+/// then INI, then YAML. fig sits just before INI/YAML, not after: YAML is so
+/// permissive (a bare line is a valid plain scalar) that almost anything falls
+/// through to it, which would starve fig (and INI) of a turn if it went last.
+/// fig itself overlaps TOML heavily (both accept plain `key = value`), so it is
+/// tried only after TOML has had first claim — a plain TOML-shaped document
+/// still resolves to `.toml`, and fig only wins on content TOML can't parse
+/// (its `>`/`*`/`+`/`[]` structural markers) or that is otherwise TOML-invalid.
+/// INI overlaps TOML/fig too (same `[section]`/`key = value` shape) but accepts
+/// strictly more — any raw, unquoted value text — so it sits right after fig
+/// and wins only what both of those reject. dotenv sits last of the four
+/// key/value-shaped formats since INI's grammar shadows almost all of it too
+/// (see the `dotenv` branch below for the one thing that doesn't). This is a
+/// heuristic, not a proof: input valid as more than one format resolves to
+/// the earliest candidate in this order.
 pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
     if (comptime build_options.lang_json) {
         if (tryParse(JSON, allocator, input, .JSON)) return .json;
@@ -56,8 +64,38 @@ pub fn detect(allocator: Allocator, input: []const u8) ?Detected {
     if (comptime build_options.lang_fig) {
         if (tryParse(FIG, allocator, input, FIG.default_type)) return .fig;
     }
+    if (comptime build_options.lang_ini) {
+        // INI's grammar is also permissive (a bare `key = value` line, or an
+        // empty file, both parse), so it's tried only after everything
+        // stricter above has had first claim — it wins only on content those
+        // reject, e.g. a `[section]` header or an unquoted value with
+        // characters no TOML/fig scalar allows (`path = C:\a\b`).
+        if (tryParse(INI, allocator, input, INI.default_type)) return .ini;
+    }
+    if (comptime build_options.lang_dotenv) {
+        // dotenv is almost entirely shadowed by INI above: INI's key scanner
+        // accepts any non-`=`/newline run (so even `export FOO=bar` parses as
+        // one weird INI key) and its value decoding is quote-agnostic, so
+        // nearly anything dotenv accepts, INI already claimed first. The one
+        // thing only dotenv parses — a `"`/`'`-quoted value spanning a literal
+        // embedded newline (INI's value never crosses a physical line) — is
+        // this branch's actual reason to exist; `.env`'s real path to
+        // selection is its extension (`detectLanguageFromFileEnding`
+        // special-cases the `env` extension), not this content sniff.
+        if (tryParse(DOTENV, allocator, input, DOTENV.default_type)) return .dotenv;
+    }
     if (comptime build_options.lang_yaml) {
         if (tryParse(YAML, allocator, input, YAML.default_type)) return .yaml;
+    }
+    if (comptime build_options.lang_properties) {
+        // `.properties` is even more permissive than YAML: a line with no
+        // separator at all is still legal (a bare key, empty value — see
+        // `properties/tokenizer.zig`), so nearly any UTF-8 text parses. It
+        // therefore sits LAST, after YAML — the one thing this format
+        // accepts that YAML rejects outright is a malformed-YAML shape
+        // (see the test below); `.properties`'s real path to selection is
+        // its extension, same as `.env`.
+        if (tryParse(PROPERTIES, allocator, input, PROPERTIES.default_type)) return .properties;
     }
     return null;
 }
@@ -105,10 +143,32 @@ test "detect identifies each compiled-in format by content" {
         // to fig even though it's tried before YAML.
         try std.testing.expectEqual(Detected.fig, detect(a, "database\n> host = localhost\n").?);
     }
+    if (comptime build_options.lang_ini) {
+        // A `;`-led comment line is invalid JSON/ZON/XML/TOML (TOML has no `;`
+        // comment leader — its bare-key scanner rejects `;` outright) and not
+        // fig syntax either, so this resolves to INI even though it's tried
+        // right before YAML.
+        try std.testing.expectEqual(Detected.ini, detect(a, "; header\nname = fig\n").?);
+    }
+    if (comptime build_options.lang_dotenv) {
+        // A double-quoted value spanning a literal embedded newline is the one
+        // shape only dotenv parses: INI's value never crosses a physical line
+        // (it hits the line's `\n` first), so `[a]` on its own next line is a
+        // bad INI statement — this falls all the way through INI to dotenv.
+        try std.testing.expectEqual(Detected.dotenv, detect(a, "A=\"line1\nline2\"\n").?);
+    }
     if (comptime build_options.lang_yaml) {
-        // A plain mapping that is not valid JSON/TOML/fig/etc. falls through to
-        // YAML, the most permissive grammar and therefore tried last.
+        // A plain mapping that is not valid JSON/TOML/fig/INI/etc. falls
+        // through to YAML, the most permissive grammar and therefore tried
+        // second-to-last.
         try std.testing.expectEqual(Detected.yaml, detect(a, "key: value\n").?);
+    }
+    if (comptime build_options.lang_properties) {
+        // Malformed YAML (a scalar followed by unexpectedly-indented content)
+        // still parses as `.properties`: worst case, each line is just a bare
+        // key with an empty value (see `properties/tokenizer.zig`) — the most
+        // permissive grammar of all, so it's tried dead last.
+        try std.testing.expectEqual(Detected.properties, detect(a, "a: 1\n b: 2\n").?);
     }
 }
 

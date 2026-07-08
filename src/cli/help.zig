@@ -144,7 +144,7 @@ pub const Help = struct {
 
     pub fn get(term: *Io.Terminal, binary_name: []const u8) !void {
         try term.writer.print(
-            \\Usage: {s} get [--input json|json5|yaml|toml|zon|xml|canonical|fig|gron] [--output json|json5|yaml|toml|zon|xml|canonical|fig|gron] <file> [path]
+            \\Usage: {s} get [--input json|json5|yaml|toml|zon|xml|canonical|fig|ini|dotenv|properties|gron] [--output json|json5|yaml|toml|zon|xml|canonical|fig|ini|dotenv|properties|gron] <file> [path]
             \\  -i, --input: input format of file (defaults to the file extension,
             \\    then to sniffing the file's contents if the extension is unknown)
             \\  -o, --output:   output format (defaults to the input format)
@@ -165,6 +165,21 @@ pub const Help = struct {
             \\    (numbers, booleans, ...) prints as plain text, since XML has no
             \\    other type. Compiled in only with `-Dxml=true` (opt-in, off by
             \\    default). No in-place editor yet (`edit`/`comment` reject it).
+            \\  ini: `[section]` headers + `key = value` lines, `;`/`#` full-line
+            \\    comments; every value is plain text (no typed scalars). Holds a
+            \\    root mapping and one level of section nesting only — a value
+            \\    nested any deeper, or an array anywhere, has no INI spelling.
+            \\    No in-place editor yet (`edit`/`comment` reject it, like xml).
+            \\  dotenv (.env): flat `KEY=value` only, no sections/nesting; keys
+            \\    are bash identifiers, an optional `export ` prefix is accepted
+            \\    and discarded, and `"`/`'` quoting is real (escapes, multi-line
+            \\    values) — no `$VAR` interpolation is performed. No in-place
+            \\    editor yet, same as ini/xml.
+            \\  properties (Java .properties): flat `key=value` only (also
+            \\    accepts `key: value`/`key value`); backslash escapes on both
+            \\    key and value (`\t \n \r \f \\ \uXXXX`, plus `\` at end-of-line
+            \\    as a line continuation); `#`/`!` full-line comments. No
+            \\    in-place editor yet, same as ini/dotenv.
             \\  gron: a line-oriented `path = value;` projection (greppable, and
             \\    reversible with `-i gron`); must be selected explicitly, never
             \\    sniffed. Fidelity matches JSON (drops comments/anchors).
@@ -212,8 +227,9 @@ pub const Help = struct {
             \\  `ok` line per file and exits 0 when all parse; prints an error
             \\  line to stderr for each failing file and exits 1 if any fail.
             \\  -i, --input: parse every file as this format (json, jsonc, json5,
-            \\    yaml, toml, zon, xml, canonical). Default: infer from each
-            \\    file's extension, then by sniffing its contents.
+            \\    yaml, toml, zon, xml, canonical, ini, dotenv, properties).
+            \\    Default: infer from each file's extension, then by sniffing
+            \\    its contents.
             \\  -s, --spec: validate against a specific language version, where one
             \\    is selectable: TOML `1.0`/`1.1` (default 1.1), YAML `1.2.2`/`1.1`
             \\    (default 1.2.2).
@@ -285,9 +301,12 @@ pub const Help = struct {
             \\    rejected here — use embed-archetype mode, or pass --input to force
             \\    whole-file conversion anyway.
             \\  -i, --input, -o, --output: json, json5, yaml, toml, zon, xml, canonical,
-            \\    fig. `-o xml` requires the document to convert to have exactly one
-            \\    root key (see `get --help`'s `xml:` entry); xml is compiled in only
-            \\    with `-Dxml=true`, and canonical only with `-Dcanonical=true`.
+            \\    fig, ini, dotenv, properties. `-o xml` requires the document to
+            \\    convert to have exactly one root key (see `get --help`'s `xml:`
+            \\    entry); xml is compiled in only with `-Dxml=true`, and canonical
+            \\    only with `-Dcanonical=true`. ini/dotenv/properties have no
+            \\    in-place editor yet (`edit`/`set`/`comment` reject them, same as
+            \\    xml) — convert to/from them here instead.
             \\
             \\  Embed-archetype mode (--to-embed): rehouse a host document's
             \\    embedded region from one archetype's fence-and-content convention

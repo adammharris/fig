@@ -78,6 +78,12 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             return error.FormatDisabled,
         // XML is reader-only: no in-place editor yet.
         .xml => return error.UnsupportedXmlEdit,
+        // INI is read/serialize only so far; comment-preserving in-place
+        // editing of it is not wired yet.
+        .ini => return error.UnsupportedIniEdit,
+        // dotenv, .properties: same story as INI.
+        .dotenv => return error.UnsupportedDotenvEdit,
+        .properties => return error.UnsupportedPropertiesEdit,
         // JSON5 is read/serialize only so far; comment-preserving
         // in-place editing of it is not wired yet.
         .json5 => return error.UnsupportedJson5Edit,
@@ -348,8 +354,9 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
             // XML has no envelope of its own either: every scalar
             // collapses to element/attribute text regardless (see
             // `languages/xml/printer.zig`), so an envelope couldn't
-            // preserve anything a plain print doesn't already lose.
-            .canonical, .fig, .xml => null,
+            // preserve anything a plain print doesn't already lose. INI is
+            // the same story (also no typed scalars of its own).
+            .canonical, .fig, .xml, .ini, .dotenv, .properties => null,
         };
         const decoded = try a.create(fig.AST);
         decoded.* = try fig.Lossless.decode(a, base_ast);
@@ -383,6 +390,9 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
         .canonical => .canonical,
         .fig => .fig,
         .xml => .xml,
+        .ini => .ini,
+        .dotenv => .dotenv,
+        .properties => .properties,
         .gron => unreachable, // handled by the early return above
     };
 
@@ -481,6 +491,9 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             else
                 return error.FormatDisabled,
             .xml => return error.UnsupportedXmlEdit,
+            .ini => return error.UnsupportedIniEdit,
+            .dotenv => return error.UnsupportedDotenvEdit,
+            .properties => return error.UnsupportedPropertiesEdit,
             .canonical => return error.UnsupportedCanonicalEdit,
             .fig => if (comptime build_options.lang_fig)
                 try edit_ops.getCommentFromFile(fig.Language.FIG, a, io, input, opts.path, opts.inline_comment, fig.Language.FIG.default_type)
@@ -530,6 +543,9 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         else
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
+        .ini => return error.UnsupportedIniEdit,
+        .dotenv => return error.UnsupportedDotenvEdit,
+        .properties => return error.UnsupportedPropertiesEdit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)
             try edit_ops.applyToFile(fig.Language.FIG, a, io, input, opts.path, opts.text, op, fig.Language.FIG.default_type)

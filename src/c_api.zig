@@ -2012,6 +2012,8 @@ fn serializeStatus(err: AST.SerializeError) FigStatus {
         error.NonScalarValue,
         error.UnexpectedNodeKind,
         error.FigUnrepresentableRoot,
+        error.UnsupportedValue,
+        error.InvalidKey,
         => .unsupported_format,
         error.WriteFailed => .out_of_memory,
     };
@@ -2368,9 +2370,10 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             // XML has no type-carrying envelope to encode into — every scalar
             // becomes element/attribute text regardless (see
             // `languages/xml/printer.zig`), so an envelope couldn't preserve
-            // anything an envelope-free print doesn't already lose. All three
-            // fall through to decode-only (no envelope on output).
-            .canonical, .fig, .xml => null,
+            // anything an envelope-free print doesn't already lose. INI is the
+            // same story (no C ABI `FigFormat.ini` exists yet either). All
+            // four fall through to decode-only (no envelope on output).
+            .canonical, .fig, .xml, .ini, .dotenv, .properties => null,
         };
         const decoded = try arena.create(AST);
         decoded.* = try Lossless.decode(arena, base_ast);

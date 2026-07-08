@@ -39,6 +39,10 @@ test {
     _ = @import("languages/zon/zon.zig");
     _ = @import("languages/xml/xml.zig");
     _ = @import("languages/fig/fig.zig");
+    _ = @import("languages/ini/ini.zig");
+    _ = @import("languages/dotenv/dotenv.zig");
+    _ = @import("languages/properties/properties.zig");
+    _ = @import("languages/shared/flat_map.zig");
     _ = @import("editor.zig");
     _ = @import("embed.zig");
     _ = @import("lossless.zig");

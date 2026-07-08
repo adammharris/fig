@@ -130,7 +130,7 @@ pub const Options = struct {
 /// allocated in `arena`; the returned slice is owned by the caller's arena.
 pub fn analyze(arena: Allocator, ast: *const AST, root_id: AST.Node.Id, format: Format, options: Options) Allocator.Error![]Warning {
     var c = Collector{ .ast = ast, .arena = arena, .format = format, .options = options };
-    try c.walk(root_id, "");
+    try c.walk(root_id, "", 0);
     return c.warnings.toOwnedSlice(arena);
 }
 
@@ -146,10 +146,14 @@ const Collector = struct {
     }
 
     /// Visit one node: check its own value + comments, then recurse into a
-    /// container's children (building each child's path).
-    fn walk(self: *Collector, id: AST.Node.Id, path: []const u8) Allocator.Error!void {
+    /// container's children (building each child's path). `depth` is 0 for the
+    /// node `analyze` was called with, incrementing by one per container level
+    /// — used by `valueLoss`'s INI arm, whose capability depends on nesting
+    /// depth (root + one level of `[section]`s are fine; deeper is not) and
+    /// not just root-vs-not like every other format needs.
+    fn walk(self: *Collector, id: AST.Node.Id, path: []const u8, depth: usize) Allocator.Error!void {
         try self.checkComments(id, path);
-        try self.checkValue(id, path);
+        try self.checkValue(id, path, depth);
         switch (self.ast.nodes[id].kind) {
             .mapping => |first| {
                 var child = first;
@@ -159,7 +163,7 @@ const Collector = struct {
                     // A mapping entry's leading comment binds to its KEY node; its
                     // trailing/value losses ride the value node (checked in walk).
                     try self.checkComments(kv.key, child_path);
-                    try self.walk(kv.value, child_path);
+                    try self.walk(kv.value, child_path, depth + 1);
                 }
             },
             .sequence => |first| {
@@ -168,19 +172,15 @@ const Collector = struct {
                 while (child) |cid| : (child = self.ast.nodes[cid].next_sibling) {
                     const child_path = try indexPath(self.arena, path, i);
                     i += 1;
-                    try self.walk(cid, child_path);
+                    try self.walk(cid, child_path, depth + 1);
                 }
             },
             else => {},
         }
     }
 
-    fn checkValue(self: *Collector, id: AST.Node.Id, path: []const u8) Allocator.Error!void {
-        // `path.len == 0` uniquely identifies the node `analyze` was called
-        // with (see `Warning.path`'s doc comment) — every recursive call below
-        // builds a non-empty dotted/`[i]` child path, so this can't
-        // false-positive on a deeply nested node.
-        const loss = valueLoss(self.format, self.ast.nodes[id].kind, path.len == 0) orelse return;
+    fn checkValue(self: *Collector, id: AST.Node.Id, path: []const u8, depth: usize) Allocator.Error!void {
+        const loss = valueLoss(self.format, self.ast.nodes[id].kind, depth) orelse return;
         // Under lossless, unrepresentable values are enveloped, not lost.
         if (self.options.lossless) return;
         try self.add(.{ .code = loss.code, .cause = .format_limitation, .path = path, .note = loss.note });
@@ -236,11 +236,14 @@ fn indexPath(arena: Allocator, parent: []const u8, i: usize) Allocator.Error![]c
 const Loss = struct { code: Warning.Code, note: []const u8 };
 
 /// The value loss serializing `kind` to `format` would cause, or null if none.
-/// Lossless suppression is the caller's concern (`checkValue`). `is_root`
-/// distinguishes the node `analyze` was called with from a nested descendant —
-/// only fig's root-position rule (below) depends on it; every other branch
-/// ignores it.
-fn valueLoss(format: Format, kind: AST.Node.Kind, is_root: bool) ?Loss {
+/// Lossless suppression is the caller's concern (`checkValue`). `depth` is 0
+/// for the node `analyze` was called with, incrementing per container level:
+/// fig's root-position rule needs only root-vs-not (`depth == 0`); INI's
+/// needs the full depth, since it can hold a ROOT mapping and one level of
+/// `[section]` mappings but nothing nested deeper. Every other branch ignores
+/// it entirely.
+fn valueLoss(format: Format, kind: AST.Node.Kind, depth: usize) ?Loss {
+    const is_root = depth == 0;
     switch (format) {
         // Canonical is the lossless oracle: every kind round-trips.
         .canonical => return null,
@@ -301,6 +304,42 @@ fn valueLoss(format: Format, kind: AST.Node.Kind, is_root: bool) ?Loss {
         .xml => switch (kind) {
             .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
             .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            else => return null,
+        },
+        // INI: also no typed scalars (see the `.xml` arm above). Unlike every
+        // other format here, capability also depends on DEPTH: a root mapping
+        // (depth 0) and a `[section]` mapping (depth 1) both have a direct
+        // INI spelling, but a sequence at any depth, or a mapping nested two
+        // or more levels deep, has none at all — `languages/ini/printer.zig`
+        // hard-errors on both rather than degrading them.
+        .ini => switch (kind) {
+            .null_ => return .{ .code = .value_dropped, .note = "null" },
+            .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
+            .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            .sequence => return .{ .code = .value_dropped, .note = "array" },
+            .mapping => if (depth >= 2) return .{ .code = .value_dropped, .note = "table" } else return null,
+            else => return null,
+        },
+        // dotenv: same story as INI's typed-scalar handling, but flat only —
+        // even a depth-1 mapping (INI's `[section]`) has no dotenv spelling,
+        // since dotenv has no nesting concept at all.
+        .dotenv => switch (kind) {
+            .null_ => return .{ .code = .value_dropped, .note = "null" },
+            .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
+            .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            .sequence => return .{ .code = .value_dropped, .note = "array" },
+            .mapping => if (!is_root) return .{ .code = .value_dropped, .note = "table" } else return null,
+            else => return null,
+        },
+        // .properties: same story as dotenv (flat only, no typed scalars) —
+        // it's just as much a `Hashtable<String, String>` as dotenv is a flat
+        // environment map.
+        .properties => switch (kind) {
+            .null_ => return .{ .code = .value_dropped, .note = "null" },
+            .boolean, .number => return .{ .code = .type_degraded, .note = "string" },
+            .extended => |e| return .{ .code = .type_degraded, .note = degradedNote(format, e.kind) },
+            .sequence => return .{ .code = .value_dropped, .note = "array" },
+            .mapping => if (!is_root) return .{ .code = .value_dropped, .note = "table" } else return null,
             else => return null,
         },
     }
@@ -371,17 +410,18 @@ fn commentsEmitted(format: Format, pretty: bool) bool {
     return switch (format) {
         .json, .xml => false,
         .json5, .jsonc, .zon => pretty,
-        .yaml, .toml, .canonical, .fig => true,
+        .yaml, .toml, .canonical, .fig, .ini, .dotenv, .properties => true,
     };
 }
 
 /// Whether `format` has block-comment syntax (`/* … */`). Only the JSON5 family
-/// and canonical do; YAML/TOML/ZON/fig degrade a block comment to a line run;
-/// XML has no comments at all (moot — `commentsEmitted` already excludes it).
+/// and canonical do; YAML/TOML/ZON/fig/INI degrade a block comment to a line
+/// run; XML has no comments at all (moot — `commentsEmitted` already excludes
+/// it).
 fn blockComments(format: Format) bool {
     return switch (format) {
         .json5, .jsonc, .canonical => true,
-        .json, .yaml, .toml, .zon, .fig, .xml => false,
+        .json, .yaml, .toml, .zon, .fig, .xml, .ini, .dotenv, .properties => false,
     };
 }
 
