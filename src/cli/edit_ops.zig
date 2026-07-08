@@ -337,7 +337,14 @@ pub fn applyStructuralEdit(
             try applyToFile(fig.Language.PROPERTIES, allocator, io, input, path, text, op, fig.Language.PROPERTIES.default_type)
         else
             return error.FormatDisabled,
-        .plist => return error.UnsupportedPlistEdit,
+        // plist: XML-based but a strict, typed subset, so it (unlike generic
+        // `.xml`) has a real span-splicing editor. `Editor(Plist)` renders
+        // typed value elements and uses `<!-- -->` comments; see
+        // `languages/plist/editor_helper.zig`.
+        .plist => if (comptime build_options.lang_plist)
+            try applyToFile(fig.Language.PLIST, allocator, io, input, path, text, op, fig.Language.PLIST.default_type)
+        else
+            return error.FormatDisabled,
         .json5 => return error.UnsupportedJson5Edit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)

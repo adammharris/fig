@@ -239,7 +239,7 @@ fn expectNoAttrsThenBody(self: *Parser) ParseError!bool {
 }
 
 fn parseDict(self: *Parser, sp: Span) ParseError!Id {
-    if (try self.expectNoAttrsThenBody()) return self.buildMapping(&.{}, sp);
+    if (try self.expectNoAttrsThenBody()) return self.buildMapping(&.{}, self.extent(sp));
 
     var entries: std.ArrayList(Id) = .empty;
     defer entries.deinit(self.allocator);
@@ -256,6 +256,7 @@ fn parseDict(self: *Parser, sp: Span) ParseError!Id {
         if (self.curKind() != .name or !std.mem.eql(u8, self.curText(), "key")) return error.DictKeyExpected;
         self.advance();
         const key_text = try self.parseElementTextContent("key");
+        const key_extent = self.extent(key_sp); // full `<key>…</key>`
 
         try self.skipInsignificantWhitespace();
         if (self.curKind() != .lt) return error.DictValueMissing;
@@ -273,8 +274,12 @@ fn parseDict(self: *Parser, sp: Span) ParseError!Id {
             }
         }
         if (!replaced) {
-            const key_id = try self.stringNode(key_text, key_sp);
-            const kv_id = try self.addNode(.{ .keyvalue = .{ .key = key_id, .value = value_id } }, key_sp);
+            const key_id = try self.stringNode(key_text, key_extent);
+            // The entry span covers the whole `<key>…</key> … <value…>` pair
+            // (both lines) so `Editor(Plist)` deletes/moves an entry as a unit;
+            // the value's own end was recorded full-extent by `parseValue`.
+            const entry_span = Span.init(key_sp.start, self.spans.items[value_id].end);
+            const kv_id = try self.addNode(.{ .keyvalue = .{ .key = key_id, .value = value_id } }, entry_span);
             try entries.append(self.allocator, kv_id);
             try keys.append(self.allocator, key_text);
         }
@@ -284,11 +289,11 @@ fn parseDict(self: *Parser, sp: Span) ParseError!Id {
     self.advance();
     if (self.curKind() != .gt) return error.UnexpectedToken;
     self.advance();
-    return self.buildMapping(entries.items, sp);
+    return self.buildMapping(entries.items, self.extent(sp));
 }
 
 fn parseArray(self: *Parser, sp: Span) ParseError!Id {
-    if (try self.expectNoAttrsThenBody()) return self.buildSequence(&.{}, sp);
+    if (try self.expectNoAttrsThenBody()) return self.buildSequence(&.{}, self.extent(sp));
 
     var items: std.ArrayList(Id) = .empty;
     defer items.deinit(self.allocator);
@@ -303,12 +308,12 @@ fn parseArray(self: *Parser, sp: Span) ParseError!Id {
     self.advance();
     if (self.curKind() != .gt) return error.UnexpectedToken;
     self.advance();
-    return self.buildSequence(items.items, sp);
+    return self.buildSequence(items.items, self.extent(sp));
 }
 
 fn parseStringScalar(self: *Parser, sp: Span) ParseError!Id {
     const text = try self.parseElementTextContent("string");
-    return self.stringNode(text, sp);
+    return self.stringNode(text, self.extent(sp));
 }
 
 fn parseNumberScalar(self: *Parser, sp: Span, kind: NumberKind) ParseError!Id {
@@ -319,7 +324,7 @@ fn parseNumberScalar(self: *Parser, sp: Span, kind: NumberKind) ParseError!Id {
         .integer => if (!isValidIntegerText(trimmed)) return error.InvalidInteger,
         .float => if (!isValidRealText(trimmed)) return error.InvalidReal,
     }
-    return self.addNode(.{ .number = .{ .raw = trimmed, .kind = kind } }, sp);
+    return self.addNode(.{ .number = .{ .raw = trimmed, .kind = kind } }, self.extent(sp));
 }
 
 fn parseBoolScalar(self: *Parser, sp: Span, val: bool) ParseError!Id {
@@ -341,7 +346,7 @@ fn parseBoolScalar(self: *Parser, sp: Span, val: bool) ParseError!Id {
         if (self.curKind() != .gt) return error.UnexpectedToken;
         self.advance();
     }
-    return self.addNode(.{ .boolean = val }, sp);
+    return self.addNode(.{ .boolean = val }, self.extent(sp));
 }
 
 fn parseExtendedScalar(self: *Parser, sp: Span, kind: ExtKind) ParseError!Id {
@@ -353,7 +358,7 @@ fn parseExtendedScalar(self: *Parser, sp: Span, kind: ExtKind) ParseError!Id {
         .plist_date => if (!isValidDateText(text)) return error.InvalidDate,
         else => unreachable,
     }
-    return self.addNode(.{ .extended = .{ .kind = kind, .text = text } }, sp);
+    return self.addNode(.{ .extended = .{ .kind = kind, .text = text } }, self.extent(sp));
 }
 
 // ── scalar text content ──────────────────────────────────────────────────────
@@ -525,6 +530,18 @@ fn isAsciiWhitespace(c: u8) bool {
 }
 
 // ── node construction ────────────────────────────────────────────────────────
+
+/// Full-extent span for an element whose opening `<` was captured in
+/// `start_sp`, now that the whole element has been consumed: `tokens[pos-1]`
+/// is its just-consumed closing `>` / `/>`, so the span runs from the opening
+/// `<` through that close. The reader itself never needs extents (it walks the
+/// node tree, not spans); these are the edit-grade spans `Editor(Plist)`
+/// splices against — a value node covers `<string>hi</string>`, a container
+/// `<dict>…</dict>`, so a replace/delete swaps the whole element. See
+/// `editor_helper.zig`.
+fn extent(self: *const Parser, start_sp: Span) Span {
+    return Span.init(start_sp.start, self.tokens[self.pos - 1].span.end);
+}
 
 fn addNode(self: *Parser, kind: AST.Node.Kind, span: Span) ParseError!Id {
     const id: Id = @intCast(self.nodes.items.len);
@@ -738,6 +755,34 @@ test "entities decode in string and key content" {
         \\}
         \\
     );
+}
+
+test "node spans cover full element extents (edit-grade, not just the opening '<')" {
+    // The reader anchors nothing at a bare `<`; every node's span runs from its
+    // opening `<` through its closing `>` so `Editor(Plist)` can splice whole
+    // elements. Locks the contract the editor depends on.
+    var doc = try parse(testing.allocator, "<dict><key>k</key><integer>42</integer></dict>", .XML);
+    defer doc.deinit(testing.allocator);
+    const src = "<dict><key>k</key><integer>42</integer></dict>";
+
+    // root dict: whole document
+    try testing.expectEqualStrings(src, sliceSpan(src, doc.node_spans[doc.ast.root]));
+
+    // the value node: the full `<integer>42</integer>`
+    const val = try doc.ast.getValByPath(&.{.{ .key = "k" }});
+    try testing.expectEqualStrings("<integer>42</integer>", sliceSpan(src, doc.node_spans[val.id]));
+
+    // the key node: the full `<key>k</key>`
+    const key = try doc.ast.getKeyByPath(&.{.{ .key = "k" }});
+    try testing.expectEqualStrings("<key>k</key>", sliceSpan(src, doc.node_spans[key.id]));
+
+    // the keyvalue entry: `<key>…</key>` through the value's close, as a unit
+    const entry_id = doc.ast.nodes[doc.ast.root].kind.mapping.?;
+    try testing.expectEqualStrings("<key>k</key><integer>42</integer>", sliceSpan(src, doc.node_spans[entry_id]));
+}
+
+fn sliceSpan(src: []const u8, sp: Span) []const u8 {
+    return src[sp.start..sp.end];
 }
 
 test "errors" {

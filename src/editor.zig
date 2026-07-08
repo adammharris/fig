@@ -44,6 +44,16 @@ const Properties = @import("languages/properties/properties.zig").Language;
 // concern it exercises; see that module's header for the split rationale.
 const ini_edit = @import("languages/ini/editor_helper.zig");
 const Ini = @import("languages/ini/ini.zig").Language;
+// plist is the odd one out: XML-based, so an entry is a *pair of sibling
+// elements* (`<key>k</key>` then a typed value element) on separate lines, not
+// a `key<sep>value` line. Almost nothing in the line-oriented generic engine
+// fits, so — even more than TOML/YAML/fig — plist delegates its structural ops
+// (value render+replace, dict key insert, array append/prepend) wholesale to
+// `plist_edit`; only the line-based delete/remove paths (which happen to match
+// once `comment_style` is `.xml_comment`) ride the generic code. See that
+// module's header. Comments are `<!-- ... -->`, handled there too.
+const plist_edit = @import("languages/plist/editor_helper.zig");
+const Plist = @import("languages/plist/plist.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("languages/language.zig").validate(Language);
@@ -62,6 +72,8 @@ pub fn Editor(comptime Language: type) type {
             .slashes
         else if (Language == Ini)
             .semicolon
+        else if (Language == Plist)
+            .xml_comment
         else
             .hash;
 
@@ -139,6 +151,11 @@ pub fn Editor(comptime Language: type) type {
                 return err;
             };
             const span = parsed.span(node);
+            // plist has no bare scalar literals — a value is a typed wrapper
+            // element (`<integer>42</integer>`) — so `replacement` is rendered
+            // into one (fig `sniffBare` typing, or spliced verbatim when it is
+            // already `<…>`) and swapped for the whole value element's span.
+            if (Language == Plist) return plist_edit.plistReplaceValue(self, parsed, node, replacement);
             // For a YAML mapping value, reframe the whole `: value` so the new
             // value is correctly shaped whatever its form — a scalar stays
             // inline, a block collection descends onto the following lines —
@@ -226,7 +243,13 @@ pub fn Editor(comptime Language: type) type {
                     // a nonsense `section = {}` root key instead of a real
                     // section. Skip the vivify and surface the original
                     // `NotFound` — "no such section" — rather than corrupt.
-                    if (Language != Ini and path.len >= 2 and insert_err == error.NotFound) {
+                    // plist joins INI in opting out: `set`'s vivify seed is the
+                    // flow `{}` literal, which plist has no reader for (an empty
+                    // dict is `<dict/>`, not a value literal you can splice as
+                    // `value_text`). Rather than teach the seed a plist spelling,
+                    // surface the original `NotFound` — an intermediate `<dict>`
+                    // must already exist to land a nested key.
+                    if (Language != Ini and Language != Plist and path.len >= 2 and insert_err == error.NotFound) {
                         try self.set(path[0 .. path.len - 1], emptyMapLiteral());
                         try self.insertKey(path[0 .. path.len - 1], key_text, value_text);
                     } else return replace_err;
@@ -337,6 +360,7 @@ pub fn Editor(comptime Language: type) type {
         /// each line becomes its own comment line. Returns `CommentsUnsupported`
         /// for a dialect without comment syntax (strict JSON).
         pub fn addLeadingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
+            if (Language == Plist) return plist_edit.plistAddLeadingComment(self, path, text);
             const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
             const parsed = try self.getParsed();
             const node = try parsed.ast.getNodeByPath(path);
@@ -392,6 +416,7 @@ pub fn Editor(comptime Language: type) type {
         /// dialect without comment syntax (strict JSON), `MultilineComment` if
         /// `text` contains a newline.
         pub fn setTrailingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
+            if (Language == Plist) return plist_edit.plistSetTrailingComment(self, path, text);
             const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.MultilineComment;
             const win = try self.trailingCommentWindow(path);
@@ -424,6 +449,7 @@ pub fn Editor(comptime Language: type) type {
         /// the node has none. Returns `CommentsUnsupported` for a dialect without
         /// comment syntax (strict JSON).
         pub fn deleteLeadingComments(self: *Self, path: []const AST.PathSegment) !void {
+            if (Language == Plist) return plist_edit.plistDeleteLeadingComments(self, path);
             _ = self.lineCommentMarker() orelse return error.CommentsUnsupported;
             const parsed = try self.getParsed();
             const node = try parsed.ast.getNodeByPath(path);
@@ -439,6 +465,7 @@ pub fn Editor(comptime Language: type) type {
         /// A no-op when there is none. Returns `CommentsUnsupported` for a dialect
         /// without comment syntax (strict JSON).
         pub fn deleteTrailingComment(self: *Self, path: []const AST.PathSegment) !void {
+            if (Language == Plist) return plist_edit.plistDeleteTrailingComment(self, path);
             const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
@@ -457,6 +484,7 @@ pub fn Editor(comptime Language: type) type {
         /// ""). The caller owns the returned bytes. Returns `CommentsUnsupported`
         /// for a dialect without comment syntax (strict JSON).
         pub fn getLeadingComment(self: *Self, path: []const AST.PathSegment) !?[]u8 {
+            if (Language == Plist) return plist_edit.plistGetLeadingComment(self, path);
             const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
             const parsed = try self.getParsed();
             const node = try parsed.ast.getNodeByPath(path);
@@ -488,6 +516,7 @@ pub fn Editor(comptime Language: type) type {
         /// which yields ""). The caller owns the returned bytes. Returns
         /// `CommentsUnsupported` for a dialect without comment syntax (strict JSON).
         pub fn getTrailingComment(self: *Self, path: []const AST.PathSegment) !?[]u8 {
+            if (Language == Plist) return plist_edit.plistGetTrailingComment(self, path);
             const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
@@ -523,6 +552,8 @@ pub fn Editor(comptime Language: type) type {
                 return fig_edit.figInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
             if (Language == Ini)
                 return ini_edit.iniInsertKey(self, parsed, node, key_text, value_text);
+            if (Language == Plist)
+                return plist_edit.plistInsertKey(self, parsed, node, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -589,6 +620,7 @@ pub fn Editor(comptime Language: type) type {
             const parsed = try self.getParsed();
             const node = try parsed.ast.getValByPath(path);
             if (node.kind != .sequence) return error.NotASequence;
+            if (Language == Plist) return plist_edit.plistAppendItem(self, parsed, node, value_text);
             const span = parsed.span(node);
             const source = self.source.items;
             if (isFlow(source, span)) {
@@ -612,6 +644,7 @@ pub fn Editor(comptime Language: type) type {
             const parsed = try self.getParsed();
             const node = try parsed.ast.getValByPath(path);
             if (node.kind != .sequence) return error.NotASequence;
+            if (Language == Plist) return plist_edit.plistPrependItem(self, parsed, node, value_text);
             const span = parsed.span(node);
             const source = self.source.items;
             if (isFlow(source, span)) {
@@ -1530,7 +1563,7 @@ pub fn flowOpenEnd(source: []const u8, span: Span) usize {
 
 /// Comment syntax for the owned-comment scan: `#` line comments (YAML/TOML) vs
 /// `//` line comments and `/* */` blocks (JSON5/JSONC).
-pub const CommentStyle = enum { hash, slashes, semicolon };
+pub const CommentStyle = enum { hash, slashes, semicolon, xml_comment };
 
 /// Grow `line_start` upward to absorb an entry's owned comment block: the
 /// contiguous run of comment lines immediately above, with no intervening blank
@@ -1550,6 +1583,13 @@ pub fn commentBlockStart(source: []const u8, line_start: usize, style: CommentSt
         const is_comment = switch (style) {
             .hash => trimmed.len > 0 and trimmed[0] == '#',
             .semicolon => trimmed.len > 0 and trimmed[0] == ';',
+            // plist/XML `<!-- ... -->`. Only the common own-line, single-line
+            // comment is recognized for the owned-block scan (a multi-line
+            // `<!--\n...\n-->` block is not walked as a unit — a rare shape a
+            // hand-editor is unlikely to place directly above a key). A line
+            // that merely opens a block (`<!--` with no closing `-->`) is not
+            // treated as an owned comment, so a delete never half-swallows one.
+            .xml_comment => std.mem.startsWith(u8, trimmed, "<!--") and std.mem.endsWith(u8, trimmed, "-->"),
             .slashes => blk: {
                 if (in_block) {
                     // Inside a block comment, moving up: every line belongs to it

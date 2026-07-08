@@ -20,10 +20,15 @@ pub const Type = enum {
 /// ZON/…) and writes back out via `Printer` — the documented inverse mapping
 /// described in `parser.zig`'s header (a `dict` is a real mapping, an `array`
 /// a real sequence, `date`/`data` ride the `extended` scalar). It IS an
-/// `AST.SerializeFormat` member (`.plist`), so `ast.serialize` routes here
-/// like every other format; like XML/INI/dotenv/`.properties`, it currently
-/// has no in-place (span-splicing) editor — `fig edit`/`fig comment` on a
-/// `.plist` file still error, a separate, later feature.
+/// `AST.SerializeFormat` member (`.plist`), so `ast.serialize` routes here like
+/// every other format. It also HAS an in-place (span-splicing) editor —
+/// `Editor(Plist)` via `editor_helper.zig` — so `fig edit`/`set`/`insert`/
+/// `delete`/`comment` work on a `.plist`; unlike the line-oriented formats it
+/// renders typed value elements (fig `sniffBare` typing) and uses `<!-- -->`
+/// comments. The generic XML format (`.xml`) still has none — a document syntax
+/// whose ambiguous edit surface (attributes vs text vs mixed content) is a
+/// separate, deferred effort; plist works because its DTD gives every element a
+/// fixed, unambiguous typed meaning.
 pub const Language = struct {
     pub const Type = plist.Type;
     pub const Parser = plist.Parser;
@@ -43,4 +48,5 @@ pub const Language = struct {
 test {
     _ = @import("parser.zig");
     _ = @import("printer.zig");
+    _ = @import("editor_helper.zig");
 }

@@ -96,8 +96,14 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             try edit_ops.applyToFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.replacement, op, fig.Language.PROPERTIES.default_type)
         else
             return error.FormatDisabled,
-        // plist: same story as XML/INI — reader + printer only so far.
-        .plist => return error.UnsupportedPlistEdit,
+        // plist: unlike generic XML, plist HAS an in-place editor
+        // (`Editor(Plist)`). The replacement is rendered into a typed value
+        // element (fig `sniffBare` typing, or spliced verbatim when it already
+        // starts with `<`) — see `languages/plist/editor_helper.zig`.
+        .plist => if (comptime build_options.lang_plist)
+            try edit_ops.applyToFile(fig.Language.PLIST, a, io, input, opts.path, opts.replacement, op, fig.Language.PLIST.default_type)
+        else
+            return error.FormatDisabled,
         // JSON5 is read/serialize only so far; comment-preserving
         // in-place editing of it is not wired yet.
         .json5 => return error.UnsupportedJson5Edit,
@@ -543,7 +549,12 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
                 try edit_ops.getCommentFromFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.inline_comment, fig.Language.PROPERTIES.default_type)
             else
                 return error.FormatDisabled,
-            .plist => return error.UnsupportedPlistEdit,
+            // plist comments are `<!-- ... -->`; both leading (own-line) and
+            // `--inline` trailing reads are supported (see `plist_edit`).
+            .plist => if (comptime build_options.lang_plist)
+                try edit_ops.getCommentFromFile(fig.Language.PLIST, a, io, input, opts.path, opts.inline_comment, fig.Language.PLIST.default_type)
+            else
+                return error.FormatDisabled,
             .canonical => return error.UnsupportedCanonicalEdit,
             .fig => if (comptime build_options.lang_fig)
                 try edit_ops.getCommentFromFile(fig.Language.FIG, a, io, input, opts.path, opts.inline_comment, fig.Language.FIG.default_type)
@@ -607,7 +618,11 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             try edit_ops.applyToFile(fig.Language.PROPERTIES, a, io, input, opts.path, opts.text, op, fig.Language.PROPERTIES.default_type)
         else
             return error.FormatDisabled,
-        .plist => return error.UnsupportedPlistEdit,
+        // plist: full in-place editing (insert/delete/comment) via `Editor(Plist)`.
+        .plist => if (comptime build_options.lang_plist)
+            try edit_ops.applyToFile(fig.Language.PLIST, a, io, input, opts.path, opts.text, op, fig.Language.PLIST.default_type)
+        else
+            return error.FormatDisabled,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)
             try edit_ops.applyToFile(fig.Language.FIG, a, io, input, opts.path, opts.text, op, fig.Language.FIG.default_type)
