@@ -71,9 +71,6 @@ test {
     if (build_options.toml_conformance) {
         _ = @import("languages/toml/conformance.zig");
     }
-    if (build_options.xml_conformance) {
-        _ = @import("languages/xml/conformance.zig");
-    }
     if (build_options.plist_conformance) {
         _ = @import("languages/plist/conformance.zig");
     }

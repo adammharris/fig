@@ -158,13 +158,16 @@ pub const Help = struct {
             \\    use `canonical`/`--lossless` for those. `-o fig` prints in
             \\    house style; use `fig fmt` to
             \\    rewrite a file in place instead of printing to stdout.
-            \\  xml: config-oriented, not a general XML tool — an element becomes
-            \\    a mapping, `@name` attributes and `#text` mixed content fold
-            \\    into it, repeated children become an array. `-o xml` requires
-            \\    the document to have exactly one root key; every scalar
-            \\    (numbers, booleans, ...) prints as plain text, since XML has no
-            \\    other type. Compiled in only with `-Dxml=true` (opt-in, off by
-            \\    default). No in-place editor yet (`edit`/`comment` reject it).
+            \\  xml: a best-effort fold, not a general XML tool and not a
+            \\    first-class format — an element becomes a mapping, `@name`
+            \\    attributes and `#text` mixed content fold into it, repeated
+            \\    children become an array. `-o xml` requires the document to have
+            \\    exactly one root key; every scalar (numbers, booleans, ...)
+            \\    prints as plain text, since XML has no other type. Compiled in
+            \\    only with `-Dxml=true` (opt-in, off by default), has no in-place
+            \\    editor (`edit`/`comment` reject it), and is slated for removal in
+            \\    a future major (see docs/BREAKING-CHANGES.md) — use `plist` for
+            \\    structured XML config.
             \\  ini: `[section]` headers + `key = value` lines, `;`/`#` full-line
             \\    comments; every value is plain text (no typed scalars). Holds a
             \\    root mapping and one level of section nesting only — a value

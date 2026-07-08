@@ -14,14 +14,31 @@ pub const Type = enum {
     XML_1_0,
 };
 
-/// XML reads into the shared AST (so XML converts *into* JSON/YAML/TOML/ZON)
-/// and writes back out via `Printer` — the documented inverse mapping described
-/// in `printer.zig`'s header (root is a one-entry mapping, `@`-keys are
-/// attributes, `#text` is text content, repeated children round-trip through a
-/// `sequence`). It IS an `AST.SerializeFormat` member (`.xml`), so `ast.serialize`
-/// routes here like every other format; unlike the others it currently has no
-/// in-place (span-splicing) editor — `fig edit`/`fig comment` on an XML file
-/// still error (`UnsupportedXmlEdit`), a separate, larger feature.
+/// This module has two roles, and they are NOT equally permanent:
+///
+///   1. `Tokenizer` — the shared XML *lexing substrate*. This is the durable
+///      part. It is a plain XML lexer with no config-format opinions, and typed
+///      XML flavors are built on top of it: `plist` already delegates all lexing
+///      here (`../plist/parser.zig`), and future flavors (`.csproj`,
+///      `AndroidManifest.xml`, …) are meant to as well. It lives under
+///      `languages/xml/` as a neutral home precisely so no single flavor owns it.
+///
+///   2. `Parser`/`Printer` — the generic XML *fold*, a DEMOTED, best-effort
+///      convenience, not a first-class config format. It reads into the shared
+///      AST (root is a one-entry mapping, `@`-keys are attributes, `#text` is
+///      text content, repeated children round-trip through a `sequence`) and
+///      writes back via `Printer`. It is lossy at the edges (no typed scalars —
+///      every value prints as text) and shape-constrained (`-o xml` needs a
+///      single root key). It IS an `AST.SerializeFormat` member (`.xml`) so
+///      `ast.serialize` still routes here, but it is **opt-in and off by default**
+///      (`-Dxml=true`), has no in-place editor (`fig edit`/`fig comment` error
+///      with `UnsupportedXmlEdit` — deliberately, not "not yet": generic XML's
+///      attributes-vs-text-vs-mixed-content edit surface is fundamentally
+///      ambiguous in a way a fixed DTD like plist's is not), and is slated for
+///      removal as a selectable format in a future major (see
+///      `docs/BREAKING-CHANGES.md`). Reach for `plist` (typed, round-trips,
+///      editable) for structured XML; the generic fold is only for ad-hoc
+///      "get arbitrary XML into JSON" conversions.
 pub const Language = struct {
     pub const Type = xml.Type;
     pub const Parser = xml.Parser;

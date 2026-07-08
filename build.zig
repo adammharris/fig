@@ -49,7 +49,6 @@ pub fn build(b: *std.Build) void {
     const run_json5_conformance = b.option(bool, "json5-conformance", "Run JSON5 conformance tests") orelse false;
     const run_yaml_conformance = b.option(bool, "yaml-conformance", "Run YAML conformance tests") orelse false;
     const run_toml_conformance = b.option(bool, "toml-conformance", "Run TOML conformance tests") orelse false;
-    const run_xml_conformance = b.option(bool, "xml-conformance", "Run XML conformance tests") orelse false;
     const run_plist_conformance = b.option(bool, "plist-conformance", "Run plist conformance tests") orelse false;
 
     // Per-language feature gates. Any format can be compiled out to shrink the
@@ -58,10 +57,15 @@ pub fn build(b: *std.Build) void {
     // language rather than assuming a JSON base. A build with no language at all
     // is rejected at the call sites that need one (e.g. the C ABI editor union).
     // Default: everything on, EXCEPT xml — it stays opt-in (`-Dxml=true`) even
-    // in a full build: it is the newest/least battle-tested format (writer
-    // added after the others, no conformance harness wired up yet — see
-    // `src/languages/xml/conformance.zig`), so it shouldn't ride along silently
-    // in every consumer's default build until it has earned that.
+    // in a full build. Generic XML is a demoted, best-effort *fold* (attributes/
+    // `#text` collapse, no typed scalars, single-root-key output), NOT a
+    // first-class config format, and it is slated for removal as a selectable
+    // format in a future major (see `docs/BREAKING-CHANGES.md`). What survives
+    // that removal is the shared XML *lexing substrate* — `xml/tokenizer.zig` —
+    // that typed flavors (plist, and future `.csproj`/manifest readers) sit on
+    // top of; that layer is always compiled when any XML-family flavor is, so it
+    // does not ride on this gate. The gate here controls only the generic
+    // reader/printer, which is why non-users shouldn't pay for it by default.
     const enable_json = b.option(bool, "json", "Include JSON/JSONC/JSON5 support") orelse true;
     const enable_yaml = b.option(bool, "yaml", "Include YAML support") orelse true;
     const enable_toml = b.option(bool, "toml", "Include TOML support") orelse true;
@@ -71,9 +75,12 @@ pub fn build(b: *std.Build) void {
     const enable_ini = b.option(bool, "ini", "Include INI support") orelse true;
     const enable_dotenv = b.option(bool, "dotenv", "Include dotenv (.env) support") orelse true;
     const enable_properties = b.option(bool, "properties", "Include Java .properties support") orelse true;
-    // plist (XML variant only so far): same reasoning as xml — newest, least
-    // battle-tested format (no conformance harness wired up yet — see
-    // `src/languages/plist/conformance.zig`), opt-in via `-Dplist=true`.
+    // plist (XML variant only so far): the newest, least battle-tested format
+    // (no conformance harness wired up yet — see
+    // `src/languages/plist/conformance.zig`), opt-in via `-Dplist=true`. Unlike
+    // generic xml above, plist is a first-class typed flavor (typed scalars,
+    // round-trips, in-place editor) and is the intended long-term home for
+    // structured XML config — it is not slated for removal.
     const enable_plist = b.option(bool, "plist", "Include Apple XML property list support (opt-in; default off)") orelse false;
     // The canonical form is the AST's own 1:1 oracle encoding — invaluable in
     // tests but not exposed through the C ABI or any binding, so shipping it in
@@ -87,7 +94,6 @@ pub fn build(b: *std.Build) void {
     options.addOption(bool, "json5_conformance", run_json5_conformance);
     options.addOption(bool, "yaml_conformance", run_yaml_conformance);
     options.addOption(bool, "toml_conformance", run_toml_conformance);
-    options.addOption(bool, "xml_conformance", run_xml_conformance);
     options.addOption(bool, "plist_conformance", run_plist_conformance);
     // Language gates, consumed across the codebase as `build_options.lang_*`.
     options.addOption(bool, "lang_json", enable_json);
