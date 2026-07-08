@@ -445,11 +445,14 @@ pub fn build(b: *std.Build) void {
 
     // The writer counterpart of version-floor: set/bump one artifact's version
     // and keep every coupled field valid in one shot (the fig-wasi==cli pin, the
-    // fig-macros pin, and the artifact>=core floor — see docs/VERSIONING.md). It
-    // rewrites the real manifests (not addFileArg cache copies), so it takes the
-    // repo root like sync-figl and is marked has_side_effects. Not part of
-    // `check` — it mutates the tree rather than guarding it. The `--` args
-    // (<artifact> <version|major|minor|patch> [--dry-run]) are forwarded through.
+    // fig-macros pin, the artifact>=core floor, and fig.md's frontmatter version
+    // — see docs/VERSIONING.md). It rewrites the real manifests (not addFileArg
+    // cache copies), so it takes the repo root like sync-figl and is marked
+    // has_side_effects. Not part of `check` — it mutates the tree rather than
+    // guarding it. The `--` args (<artifact> <version|major|minor|patch>
+    // [--dry-run]) are forwarded through. It also takes the just-built `fig`
+    // binary itself (same self-hosting pattern as sync-figl below) so it can
+    // sync fig.md's frontmatter with `fig set` instead of hand-parsing markdown.
     const version_set = b.addExecutable(.{
         .name = "version_set",
         .root_module = b.createModule(.{
@@ -459,6 +462,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const version_set_run = b.addRunArtifact(version_set);
+    version_set_run.addArtifactArg(exe);
     version_set_run.addArg(b.pathFromRoot("."));
     if (b.args) |args| version_set_run.addArgs(args);
     version_set_run.has_side_effects = true;

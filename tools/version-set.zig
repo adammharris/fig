@@ -5,8 +5,11 @@
 //! checker by forgetting a coupled field). See docs/VERSIONING.md.
 //!
 //! Usage (driven by build.zig — `zig build version-set -- <args>`):
-//!   version-set <repo-root> <artifact> <version|major|minor|patch> [--dry-run]
+//!   version-set <fig-binary> <repo-root> <artifact> <version|major|minor|patch> [--dry-run]
 //!
+//!   fig-binary: path to a built `fig` CLI binary (injected by build.zig via
+//!               addArtifactArg — not something you pass through `--`), used
+//!               to sync fig.md by shelling out rather than hand-parsing it.
 //!   artifact: core | cli | rust | npm   (wasi is derived — see below)
 //!   version : an explicit SemVer ("2.4.0") OR a bump keyword incrementing the
 //!             artifact's current value (major -> X+1.0.0, minor -> X.Y+1.0,
@@ -20,7 +23,11 @@
 //!   * the Rust `fig-macros` dependency pin tracks the `[workspace.package]`
 //!     version, so a `rust` bump edits both;
 //!   * the `artifact >= core` floor: bumping `core` auto-raises any of
-//!     cli/rust/npm that would fall below it (and, via the wasi pin, wasi too).
+//!     cli/rust/npm that would fall below it (and, via the wasi pin, wasi too);
+//!   * fig.md's frontmatter `version` (the README's displayed version) mirrors
+//!     the core version exactly, kept in sync via `fig set fig.md version ...`
+//!     — dogfooding fig's own frontmatter editing instead of hand-parsing the
+//!     markdown here (same self-hosting pattern as `tools/sync-figl.zig`).
 //!
 //! After writing manifests it refreshes the lockfiles (Cargo.lock,
 //! package-lock.json) by shelling out to cargo/npm; if a toolchain is missing it
@@ -45,6 +52,7 @@ const build_zig_rel = "build.zig";
 const cargo_rel = "bindings/rust/Cargo.toml";
 const ts_pkg_rel = "bindings/typescript/package.json";
 const wasi_pkg_rel = "bindings/wasi/package.json";
+const fig_md_rel = "fig.md";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -56,6 +64,7 @@ pub fn main(init: std.process.Init) !void {
     var args = try init.minimal.args.iterateAllocator(gpa);
     defer args.deinit();
     _ = args.next(); // argv0
+    const fig_binary = args.next() orelse return usage("missing <fig-binary>");
     const repo_root = args.next() orelse return usage("missing <repo-root>");
 
     var positional: [2]?[]const u8 = .{ null, null };
@@ -139,14 +148,17 @@ pub fn main(init: std.process.Init) !void {
     var touched_cargo = false;
     var touched_ts = false;
     var touched_wasi = false;
+    var touched_fig_md = false;
     std.debug.print("version-set: planned changes{s}:\n", .{if (dry_run) " (dry run — nothing written)" else ""});
     var any = false;
 
     if (!std.mem.eql(u8, d_core, core_cur)) {
         any = true;
+        touched_fig_md = true;
         const edits = [_]Edit{.{ .range = fields.zonVersionRange(zon).?, .value = d_core }};
         try writeEdits(io, arena, cwd, repo_root, zon_rel, zon, &edits, dry_run);
         report(zon_rel, "core", core_cur, d_core);
+        report(fig_md_rel, "version (frontmatter, via `fig set`)", core_cur, d_core);
     }
     if (!std.mem.eql(u8, d_cli, cli_cur)) {
         any = true;
@@ -193,6 +205,7 @@ pub fn main(init: std.process.Init) !void {
         if (touched_cargo) refreshCargo(io, gpa, arena, repo_root);
         if (touched_ts) refreshNpm(io, gpa, arena, repo_root, "bindings/typescript");
         if (touched_wasi) refreshNpm(io, gpa, arena, repo_root, "bindings/wasi");
+        if (touched_fig_md) setFigMdVersion(io, gpa, arena, fig_binary, repo_root, d_core);
     }
 
     // Final version table (mirrors version-floor's format).
@@ -202,6 +215,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("  rust crate (Cargo.toml)      {s}  (fig-macros pin {s})\n", .{ d_rust, d_macros });
     std.debug.print("  npm package (package.json)   {s}\n", .{d_npm});
     std.debug.print("  fig-wasi (wasi/package.json) {s}\n", .{d_wasi});
+    std.debug.print("  fig.md (frontmatter version) {s}\n", .{d_core});
     if (!dry_run)
         std.debug.print("\nversion-set: done — now run `zig build check` to verify.\n", .{});
 }
@@ -289,36 +303,54 @@ fn less(a_str: []const u8, b_str: []const u8) bool {
 fn refreshCargo(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, root: []const u8) void {
     const manifest = std.fs.path.join(arena, &.{ root, cargo_rel }) catch return;
     const argv = [_][]const u8{ "cargo", "update", "--manifest-path", manifest, "-p", "fig", "-p", "fig-macros" };
-    runRefresh(io, gpa, &argv, "cargo update -p fig -p fig-macros (in bindings/rust)");
+    runRefresh(io, gpa, &argv, "lockfile", "cargo update -p fig -p fig-macros (in bindings/rust)");
 }
 
 fn refreshNpm(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, root: []const u8, sub: []const u8) void {
     const prefix = std.fs.path.join(arena, &.{ root, sub }) catch return;
     const argv = [_][]const u8{ "npm", "install", "--package-lock-only", "--prefix", prefix };
     const label = std.fmt.allocPrint(arena, "npm install --package-lock-only (in {s})", .{sub}) catch "npm install --package-lock-only";
-    runRefresh(io, gpa, &argv, label);
+    runRefresh(io, gpa, &argv, "lockfile", label);
 }
 
-/// Run a lockfile-refresh command; on any failure warn + print the manual
-/// command rather than aborting the (already-written) bump.
-fn runRefresh(io: std.Io, gpa: std.mem.Allocator, argv: []const []const u8, label: []const u8) void {
+/// Sync fig.md's frontmatter `version` field to the new core version by
+/// shelling out to the `fig` binary itself (`fig set fig.md version <v>`)
+/// rather than hand-parsing the markdown here — the same self-hosting move
+/// `tools/sync-figl.zig` makes for the generated `.figl` artifacts. Warns
+/// (rather than failing the already-written manifest bump) if it can't run.
+fn setFigMdVersion(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, fig_binary: []const u8, repo_root: []const u8, version: []const u8) void {
+    const fig_md_path = std.fs.path.join(arena, &.{ repo_root, fig_md_rel }) catch {
+        std.debug.print("version-set: WARN: could not build path to {s}; run yourself: fig set {s} version {s}\n", .{ fig_md_rel, fig_md_rel, version });
+        return;
+    };
+    const argv = [_][]const u8{ fig_binary, "set", fig_md_path, "version", version };
+    const label = std.fmt.allocPrint(arena, "fig set {s} version {s}", .{ fig_md_rel, version }) catch "fig set fig.md version";
+    runRefresh(io, gpa, &argv, "fig.md", label);
+}
+
+/// Run a derived-file refresh command (lockfile regen or fig.md sync); on any
+/// failure warn + print the manual command rather than aborting the
+/// (already-written) bump. `what` names the kind of thing being refreshed
+/// (e.g. "lockfile", "fig.md") for the log messages; `label` is the full
+/// human-readable command.
+fn runRefresh(io: std.Io, gpa: std.mem.Allocator, argv: []const []const u8, what: []const u8, label: []const u8) void {
     const res = std.process.run(gpa, io, .{ .argv = argv }) catch |err| {
-        std.debug.print("version-set: WARN: could not refresh lockfile ({s}): {s}\n  run it yourself: {s}\n", .{ label, @errorName(err), label });
+        std.debug.print("version-set: WARN: could not refresh {s} ({s}): {s}\n  run it yourself: {s}\n", .{ what, label, @errorName(err), label });
         return;
     };
     defer gpa.free(res.stdout);
     defer gpa.free(res.stderr);
     switch (res.term) {
         .exited => |code| if (code != 0) {
-            std.debug.print("version-set: WARN: lockfile refresh `{s}` exited {d}:\n{s}\n  run it yourself once the toolchain is available.\n", .{ label, code, res.stderr });
+            std.debug.print("version-set: WARN: {s} refresh `{s}` exited {d}:\n{s}\n  run it yourself once the toolchain is available.\n", .{ what, label, code, res.stderr });
             return;
         },
         else => {
-            std.debug.print("version-set: WARN: lockfile refresh `{s}` did not exit cleanly.\n  run it yourself once the toolchain is available.\n", .{label});
+            std.debug.print("version-set: WARN: {s} refresh `{s}` did not exit cleanly.\n  run it yourself once the toolchain is available.\n", .{ what, label });
             return;
         },
     }
-    std.debug.print("version-set: refreshed lockfile ({s})\n", .{label});
+    std.debug.print("version-set: refreshed {s} ({s})\n", .{ what, label });
 }
 
 fn usage(why: []const u8) noreturn {
