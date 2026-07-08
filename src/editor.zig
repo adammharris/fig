@@ -11,11 +11,13 @@ const json_string = @import("util/json_string.zig");
 const log = std.log.scoped(.editor);
 
 // Format-specific editing logic the generic engine delegates to from its
-// `if (Language == Toml/Yaml/Fig)` branches: TOML's multi-region gather +
-// whole-table ops, YAML's reference-layer / block-framing helpers, and fig's
-// marker-prefix-copying block/flow insert + append/prepend. See each module's
-// header for the split rationale. These modules also hold that language's editor
-// tests, so editor-test code lives next to the concern it exercises.
+// `if (Language == Toml/Yaml/Fig/Ini)` branches: TOML's multi-region gather +
+// whole-table ops, YAML's reference-layer / block-framing helpers, fig's
+// marker-prefix-copying block/flow insert + append/prepend, and INI's
+// isFlow-bypassing key insert + section-header delete guard. See each
+// module's header for the split rationale. These modules also hold that
+// language's editor tests, so editor-test code lives next to the concern it
+// exercises.
 const toml_edit = @import("languages/toml/editor_helper.zig");
 const yaml_edit = @import("languages/yaml/editor_helper.zig");
 const fig_edit = @import("languages/fig/editor_helper.zig");
@@ -36,6 +38,12 @@ const Zon = @import("languages/zon/zon.zig").Language;
 // editor_helper module, unlike TOML/YAML/Fig's structural quirks.
 const Dotenv = @import("languages/dotenv/dotenv.zig").Language;
 const Properties = @import("languages/properties/properties.zig").Language;
+// INI's one level of `[section]` nesting needs a little real per-language
+// dispatch logic (unlike dotenv/.properties' pure parameter swaps), so —
+// like TOML/YAML/fig — that lives in its own editor_helper.zig, next to the
+// concern it exercises; see that module's header for the split rationale.
+const ini_edit = @import("languages/ini/editor_helper.zig");
+const Ini = @import("languages/ini/ini.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("languages/language.zig").validate(Language);
@@ -45,17 +53,33 @@ pub fn Editor(comptime Language: type) type {
         // Which leading-comment syntax this language uses, so the owned-comment
         // scan in delete/move (`commentBlockStart`) recognizes the right marker.
         // JSON/JSONC/JSON5 and ZON use `//` (ZON, like Zig); YAML, TOML,
-        // dotenv, and .properties use `#`. Plain JSON has no comments, but
-        // `.slashes` is harmless there since no `//` line can exist.
-        const comment_style: CommentStyle = if (Language == json.Language or Language == Zon) .slashes else .hash;
+        // dotenv, and .properties use `#`; INI uses `;` (see its printer.zig —
+        // it accepts a leading `#` on read too, but always WRITES `;`, so
+        // that's the marker the editor's own inserts/scans use). Plain JSON
+        // has no comments, but `.slashes` is harmless there since no `//`
+        // line can exist.
+        const comment_style: CommentStyle = if (Language == json.Language or Language == Zon)
+            .slashes
+        else if (Language == Ini)
+            .semicolon
+        else
+            .hash;
 
         // The mapping key/value separator spliced by the generic flow-entry
         // insert helpers (`insertFlowMapEntry`/`insertFlowEntry`) AND by
         // `writeMapValue`'s block-insert path. Every editable format but ZON
         // and the flat `KEY=value` formats writes `key: value`; ZON's
         // struct-field syntax is `.key = value`; dotenv/.properties always
-        // print a bare `=` with no surrounding spaces (see each printer.zig).
-        const kv_sep: []const u8 = if (Language == Zon) " = " else if (Language == Dotenv or Language == Properties) "=" else ": ";
+        // print a bare `=` with no surrounding spaces, while INI always pads
+        // it (`key = value`) — see each printer.zig.
+        const kv_sep: []const u8 = if (Language == Zon)
+            " = "
+        else if (Language == Dotenv or Language == Properties)
+            "="
+        else if (Language == Ini)
+            " = "
+        else
+            ": ";
 
         allocator: std.mem.Allocator,
         source: std.ArrayList(u8) = .empty,
@@ -188,7 +212,21 @@ pub fn Editor(comptime Language: type) type {
                     // clobbered). Auto-vivify it as an empty map — recursing to
                     // seed any missing ancestor deepest-first — then retry the
                     // leaf insert into the now-existing parent.
-                    if (path.len >= 2 and insert_err == error.NotFound) {
+                    //
+                    // INI can't take part: `emptyMapLiteral` is a value-literal
+                    // sentinel (`{}`/`.{}`), and that spelling is only safe
+                    // because it's ALSO genuinely valid syntax for "an empty
+                    // mapping" in every other editable format (a real JSON
+                    // object / YAML-TOML-fig flow map / ZON struct literal) —
+                    // so vivifying through it can't produce anything wrong
+                    // regardless of why it was reached. INI has no such
+                    // literal (`{}` there is just a two-character STRING
+                    // value; only a `[section]` header introduces real
+                    // nesting), so blindly reusing the sentinel would splice
+                    // a nonsense `section = {}` root key instead of a real
+                    // section. Skip the vivify and surface the original
+                    // `NotFound` — "no such section" — rather than corrupt.
+                    if (Language != Ini and path.len >= 2 and insert_err == error.NotFound) {
                         try self.set(path[0 .. path.len - 1], emptyMapLiteral());
                         try self.insertKey(path[0 .. path.len - 1], key_text, value_text);
                     } else return replace_err;
@@ -273,7 +311,23 @@ pub fn Editor(comptime Language: type) type {
             }
             // ZON uses Zig's `//`; YAML and TOML use `#`.
             if (comptime Language == Zon) return "//";
+            if (comptime Language == Ini) return ";";
             return "#";
+        }
+
+        /// The marker for a same-line TRAILING comment specifically — distinct
+        /// from `lineCommentMarker` because INI's leading (own-line, above the
+        /// key) comments are real and safe, but it has no same-line trailing
+        /// comment syntax at all: a `;`/`#` after a value on the SAME line is
+        /// literal value text, not a comment (see `ini/parser.zig`'s "a value
+        /// runs to end of line" and the printer's own doc, which renders a
+        /// "trailing" comment as its own `;` line immediately after the entry
+        /// rather than inline). Splicing one in anyway would silently corrupt
+        /// the value on reread, so trailing ops are refused for INI here —
+        /// every other language's trailing marker is the same as its leading one.
+        fn trailingCommentMarker(self: *const Self) ?[]const u8 {
+            if (comptime Language == Ini) return null;
+            return self.lineCommentMarker();
         }
 
         /// Add an own-line comment ABOVE the node at `path` — the key's line for a
@@ -338,7 +392,7 @@ pub fn Editor(comptime Language: type) type {
         /// dialect without comment syntax (strict JSON), `MultilineComment` if
         /// `text` contains a newline.
         pub fn setTrailingComment(self: *Self, path: []const AST.PathSegment, text: []const u8) !void {
-            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.MultilineComment;
             const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
@@ -385,7 +439,7 @@ pub fn Editor(comptime Language: type) type {
         /// A no-op when there is none. Returns `CommentsUnsupported` for a dialect
         /// without comment syntax (strict JSON).
         pub fn deleteTrailingComment(self: *Self, path: []const AST.PathSegment) !void {
-            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
             const rel = std.mem.indexOf(u8, source[win.start..win.line_end], marker) orelse return; // none
@@ -434,7 +488,7 @@ pub fn Editor(comptime Language: type) type {
         /// which yields ""). The caller owns the returned bytes. Returns
         /// `CommentsUnsupported` for a dialect without comment syntax (strict JSON).
         pub fn getTrailingComment(self: *Self, path: []const AST.PathSegment) !?[]u8 {
-            const marker = self.lineCommentMarker() orelse return error.CommentsUnsupported;
+            const marker = self.trailingCommentMarker() orelse return error.CommentsUnsupported;
             const win = try self.trailingCommentWindow(path);
             const source = self.source.items;
             const rel = std.mem.indexOf(u8, source[win.start..win.line_end], marker) orelse
@@ -467,6 +521,8 @@ pub fn Editor(comptime Language: type) type {
                 return toml_edit.tomlInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
             if (Language == Fig)
                 return fig_edit.figInsertKey(self, parsed, node, span, path.len == 0, key_text, value_text);
+            if (Language == Ini)
+                return ini_edit.iniInsertKey(self, parsed, node, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -507,6 +563,9 @@ pub fn Editor(comptime Language: type) type {
                 const fns = firstNonSpace(source, lineStartBefore(source, span.start));
                 if (fns < source.len and source[fns] == '[') return error.CannotDeleteTable;
             }
+            // INI's `[section]` twin of the same hazard (see `ini_edit.isSectionHeaderLine`).
+            if (Language == Ini and ini_edit.isSectionHeaderLine(source, span))
+                return error.CannotDeleteSection;
             // A fig block (non-flow) mapping/sequence value may be a
             // re-entered/scattered container (DESIGN.md "Re-entering a path
             // to add new keys is fine") — TOML's `CannotDeleteTable` twin,
@@ -1001,7 +1060,12 @@ pub fn Editor(comptime Language: type) type {
 
         // --- insert helpers (build text, then splice) ---
 
-        fn insertBlockKey(self: *Self, parsed: Document, mapping: AST.Node, key_text: []const u8, value_text: []const u8) !void {
+        /// Insert `key_text<kv_sep>value_text` as a new entry in the block
+        /// (non-flow) mapping `mapping`, after its last existing entry (or,
+        /// if it has none, at a language-appropriate fallback point — see
+        /// below). `pub` so `ini_edit.iniInsertKey` (INI's `isFlow`-bypassing
+        /// `insertKey`) can reuse it directly rather than duplicate it.
+        pub fn insertBlockKey(self: *Self, parsed: Document, mapping: AST.Node, key_text: []const u8, value_text: []const u8) !void {
             const source = self.source.items;
             // Every currently-supported block-mapping language represents an
             // empty mapping as `.null_` (promoted via `promoteNullToMapping`),
@@ -1020,8 +1084,23 @@ pub fn Editor(comptime Language: type) type {
                 0;
             const insert_at = if (maybe_last) |last|
                 lineEndAfter(source, parsed.span(last).end -| 1)
+            else if (mapping.id == parsed.ast.root)
+                // The root's span is the whole remaining document (dotenv/
+                // .properties/INI's root is always `Span.init(0, input.len)`
+                // — see each parser's `parseOnce`), so its `.end` is already
+                // the right splice point even with zero existing keys.
+                parsed.span(mapping).end
             else
-                parsed.span(mapping).end;
+                // A childless NON-ROOT mapping is only reachable for INI (an
+                // empty `[section]` with nothing under it yet): unlike the
+                // root, its span is anchored at just the header's name token
+                // (see `ini/parser.zig`'s `parseSectionHeader`), not the
+                // section's body extent — splicing at `.end` would land
+                // inside the `[section]` line itself. Anchor on the header
+                // LINE's end instead; `span.start` is guaranteed to fall
+                // somewhere on that line, so `lineEndAfter` finds it
+                // regardless of where exactly within the line it points.
+                lineEndAfter(source, parsed.span(mapping).start);
 
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(self.allocator);
@@ -1451,7 +1530,7 @@ pub fn flowOpenEnd(source: []const u8, span: Span) usize {
 
 /// Comment syntax for the owned-comment scan: `#` line comments (YAML/TOML) vs
 /// `//` line comments and `/* */` blocks (JSON5/JSONC).
-pub const CommentStyle = enum { hash, slashes };
+pub const CommentStyle = enum { hash, slashes, semicolon };
 
 /// Grow `line_start` upward to absorb an entry's owned comment block: the
 /// contiguous run of comment lines immediately above, with no intervening blank
@@ -1470,6 +1549,7 @@ pub fn commentBlockStart(source: []const u8, line_start: usize, style: CommentSt
         const trimmed = std.mem.trimStart(u8, std.mem.trimEnd(u8, line, "\r\n"), " \t");
         const is_comment = switch (style) {
             .hash => trimmed.len > 0 and trimmed[0] == '#',
+            .semicolon => trimmed.len > 0 and trimmed[0] == ';',
             .slashes => blk: {
                 if (in_block) {
                     // Inside a block comment, moving up: every line belongs to it
@@ -2087,4 +2167,38 @@ test "properties deleteKey removes the only entry, leaving an empty file" {
     try testing.expectEqualStrings("", ed.source.items);
     try ed.set(&.{.{ .key = "again" }}, "v2");
     try testing.expectEqualStrings("again=v2\n", ed.source.items);
+}
+
+// ── INI (`[section]` + flat `key = value`) ──────────────────────────────────
+//
+// Basic root-level/parameter sanity checks only — the same level of coverage
+// TOML/fig/ZON leave here (one "uses the right marker" test apiece). The
+// section-nesting behavior (`ini_edit.iniInsertKey`/`isSectionHeaderLine`,
+// the `set` auto-vivify exclusion) is exercised in `ini/editor_helper.zig`,
+// next to that logic.
+
+test "ini set seeds the first root key into an empty document" {
+    if (comptime !build_options.lang_ini) return error.SkipZigTest;
+    try expectSet(Ini, .INI, "", &.{.{ .key = "name" }}, "fig", "name = fig\n");
+}
+
+test "ini set inserts a second root key using ' = '" {
+    if (comptime !build_options.lang_ini) return error.SkipZigTest;
+    try expectSet(Ini, .INI, "name = fig\n", &.{.{ .key = "lang" }}, "zig", "name = fig\nlang = zig\n");
+}
+
+test "ini comment ops: leading works with ';', trailing is unsupported" {
+    if (comptime !build_options.lang_ini) return error.SkipZigTest;
+    var ed: Editor(Ini) = .{ .allocator = testing.allocator, .format = .INI };
+    try ed.init("name = fig\n");
+    defer ed.deinit();
+    try ed.addLeadingComment(&.{.{ .key = "name" }}, "a language");
+    try testing.expectEqualStrings("; a language\nname = fig\n", ed.source.items);
+    const leading = (try ed.getLeadingComment(&.{.{ .key = "name" }})).?;
+    defer testing.allocator.free(leading);
+    try testing.expectEqualStrings("a language", leading);
+
+    try testing.expectError(error.CommentsUnsupported, ed.setTrailingComment(&.{.{ .key = "name" }}, "note"));
+    try testing.expectError(error.CommentsUnsupported, ed.getTrailingComment(&.{.{ .key = "name" }}));
+    try testing.expectError(error.CommentsUnsupported, ed.deleteTrailingComment(&.{.{ .key = "name" }}));
 }

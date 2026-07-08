@@ -266,12 +266,15 @@ pub fn jsonDialect(format: Format) fig.Language.JSON.Type {
 pub fn emptyDocSeed(format: Format) ?[]const u8 {
     return switch (format) {
         .json, .jsonc, .json5 => "{}\n",
-        // dotenv/.properties parse an empty file as an empty (but present)
-        // root mapping — same empty-string seed as YAML/TOML/fig — so `set`
-        // can create one from scratch and land its first key into it.
-        .yaml, .yml, .toml, .fig, .dotenv, .properties => "",
+        // dotenv/.properties/ini all parse an empty file as an empty (but
+        // present) root mapping — same empty-string seed as YAML/TOML/fig —
+        // so `set` can create one from scratch and land its first root-level
+        // key into it. (INI's own auto-vivify guard in `Editor.set` only
+        // matters for a 2+-segment path creating a brand-new SECTION; a
+        // single root-level key from an empty file is unaffected.)
+        .yaml, .yml, .toml, .fig, .dotenv, .properties, .ini => "",
         .zon => ".{}\n",
-        .xml, .canonical, .gron, .ini, .plist => null,
+        .xml, .canonical, .gron, .plist => null,
     };
 }
 
@@ -310,7 +313,18 @@ pub fn applyStructuralEdit(
         else
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
-        .ini => return error.UnsupportedIniEdit,
+        // INI: one level of `[section]` nesting on top of the same flat
+        // `key = value` shape as dotenv/.properties. `Editor(Ini)` carries
+        // its own small guards (see `editor.zig`'s `Ini` branches) for the
+        // two things that genuinely need them: refusing to line-delete a
+        // scattered `[section]` header, and refusing to auto-vivify a
+        // brand-new section via `set` (INI has no empty-mapping literal to
+        // do that with) — everything else (root/section key insert-replace-
+        // delete, leading comments) flows through the generic engine.
+        .ini => if (comptime build_options.lang_ini)
+            try applyToFile(fig.Language.INI, allocator, io, input, path, text, op, fig.Language.INI.default_type)
+        else
+            return error.FormatDisabled,
         // dotenv/.properties: flat `KEY=value` only (no nesting/sequences),
         // so the generic block-mapping editor covers every op the CLI
         // exposes here — `=` separator + the first-insert-into-an-empty-
@@ -440,6 +454,33 @@ test "applyEdit performs the structural ops on dotenv, including from-empty inse
     }
 }
 
+test "applyEdit performs the structural ops on ini, root and section" {
+    if (comptime !build_options.lang_ini) return error.SkipZigTest;
+    const t = std.testing;
+    const I = fig.Language.INI;
+    const dia = I.default_type;
+
+    // insert_key into a brand-new (empty) document.
+    {
+        const out = try applyEdit(I, t.allocator, "", &.{}, "fig", .{ .insert_key = "name" }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("name = fig\n", out);
+    }
+    // insert_key into an existing SECTION uses ' = ' with padding.
+    {
+        var path = [_]fig.AST.PathSegment{.{ .key = "server" }};
+        const out = try applyEdit(I, t.allocator, "[server]\nhost = localhost\n", &path, "80", .{ .insert_key = "port" }, dia);
+        defer t.allocator.free(out);
+        try t.expectEqualStrings("[server]\nhost = localhost\nport = 80\n", out);
+    }
+    // delete_key on a `[section]` header itself is refused, not silently
+    // corrupted.
+    {
+        var dk_path = [_]fig.AST.PathSegment{.{ .key = "server" }};
+        try t.expectError(error.CannotDeleteSection, applyEdit(I, t.allocator, "[server]\nhost = localhost\n", &dk_path, "", .delete_key, dia));
+    }
+}
+
 test "applyEdit performs the structural ops on .properties, including from-empty insert" {
     if (comptime !build_options.lang_properties) return error.SkipZigTest;
     const t = std.testing;
@@ -451,9 +492,10 @@ test "applyEdit performs the structural ops on .properties, including from-empty
     try t.expectEqualStrings("foo=bar\n", out);
 }
 
-test "emptyDocSeed: dotenv/.properties seed empty like YAML/TOML/fig" {
+test "emptyDocSeed: dotenv/.properties/ini seed empty like YAML/TOML/fig" {
     try std.testing.expectEqualStrings("", emptyDocSeed(.dotenv).?);
     try std.testing.expectEqualStrings("", emptyDocSeed(.properties).?);
+    try std.testing.expectEqualStrings("", emptyDocSeed(.ini).?);
 }
 
 test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {

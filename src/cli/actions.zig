@@ -78,9 +78,12 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             return error.FormatDisabled,
         // XML is reader-only: no in-place editor yet.
         .xml => return error.UnsupportedXmlEdit,
-        // INI is read/serialize only so far; comment-preserving in-place
-        // editing of it is not wired yet.
-        .ini => return error.UnsupportedIniEdit,
+        // INI: root/section key replace-value takes the replacement verbatim
+        // as a literal, same as TOML/YAML/fig/ZON/dotenv/.properties.
+        .ini => if (comptime build_options.lang_ini)
+            try edit_ops.applyToFile(fig.Language.INI, a, io, input, opts.path, opts.replacement, op, fig.Language.INI.default_type)
+        else
+            return error.FormatDisabled,
         // dotenv/.properties: flat `KEY=value`, no nesting — the generic
         // block-mapping editor handles them directly (see `Editor`'s
         // `kv_sep`). The replacement is taken verbatim as a literal, same as
@@ -524,7 +527,14 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             else
                 return error.FormatDisabled,
             .xml => return error.UnsupportedXmlEdit,
-            .ini => return error.UnsupportedIniEdit,
+            // A leading (own-line, above-the-key) comment reads fine; `--inline`
+            // surfaces `error.CommentsUnsupported` from the editor — INI has no
+            // same-line trailing comment syntax (see `Editor`'s
+            // `trailingCommentMarker`).
+            .ini => if (comptime build_options.lang_ini)
+                try edit_ops.getCommentFromFile(fig.Language.INI, a, io, input, opts.path, opts.inline_comment, fig.Language.INI.default_type)
+            else
+                return error.FormatDisabled,
             .dotenv => if (comptime build_options.lang_dotenv)
                 try edit_ops.getCommentFromFile(fig.Language.DOTENV, a, io, input, opts.path, opts.inline_comment, fig.Language.DOTENV.default_type)
             else
@@ -583,7 +593,12 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         else
             return error.FormatDisabled,
         .xml => return error.UnsupportedXmlEdit,
-        .ini => return error.UnsupportedIniEdit,
+        // `add`/`delete` leading comment ops work; `--inline` set/delete
+        // surfaces `error.CommentsUnsupported` (see the `--get` branch above).
+        .ini => if (comptime build_options.lang_ini)
+            try edit_ops.applyToFile(fig.Language.INI, a, io, input, opts.path, opts.text, op, fig.Language.INI.default_type)
+        else
+            return error.FormatDisabled,
         .dotenv => if (comptime build_options.lang_dotenv)
             try edit_ops.applyToFile(fig.Language.DOTENV, a, io, input, opts.path, opts.text, op, fig.Language.DOTENV.default_type)
         else
