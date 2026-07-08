@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>aString</key>
+	<string>hello &amp; &lt;world&gt; "quoted" 日本語</string>
+	<key>anInt</key>
+	<integer>-42</integer>
+	<key>aBigInt</key>
+	<integer>9223372036854775807</integer>
+	<key>aReal</key>
+	<real>3.14159</real>
+	<key>aTrue</key>
+	<true/>
+	<key>aFalse</key>
+	<false/>
+	<key>aDate</key>
+	<date>2011-11-01T12:00:00Z</date>
+	<key>aData</key>
+	<data>SGVsbG8sIFdvcmxkIQ==</data>
+	<key>emptyDict</key>
+	<dict/>
+	<key>emptyArray</key>
+	<array/>
+	<key>nestedArray</key>
+	<array>
+		<string>one</string>
+		<integer>2</integer>
+		<dict>
+			<key>k</key>
+			<string>v</string>
+		</dict>
+		<array>
+			<true/>
+			<false/>
+		</array>
+	</array>
+	<key>emptyString</key>
+	<string></string>
+</dict>
+</plist>
