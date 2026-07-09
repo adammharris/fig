@@ -627,10 +627,16 @@ pub fn Editor(comptime Language: type) type {
             }
         }
 
-        /// Delete the mapping entry at `path` (which must name a key). Removes the
-        /// entry's full line(s) plus any owned leading comment block (a run of
-        /// comment lines — `#` for YAML/TOML, `//` or `/* */` for JSON5/JSONC —
-        /// with no intervening blank line), leaving no blank gap.
+        /// Delete the mapping entry at `path` (which must name a key). For a
+        /// *block* mapping, removes the entry's full line(s) plus any owned
+        /// leading comment block (a run of comment lines — `#` for YAML/TOML,
+        /// `//` or `/* */` for JSON5/JSONC — with no intervening blank line),
+        /// leaving no blank gap. For a *flow* (`{…}`) mapping — any JSON/JSON5/
+        /// JSONC object, or a YAML/TOML/fig/ZON inline mapping — routes through a
+        /// comma-aware entry splice instead (see the comment at that branch),
+        /// since a flow mapping's entries are comma-separated rather than
+        /// one-per-line and the block path's line delete cannot handle them
+        /// safely at any arity or position.
         pub fn deleteKey(self: *Self, path: []const AST.PathSegment) !void {
             const parsed = try self.getParsed();
             const node = parsed.ast.getNodeByPath(path) catch |err| {
@@ -668,6 +674,59 @@ pub fn Editor(comptime Language: type) type {
                 const val = parsed.ast.nodes[node.kind.keyvalue.value];
                 if ((val.kind == .mapping or val.kind == .sequence) and !isFlow(source, parsed.span(val)))
                     return error.CannotDeleteContainer;
+            }
+            // A flow (`{...}`) mapping stores its entries comma-separated, not
+            // one-per-line, so the line-based delete below (sized for a *block*
+            // mapping's one-entry-per-line shape) mishandles it in three ways:
+            //   * packed `{ a: 1, b: 2 }` (the only shape JSON/JSON5/JSONC
+            //     objects ever have, and one inline YAML/TOML/fig/ZON mappings
+            //     also allow) — deleting the whole line swallows the sibling;
+            //   * the *last* entry of a one-per-line flow mapping — the line
+            //     delete strands the predecessor's separator comma before the
+            //     closing `}`, invalid in strict JSON and in TOML inline tables;
+            //   * a *single-entry* flow mapping — the line delete removes the
+            //     whole `{ … }` down to nothing, which YAML/TOML/fig (whose
+            //     grammar reads an empty document as an empty mapping) then
+            //     silently "succeed" at reparsing, committing a wiped file to
+            //     disk.
+            // So route every flow-mapping entry through `removeFlowItem` — the
+            // same comma-aware splice a flow *sequence* delete uses — which
+            // drops exactly one adjoining separator (the following comma for the
+            // first entry, the preceding comma otherwise) and always leaves the
+            // enclosing braces intact, correct for every arity and position.
+            const parent = try parsed.ast.getValByPath(path[0 .. path.len - 1]);
+            if (parent.kind == .mapping and isFlow(source, parsed.span(parent))) {
+                // Find the entry's immediate predecessor: `removeFlowItem` drops
+                // the *following* comma for the first entry and the *preceding*
+                // comma for any later one, so it needs to know which this is.
+                var item = (try parsed.ast.child(&parent)).?;
+                var prev: ?AST.Node = null;
+                while (item.id != node.id) {
+                    prev = item;
+                    item = parsed.ast.next(&item) orelse return error.NotFound;
+                }
+                // ZON's struct-field key span starts at the bare identifier, not
+                // the leading `.` (see `insertFlowMapEntry`'s doc on the same
+                // quirk) — back up over it so the splice carries `.name` as a
+                // unit rather than stranding a bare `.` next to a survivor.
+                const entry_start = if (Language == Zon and span.start > 0 and source[span.start - 1] == '.')
+                    span.start - 1
+                else
+                    span.start;
+                // When the entry begins its own physical line, absorb any owned
+                // leading comment block above it — trivia `removeFlowItem` can't
+                // find on its own but the block path would have carried. A packed
+                // entry (a sibling or the opening brace shares its line) is not
+                // first-on-line, so this is skipped and `removeFlowItem`'s own
+                // whitespace scan handles the separator and indentation. The
+                // comment extension applies only when a block was actually found
+                // (`cbs` climbed above `line_start`); with none, splicing from
+                // the entry itself keeps the survivors' indentation intact.
+                const line_start = lineStartBefore(source, entry_start);
+                const on_own_line = firstNonSpace(source, line_start) == entry_start;
+                const cbs = if (on_own_line) commentBlockStart(source, line_start, comment_style) else line_start;
+                const del_start = if (cbs < line_start) cbs else entry_start;
+                return self.removeFlowItem(Span.init(del_start, span.end), prev == null);
             }
             const line_start = lineStartBefore(source, span.start);
             const del_start = commentBlockStart(source, line_start, comment_style);

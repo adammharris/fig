@@ -843,6 +843,24 @@ test "fig delete a flow-container-valued key" {
     try expectFigSource(&ed, "a = 1\nb = 2\n");
 }
 
+// Regression: deleting a key *inside* a flow mapping — the packed case swallowed
+// a sibling, the single-entry case wiped the whole `{ … }` line. The flow-aware
+// splice removes only the targeted entry and its adjoining comma, leaving the
+// braces (and any survivor) intact.
+test "fig delete key inside a packed flow mapping (regression)" {
+    var ed = try newFigEditor("p = { x = 1, y = 2 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "p" }, .{ .key = "y" } });
+    try expectFigSource(&ed, "p = { x = 1 }\n");
+}
+
+test "fig delete only key of a single-entry flow mapping (regression)" {
+    var ed = try newFigEditor("p = { x = 1 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "p" }, .{ .key = "x" } });
+    try expectFigSource(&ed, "p = { }\n");
+}
+
 test "fig deleting a block-container-valued key is refused" {
     var ed = try newFigEditor("database\n> host = localhost\n> pool\n> > size = 10\n");
     defer ed.deinit();

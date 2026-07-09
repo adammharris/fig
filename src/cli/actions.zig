@@ -52,7 +52,7 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
     if (try args_mod.resolveEmbedType(io, a, input, opts.embed, opts.detect_embed)) |embed_type| {
         try edit_ops.applyToEmbed(a, io, input, embed_type, opts.path, opts.replacement, op);
     } else switch (if (opts.detect) try parse_dispatch.detectFileFormat(io, a, opts.file) else opts.format) {
-        .json, .jsonc => |f| if (comptime build_options.lang_json) {
+        .json, .jsonc, .json5 => |f| if (comptime build_options.lang_json) {
             const replacement = try std.fmt.allocPrint(a, "\"{s}\"", .{opts.replacement});
             try edit_ops.applyToFile(fig.Language.JSON, a, io, input, opts.path, replacement, op, edit_ops.jsonDialect(f));
         } else return error.FormatDisabled,
@@ -104,9 +104,6 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             try edit_ops.applyToFile(fig.Language.PLIST, a, io, input, opts.path, opts.replacement, op, fig.Language.PLIST.default_type)
         else
             return error.FormatDisabled,
-        // JSON5 is read/serialize only so far; comment-preserving
-        // in-place editing of it is not wired yet.
-        .json5 => return error.UnsupportedJson5Edit,
         // The canonical form is a parse/print pair with no span-splicing
         // editor; convert via `get` instead of editing in place.
         .canonical => return error.UnsupportedCanonicalEdit,

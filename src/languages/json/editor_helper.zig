@@ -122,6 +122,76 @@ test "json5 delete key carries an owned /* */ block comment" {
     );
 }
 
+// Regression: a compact single-line object packs multiple entries onto one
+// physical line — the *only* shape a minified/compact JSON object ever has —
+// so `deleteKey`'s generic line-based delete (built for one-entry-per-line
+// layout) used to delete the whole line, i.e. the sole remaining entry's
+// deletion wiped the entire document, and a middle/first entry's deletion
+// swallowed its neighbor too. Deleting one key from a packed object must
+// leave its siblings untouched.
+test "json5 delete key from a packed single-line object (regression)" {
+    var ed = try newJson5Editor("{ host: 'localhost', port: 8080, tls: true }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "port" }});
+    try expectJson5Source(&ed, "{ host: 'localhost', tls: true }");
+}
+
+test "json5 delete first key of a packed single-line object" {
+    var ed = try newJson5Editor("{ host: 'localhost', port: 8080 }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "host" }});
+    try expectJson5Source(&ed, "{ port: 8080 }");
+}
+
+test "json delete key from a packed single-line object (regression)" {
+    var ed: editor.Editor(json.Language) = .{ .allocator = std.testing.allocator };
+    try ed.init("{\"a\":1,\"b\":2,\"c\":3}");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectJson5Source(&ed, "{\"a\":1,\"c\":3}");
+}
+
+// Regression: deleting the *last* key of a one-entry-per-line (pretty) object
+// used to leave the *predecessor's* separator comma dangling before the closing
+// brace — the block-shaped line delete removes the last entry's own line but not
+// the comma on the line above it. In strict JSON (no trailing comma allowed)
+// that produced invalid output that failed to reparse; the flow-aware splice now
+// drops the preceding comma instead.
+test "json delete last key of a pretty multi-line object (regression)" {
+    var ed: editor.Editor(json.Language) = .{ .allocator = std.testing.allocator };
+    try ed.init("{\n  \"a\": 1,\n  \"b\": 2\n}\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectJson5Source(&ed, "{\n  \"a\": 1\n}\n");
+}
+
+test "json delete first key of a pretty multi-line object keeps indentation" {
+    var ed: editor.Editor(json.Language) = .{ .allocator = std.testing.allocator };
+    try ed.init("{\n  \"a\": 1,\n  \"b\": 2\n}\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "a" }});
+    try expectJson5Source(&ed, "{\n  \"b\": 2\n}\n");
+}
+
+// Regression: deleting the *only* key of a single-entry object must leave an
+// empty object `{}`, not delete the braces with the line. A packed single-line
+// `{"a":1}` has the braces on the entry's own line, so the block-shaped line
+// delete used to wipe the whole document (here: fail to reparse as strict JSON).
+test "json delete only key of a single-entry object leaves an empty object" {
+    var ed: editor.Editor(json.Language) = .{ .allocator = std.testing.allocator };
+    try ed.init("{\"a\":1}");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "a" }});
+    try expectJson5Source(&ed, "{}");
+}
+
+test "json5 delete only key of a single-entry object leaves an empty object" {
+    var ed = try newJson5Editor("{ a: 1 }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "a" }});
+    try expectJson5Source(&ed, "{ }");
+}
+
 test "json5 delete leaves an unrelated earlier comment intact" {
     var ed = try newJson5Editor(
         \\{

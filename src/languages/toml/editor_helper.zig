@@ -935,6 +935,50 @@ test "toml delete an inline-table-valued key" {
     try expectTomlSource(&ed, "a = 1\nb = 2\n");
 }
 
+// Regression: an inline table's entries are comma-separated on one physical
+// line, not one-per-line like a block table, so `deleteKey`'s generic
+// line-based delete (built for the block shape) used to delete the whole
+// containing line — here, the entire (single-line) document — leaving an
+// empty file that TOML's empty-document-is-an-empty-table grammar then
+// accepted, silently committing the data loss instead of erroring. Deleting a
+// key *inside* a packed inline table must only remove that key.
+test "toml delete key inside a packed inline table (regression)" {
+    var ed = try newTomlEditor("point = { x = 1, y = 2 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "y" } });
+    try expectTomlSource(&ed, "point = { x = 1 }\n");
+}
+
+test "toml delete first key of a packed inline table" {
+    var ed = try newTomlEditor("point = { x = 1, y = 2 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "x" } });
+    try expectTomlSource(&ed, "point = { y = 2 }\n");
+}
+
+// Regression: deleting the *only* key of a single-entry inline table must leave
+// an empty inline table `{}`, not delete the braces with the line. The old
+// block-shaped line delete wiped the whole `point = { x = 1 }` line, which
+// TOML's empty-document-is-an-empty-table grammar then silently accepted,
+// committing the data loss to disk instead of preserving `point = {}`.
+test "toml delete only key of a single-entry inline table (regression)" {
+    var ed = try newTomlEditor("point = { x = 1 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "x" } });
+    try expectTomlSource(&ed, "point = { }\n");
+}
+
+// Regression: deleting the *last* key of a one-entry-per-line inline table used
+// to strand the predecessor's separator comma before the closing brace — which
+// TOML forbids (no trailing comma in an inline table). The flow-aware splice
+// drops the preceding comma instead.
+test "toml delete last key of a multi-line inline table (regression)" {
+    var ed = try newTomlEditor("point = {\n  x = 1,\n  y = 2\n}\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "y" } });
+    try expectTomlSource(&ed, "point = {\n  x = 1\n}\n");
+}
+
 test "toml delete dotted key removes the line" {
     var ed = try newTomlEditor("a.b.c = 1\na.b.d = 2\n");
     defer ed.deinit();

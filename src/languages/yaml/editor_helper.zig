@@ -235,6 +235,49 @@ test "yaml delete key trailing same-line comment" {
     try expectSource(&ed, "a: 1\nc: 3\n");
 }
 
+// Regression: a flow mapping's entries are comma-separated on one physical
+// line, not one-per-line like a block mapping, so `deleteKey`'s generic
+// line-based delete (built for the block shape) used to delete the whole
+// containing line — here, the entire (single-line) document — leaving an
+// empty file that YAML's empty-document-is-an-empty-mapping grammar then
+// accepted, silently committing the data loss instead of erroring. Deleting a
+// key *inside* a packed flow mapping must only remove that key.
+test "yaml delete key inside a packed flow mapping (regression)" {
+    var ed = try newYamlEditor("point: { x: 1, y: 2 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "y" } });
+    try expectSource(&ed, "point: { x: 1 }\n");
+}
+
+test "yaml delete first key of a packed flow mapping" {
+    var ed = try newYamlEditor("point: { x: 1, y: 2 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "x" } });
+    try expectSource(&ed, "point: { y: 2 }\n");
+}
+
+// Regression: deleting the *only* key of a single-entry flow mapping must leave
+// an empty flow mapping `{}`, not delete the braces with the line. The old
+// block-shaped line delete wiped the whole `point: { x: 1 }` line, and YAML's
+// empty-document-is-an-empty-mapping grammar then silently "succeeded",
+// committing a data-loss reparse to disk.
+test "yaml delete only key of a single-entry flow mapping (regression)" {
+    var ed = try newYamlEditor("point: { x: 1 }\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "x" } });
+    try expectSource(&ed, "point: { }\n");
+}
+
+// Regression: deleting the *last* key of a one-entry-per-line flow mapping used
+// to strand the predecessor's separator comma before the closing brace; the
+// flow-aware splice drops the preceding comma instead.
+test "yaml delete last key of a multi-line flow mapping (regression)" {
+    var ed = try newYamlEditor("point: {\n  x: 1,\n  y: 2\n}\n");
+    defer ed.deinit();
+    try ed.deleteKey(&.{ .{ .key = "point" }, .{ .key = "y" } });
+    try expectSource(&ed, "point: {\n  x: 1\n}\n");
+}
+
 test "yaml delete key with block scalar value" {
     var ed = try newYamlEditor("a: |\n  x\n  y\nb: 2\n");
     defer ed.deinit();

@@ -260,9 +260,8 @@ pub fn jsonDialect(format: Format) fig.Language.JSON.Type {
 /// (XML/canonical/gron) — so a from-scratch `set` on it is refused before any
 /// file is created. fig, like YAML/TOML, seeds from an empty file: an empty fig
 /// document parses as an empty map (see `buildRoot`), so the first `set` lands
-/// its key into it. JSON5 shares JSON's `{}` seed even though its in-place edit
-/// is unsupported: the clearer `UnsupportedJson5Edit` error then fires at edit
-/// time rather than a confusing "cannot seed" here.
+/// its key into it. JSON5 shares JSON's `{}` seed — its in-place edit routes
+/// through the same generic engine as JSON/JSONC (see `applyStructuralEdit`).
 pub fn emptyDocSeed(format: Format) ?[]const u8 {
     return switch (format) {
         .json, .jsonc, .json5 => "{}\n",
@@ -301,7 +300,7 @@ pub fn applyStructuralEdit(
 ) !void {
     if (embed) |embed_type| return applyToEmbed(allocator, io, input, embed_type, path, text, op);
     switch (resolved) {
-        .json, .jsonc => |f| if (comptime build_options.lang_json) {
+        .json, .jsonc, .json5 => |f| if (comptime build_options.lang_json) {
             const j = try jsonifyEdit(allocator, op, text);
             try applyToFile(fig.Language.JSON, allocator, io, input, path, j.text, j.op, jsonDialect(f));
         } else return error.FormatDisabled,
@@ -350,7 +349,6 @@ pub fn applyStructuralEdit(
             try applyToFile(fig.Language.PLIST, allocator, io, input, path, text, op, fig.Language.PLIST.default_type)
         else
             return error.FormatDisabled,
-        .json5 => return error.UnsupportedJson5Edit,
         .canonical => return error.UnsupportedCanonicalEdit,
         .fig => if (comptime build_options.lang_fig)
             try applyToFile(fig.Language.FIG, allocator, io, input, path, text, op, fig.Language.FIG.default_type)
@@ -548,6 +546,56 @@ test "jsonifyEdit quotes inserted key and value, leaves deletes bare" {
     try t.expectEqualStrings("\"y\"", sq.op.set_sequence[1]);
 }
 
+// Regression: `.json5` used to be a hard-refused branch in both `runEdit`
+// and `applyStructuralEdit` (`error.UnsupportedJson5Edit`) even though
+// `Editor(json.Language)` with `.format = .JSON5` fully supports every
+// structural op (see `languages/json/editor_helper.zig`). These exercise the
+// CLI's own dispatch path — `jsonifyEdit` requoting text/keys, then
+// `applyEdit` reparsing under `jsonDialect(.json5) == .JSON5` — the same
+// two calls `applyStructuralEdit`/`runEdit` make, so a re-introduced gate
+// would only be caught by hitting this path, not by the lower-level editor
+// tests alone.
+test "applyEdit performs the structural ops on JSON5 via the CLI's jsonify+dialect path" {
+    if (comptime !build_options.lang_json) return error.SkipZigTest;
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const J = fig.Language.JSON;
+    const dia = jsonDialect(.json5);
+    try t.expectEqual(J.Type.JSON5, dia);
+
+    // insert_key requotes both the new key and value, landing valid JSON5
+    // (unquoted keys elsewhere in the document are untouched).
+    {
+        const j = try jsonifyEdit(a, .{ .insert_key = "port" }, "8080");
+        const out = try applyEdit(J, a, "{ host: 'localhost' }", &.{}, j.text, j.op, dia);
+        try t.expectEqualStrings("{ host: 'localhost', \"port\": \"8080\" }", out);
+    }
+    // replace_value (the `edit` action, without --key) requotes the
+    // replacement as a JSON string, same as JSON/JSONC.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "port" }};
+        const j = try jsonifyEdit(a, .replace_value, "9090");
+        const out = try applyEdit(J, a, "{ host: 'localhost', port: 8080 }", &p, j.text, j.op, dia);
+        try t.expectEqualStrings("{ host: 'localhost', port: \"9090\" }", out);
+    }
+    // delete_key carries no requoted text and drops the entry outright.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "port" }};
+        const j = try jsonifyEdit(a, .delete_key, "");
+        const out = try applyEdit(J, a, "{ host: 'localhost', port: 8080 }", &p, j.text, j.op, dia);
+        try t.expectEqualStrings("{ host: 'localhost' }", out);
+    }
+    // append_seq onto a trailing-comma array doesn't double the comma.
+    {
+        var p = [_]fig.AST.PathSegment{.{ .key = "tags" }};
+        const j = try jsonifyEdit(a, .append_seq, "3");
+        const out = try applyEdit(J, a, "{ tags: [1, 2,] }", &p, j.text, j.op, dia);
+        try t.expectEqualStrings("{ tags: [1, 2, \"3\",] }", out);
+    }
+}
+
 test "emptyDocSeed: seedable formats round-trip a first `set`, others refuse" {
     const t = std.testing;
     var arena = std.heap.ArenaAllocator.init(t.allocator);
@@ -567,6 +615,12 @@ test "emptyDocSeed: seedable formats round-trip a first `set`, others refuse" {
     const json = try applyEdit(fig.Language.JSON, a, emptyDocSeed(.json).?, &path, jv.text, jv.op, .JSON);
     try t.expect(std.mem.indexOf(u8, json, "\"hello\"") != null);
     try t.expect(std.mem.indexOf(u8, json, "\"world\"") != null);
+
+    // JSON5: same `{}` seed as JSON, reparsed under the JSON5 dialect — its
+    // in-place edit is no longer gated off (see the dedicated JSON5 test above).
+    const json5 = try applyEdit(fig.Language.JSON, a, emptyDocSeed(.json5).?, &path, jv.text, jv.op, jsonDialect(.json5));
+    try t.expect(std.mem.indexOf(u8, json5, "\"hello\"") != null);
+    try t.expect(std.mem.indexOf(u8, json5, "\"world\"") != null);
 
     // TOML: empty seed, value already a TOML literal.
     const toml = try applyEdit(fig.Language.TOML, a, emptyDocSeed(.toml).?, &path, "\"world\"", .set, fig.Language.TOML.default_type);

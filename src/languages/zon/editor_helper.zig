@@ -186,6 +186,46 @@ test "zon delete a key with an owned leading comment" {
     );
 }
 
+// Regression: a compact single-line struct packs multiple fields onto one
+// physical line, so `deleteKey`'s generic line-based delete used to remove
+// the whole line. ZON compounds this: a field's key span starts at the bare
+// identifier, not its leading `.` (see `appendFieldName`'s doc +
+// `insertFlowMapEntry`'s), so the comma-aware flow-splice fallback must also
+// back up over that `.` itself, or it strands a bare `.` next to the
+// surviving sibling instead of removing the field cleanly.
+test "zon delete a key from a packed single-line struct (regression)" {
+    var ed = try newZonEditor(".{ .a = 1, .b = 2, .c = 3 }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectZonSource(&ed, ".{ .a = 1, .c = 3 }");
+}
+
+test "zon delete first key of a packed single-line struct" {
+    var ed = try newZonEditor(".{ .a = 1, .b = 2 }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "a" }});
+    try expectZonSource(&ed, ".{ .b = 2 }");
+}
+
+// Regression: deleting the *only* field of a single-field struct must leave an
+// empty struct `.{}`, not delete the braces with the line. The `.`-backup of the
+// flow splice must still fire so no bare `.` is stranded.
+test "zon delete only key of a single-field struct (regression)" {
+    var ed = try newZonEditor(".{ .a = 1 }");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "a" }});
+    try expectZonSource(&ed, ".{ }");
+}
+
+// Regression: deleting the *last* field of a one-field-per-line struct used to
+// strand the predecessor's separator comma before the closing brace.
+test "zon delete last key of a multi-line struct (regression)" {
+    var ed = try newZonEditor(".{\n    .a = 1,\n    .b = 2\n}");
+    defer ed.deinit();
+    try ed.deleteKey(&.{.{ .key = "b" }});
+    try expectZonSource(&ed, ".{\n    .a = 1\n}");
+}
+
 test "zon array append/prepend/remove" {
     var ed = try newZonEditor(".{ 1, 2 }");
     defer ed.deinit();
