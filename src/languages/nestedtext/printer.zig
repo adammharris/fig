@@ -315,6 +315,13 @@ test "round-trips a mixed document with comments" {
     );
 }
 
+test "round-trips a leading comment above a list item with a nested value" {
+    // Regression for the `takeLeading`/`attachLeading` split in
+    // `parser.zig`: the comment must stay above the `-` line, not migrate
+    // onto the nested `nested` key's own line.
+    try expectRoundTrip("- a\n# middle item note\n-\n    nested: 1\n- c\n");
+}
+
 test "empty document prints as nothing" {
     try expectPrint("", "");
 }

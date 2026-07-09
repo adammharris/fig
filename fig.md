@@ -31,7 +31,7 @@ It currently supports the following formats:
 - Property list `.plist`
 - Fig `.figl`, an in-house authoring dialect authored by yours truly!
 
-And you can use `fig` in the following programming languages:
+And has bindings in the following programming languages:
 
 - [Zig](docs/zig.md)
 - [Rust](docs/rust.md)

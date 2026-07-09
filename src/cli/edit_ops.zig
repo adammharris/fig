@@ -274,9 +274,12 @@ pub fn emptyDocSeed(format: Format) ?[]const u8 {
         // single root-level key from an empty file is unaffected.)
         .yaml, .yml, .toml, .fig, .dotenv, .properties, .ini => "",
         .zon => ".{}\n",
-        // NestedText isn't wired into `Editor` yet (reader/printer/
-        // conformance only, so far) — no seed until that lands.
-        .xml, .canonical, .gron, .plist, .nestedtext => null,
+        // An empty NestedText file parses as `.null_` (see `nestedtext/
+        // parser.zig`), and `Editor(NestedText)`'s `insertKey` promotes that
+        // root straight to a one-entry mapping (see its `nt_edit.ntInsertKey`)
+        // — same empty-string seed as YAML/TOML/fig/dotenv/.properties/ini.
+        .nestedtext => "",
+        .xml, .canonical, .gron, .plist => null,
     };
 }
 
@@ -354,10 +357,16 @@ pub fn applyStructuralEdit(
         else
             return error.FormatDisabled,
         .gron => return error.UnsupportedGronEdit,
-        // NestedText: reader + printer + conformance only so far — in-place
-        // editing (`Editor(NestedText)`) is a separate, not-yet-landed pass;
-        // see the module's own doc comment / the project's memory note.
-        .nestedtext => return error.UnsupportedNestedtextEdit,
+        // NestedText: `Editor(NestedText)` covers insert/set/delete/append/
+        // prepend/remove/move/reorder plus leading (own-line) comments; a
+        // same-line trailing comment has no spelling in this grammar (see
+        // `nestedtext/editor_helper.zig`'s `trailingCommentMarker` override),
+        // and inserting into a genuinely empty inline `{}`/`[]` is declined
+        // with `error.EmptyInlineContainer` rather than guessed at.
+        .nestedtext => if (comptime build_options.lang_nestedtext)
+            try applyToFile(fig.Language.NESTEDTEXT, allocator, io, input, path, text, op, fig.Language.NESTEDTEXT.default_type)
+        else
+            return error.FormatDisabled,
     }
 }
 

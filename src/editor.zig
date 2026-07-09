@@ -54,6 +54,21 @@ const Ini = @import("languages/ini/ini.zig").Language;
 // module's header. Comments are `<!-- ... -->`, handled there too.
 const plist_edit = @import("languages/plist/editor_helper.zig");
 const Plist = @import("languages/plist/plist.zig").Language;
+// NestedText: block-indented like YAML/fig, but its sequence items carry no
+// keyvalue-shaped wrapper node (unlike mapping entries), so a nested/empty
+// item value's own span can start on a LATER line than its `-` dash —
+// something no other block format here does (YAML's block-sequence items in
+// practice always keep some token on the dash's own line). That breaks the
+// generic engine's assumption that an item's span starts on its own tag line
+// in several places (append/prepend/remove/move/reorder, and the two leading-
+// comment ops keyed by `.index`), so those get NestedText branches below
+// delegating to `nt_edit`'s dash-position-aware helpers. Insert/set also
+// delegate wholesale: NestedText's own-line-vs-nested-`>`-block value framing
+// and 4-space nesting convention don't fit `writeMapValue`/`insertBlockKey`
+// (YAML/fig-shaped: 2-space nesting, bare `:` continuation) — see
+// `nt_edit`'s module doc.
+const nt_edit = @import("languages/nestedtext/editor_helper.zig");
+const NestedText = @import("languages/nestedtext/nestedtext.zig").Language;
 
 pub fn Editor(comptime Language: type) type {
     @import("languages/language.zig").validate(Language);
@@ -156,6 +171,16 @@ pub fn Editor(comptime Language: type) type {
             // into one (fig `sniffBare` typing, or spliced verbatim when it is
             // already `<…>`) and swapped for the whole value element's span.
             if (Language == Plist) return plist_edit.plistReplaceValue(self, parsed, node, replacement);
+            // NestedText: `replacement` is always a raw scalar (this format
+            // has no typed/quoted literal syntax to splice verbatim the way
+            // YAML/TOML/fig do) that must be RENDERED into same-line or
+            // nested `>`-block form depending on its shape (empty/multiline
+            // forces nested) — and, unlike a direct span splice, the
+            // replacement may need to change the value from same-line to
+            // nested or back, which means reframing from the key/dash
+            // through the old value's end. Handles `.key`, `.index`, and the
+            // (path-less) whole-document root uniformly. See `nt_edit`.
+            if (Language == NestedText) return nt_edit.ntReplaceValue(self, parsed, path, span, replacement);
             // For a YAML mapping value, reframe the whole `: value` so the new
             // value is correctly shaped whatever its form — a scalar stays
             // inline, a block collection descends onto the following lines —
@@ -249,7 +274,16 @@ pub fn Editor(comptime Language: type) type {
                     // `value_text`). Rather than teach the seed a plist spelling,
                     // surface the original `NotFound` — an intermediate `<dict>`
                     // must already exist to land a nested key.
-                    if (Language != Ini and Language != Plist and path.len >= 2 and insert_err == error.NotFound) {
+                    // NestedText joins INI/plist here: the vivify seed is the
+                    // flow `{}` literal, and while NestedText's reader DOES
+                    // accept that as a genuinely empty (childless) mapping,
+                    // this editor's own `ntInsertKey` declines to insert into
+                    // one (see its module doc — expanding an inline `{}`
+                    // into block form is deliberately out of scope) — so
+                    // vivifying through it would only trade today's clear
+                    // `NotFound` for a confusing `EmptyInlineContainer` one
+                    // step later, after already splicing the `{}` in.
+                    if (Language != Ini and Language != Plist and Language != NestedText and path.len >= 2 and insert_err == error.NotFound) {
                         try self.set(path[0 .. path.len - 1], emptyMapLiteral());
                         try self.insertKey(path[0 .. path.len - 1], key_text, value_text);
                     } else return replace_err;
@@ -308,6 +342,12 @@ pub fn Editor(comptime Language: type) type {
 
         pub fn replaceKeyAtPath(self: *Self, path: []const AST.PathSegment, replacement: []const u8) !void {
             const parsed = try self.getParsed();
+            // NestedText: a plain key's span excludes its trailing `:` (so a
+            // plain-to-plain rename can splice directly, below), but a
+            // MULTILINE key's span (`: key\n: continued`) has no separator
+            // colon anywhere in the source at all — converting between the
+            // two forms means adding or dropping one. See `nt_edit.ntReplaceKey`.
+            if (Language == NestedText) return nt_edit.ntReplaceKey(self, parsed, path, replacement);
             const node = try parsed.ast.getKeyByPath(path);
             const span = parsed.span(node);
             try self.replaceAtSpan(span, replacement);
@@ -349,7 +389,12 @@ pub fn Editor(comptime Language: type) type {
         /// the value on reread, so trailing ops are refused for INI here —
         /// every other language's trailing marker is the same as its leading one.
         fn trailingCommentMarker(self: *const Self) ?[]const u8 {
-            if (comptime Language == Ini) return null;
+            // NestedText joins INI here: a `#`/`;` after a value on the SAME
+            // line is literal rest-of-line value text, not a comment (see
+            // `nestedtext/parser.zig`'s "rest-of-line values are 100%
+            // literal" and the printer's own doc) — a trailing comment can
+            // only ever be its own `#` line immediately after the entry.
+            if (comptime Language == Ini or Language == NestedText) return null;
             return self.lineCommentMarker();
         }
 
@@ -366,7 +411,14 @@ pub fn Editor(comptime Language: type) type {
             const node = try parsed.ast.getNodeByPath(path);
             const span = parsed.span(node);
             const source = self.source.items;
-            const line_start = lineStartBefore(source, span.start);
+            // A NestedText sequence item has no keyvalue-shaped wrapper node
+            // (see the module doc at this file's top), so when `path` names
+            // one, `node`'s span may start on a nested/later line rather than
+            // the item's own `-` line — anchor on the dash's line instead.
+            const line_start = if (Language == NestedText and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .index)
+                try nt_edit.seqItemLineStart(source, parsed, path)
+            else
+                lineStartBefore(source, span.start);
             // fig's `#`-only comment line needs the same `>` marker-run prefix
             // as the line it anchors above (comment depth is load-bearing for
             // attachment — DESIGN.md "Comments") — `firstNonSpace` would stop
@@ -455,7 +507,10 @@ pub fn Editor(comptime Language: type) type {
             const node = try parsed.ast.getNodeByPath(path);
             const span = parsed.span(node);
             const source = self.source.items;
-            const line_start = lineStartBefore(source, span.start);
+            const line_start = if (Language == NestedText and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .index)
+                try nt_edit.seqItemLineStart(source, parsed, path)
+            else
+                lineStartBefore(source, span.start);
             const block_start = commentBlockStart(source, line_start, comment_style);
             if (block_start == line_start) return; // nothing above to remove
             try self.replaceAtSpan(Span.init(block_start, line_start), "");
@@ -490,7 +545,10 @@ pub fn Editor(comptime Language: type) type {
             const node = try parsed.ast.getNodeByPath(path);
             const span = parsed.span(node);
             const source = self.source.items;
-            const line_start = lineStartBefore(source, span.start);
+            const line_start = if (Language == NestedText and path.len > 0 and std.meta.activeTag(path[path.len - 1]) == .index)
+                try nt_edit.seqItemLineStart(source, parsed, path)
+            else
+                lineStartBefore(source, span.start);
             const block_start = commentBlockStart(source, line_start, comment_style);
             if (block_start == line_start) return null; // no block above
 
@@ -554,6 +612,8 @@ pub fn Editor(comptime Language: type) type {
                 return ini_edit.iniInsertKey(self, parsed, node, key_text, value_text);
             if (Language == Plist)
                 return plist_edit.plistInsertKey(self, parsed, node, key_text, value_text);
+            if (Language == NestedText)
+                return nt_edit.ntInsertKey(self, parsed, node, key_text, value_text);
             switch (node.kind) {
                 .mapping => |first| {
                     if (isFlow(source, span)) {
@@ -632,6 +692,14 @@ pub fn Editor(comptime Language: type) type {
             // `appendTableToArray` for those. (TOML has no block scalar array.)
             if (Language == Toml) return error.NotAnInlineArray;
             if (Language == Fig) return fig_edit.figAppendSeqLine(self, parsed, node, value_text);
+            // NestedText: a nested/empty-valued item's span doesn't start on
+            // its own `-` line (see the module doc at this file's top), so
+            // `dashColumn` — which reads the column off `first_item`'s own
+            // line — can't be trusted; `nt_edit` derives the dash's line
+            // straight from the sequence node's own span instead, and also
+            // renders a multiline/empty value as a nested `>`-block rather
+            // than `insertSeqLine`'s bare reindent.
+            if (Language == NestedText) return nt_edit.ntAppendItem(self, parsed, node, value_text);
             const last = (try parsed.ast.lastChild(&node)) orelse return error.NotASequence;
             const first_item = (try parsed.ast.child(&node)).?;
             const dash_col = dashColumn(source, parsed.span(first_item).start);
@@ -653,6 +721,7 @@ pub fn Editor(comptime Language: type) type {
             }
             if (Language == Toml) return error.NotAnInlineArray;
             if (Language == Fig) return fig_edit.figPrependSeqLine(self, parsed, node, value_text);
+            if (Language == NestedText) return nt_edit.ntPrependItem(self, parsed, node, value_text);
             const first_item = (try parsed.ast.child(&node)) orelse return error.NotASequence;
             const first_start = parsed.span(first_item).start;
             const line_start = lineStartBefore(source, first_start);
@@ -671,22 +740,32 @@ pub fn Editor(comptime Language: type) type {
             if (node.kind != .sequence) return error.NotASequence;
             const span = parsed.span(node);
             const source = self.source.items;
-            const first = (try parsed.ast.child(&node)) orelse return error.NotFound;
-            var item = first;
-            var is_first = true;
+            // Walk to the target item, keeping `prev` (its immediate
+            // preceding sibling, or null when it's first) alongside — both
+            // the existing `is_first` flag (for the flow path) and
+            // NestedText's dash-position lookup (for the block path) need it,
+            // and computing it here avoids a second O(n) walk in `nt_edit`.
+            var item = (try parsed.ast.child(&node)) orelse return error.NotFound;
+            var prev: ?AST.Node = null;
             if (index == std.math.maxInt(usize)) {
-                item = (try parsed.ast.lastChild(&node)) orelse return error.NotFound;
-                is_first = item.id == first.id;
+                while (parsed.ast.next(&item)) |nxt| {
+                    prev = item;
+                    item = nxt;
+                }
             } else {
-                for (0..index) |_| item = parsed.ast.next(&item) orelse return error.NotFound;
-                is_first = index == 0;
+                for (0..index) |_| {
+                    prev = item;
+                    item = parsed.ast.next(&item) orelse return error.NotFound;
+                }
             }
+            const is_first = prev == null;
             const item_span = parsed.span(item);
             if (isFlow(source, span)) {
                 try self.removeFlowItem(item_span, is_first);
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
+            if (Language == NestedText) return nt_edit.ntRemoveSeqItem(self, parsed, node, item, prev);
             const line_start = commentBlockStart(source, lineStartBefore(source, item_span.start), comment_style);
             const del_end = lineEndAfter(source, item_span.end -| 1);
             try self.replaceAtSpan(Span.init(line_start, del_end), "");
@@ -1027,6 +1106,13 @@ pub fn Editor(comptime Language: type) type {
                 return;
             }
             if (Language == Toml) return error.NotAnInlineArray;
+            // NestedText's block boundaries can't be recovered from
+            // `spans.items[i].start` alone (a nested/empty item's span
+            // doesn't start on its own `-` line — see the module doc), so it
+            // gets its own block-start computation in `nt_edit`; the tiling/
+            // permutation/splice underneath is identical, so it reuses this
+            // file's own `Block`/`fullOrder`/`appendBlockSep`.
+            if (Language == NestedText) return nt_edit.ntReorderSeqItems(self, parsed, node, order);
             var blocks: std.ArrayList(Block) = .empty;
             defer blocks.deinit(self.allocator);
             for (spans.items) |s| {
@@ -1675,12 +1761,12 @@ fn renderLineComments(
 
 /// A relocatable entry block: a byte range `[start, end)` covering one mapping
 /// entry or sequence item (its owned comment block through its last line).
-const Block = struct { start: usize, end: usize };
+pub const Block = struct { start: usize, end: usize };
 
 /// Fill each block's `end` from the next block's `start` so the blocks tile a
 /// contiguous region; the final block runs to `last_end`. Trailing trivia (a
 /// blank line, an orphan comment) thus rides with the preceding entry.
-fn tileBlocks(blocks: []Block, last_end: usize) void {
+pub fn tileBlocks(blocks: []Block, last_end: usize) void {
     for (blocks, 0..) |*b, i| {
         b.end = if (i + 1 < blocks.len) blocks[i + 1].start else last_end;
     }
@@ -1690,7 +1776,7 @@ fn tileBlocks(blocks: []Block, last_end: usize) void {
 /// `order` first (in the given order), then every remaining index in ascending
 /// (original) order. Caller owns the returned slice. An empty `order` yields
 /// the identity, so a reorder with nothing to bring forward is a no-op.
-fn fullOrder(allocator: std.mem.Allocator, order: []const usize, n: usize) ![]usize {
+pub fn fullOrder(allocator: std.mem.Allocator, order: []const usize, n: usize) ![]usize {
     const result = try allocator.alloc(usize, n);
     errdefer allocator.free(result);
     const used = try allocator.alloc(bool, n);

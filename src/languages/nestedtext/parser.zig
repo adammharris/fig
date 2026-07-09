@@ -242,9 +242,28 @@ fn captureComment(self: *Parser, l: Line) void {
 }
 
 fn claimLeading(self: *Parser, id: AST.Node.Id) ParserError!void {
-    if (self.pending_leading.items.len == 0) return;
+    self.attachLeading(id, try self.takeLeading());
+}
+
+/// Snapshot-and-clear the currently pending leading comments, WITHOUT
+/// attaching them to a node yet. Split out of `claimLeading` for
+/// `parseListBlock`: a list item has no node of its own to claim onto until
+/// AFTER `parseItemValue` returns (unlike a dict item, which creates its key
+/// node — and calls `claimLeading` on it — before parsing its value), and if
+/// that value is itself a nested container, its own first entry would
+/// otherwise call `claimLeading` FIRST and steal the comment meant for the
+/// outer list item. Callers on this path snapshot before recursing into
+/// `parseItemValue`, then `attachLeading` once the item's real node id is
+/// known.
+fn takeLeading(self: *Parser) ParserError!?[]AST.Comment {
+    if (self.pending_leading.items.len == 0) return null;
     const owned = try self.allocator.dupe(AST.Comment, self.pending_leading.items);
     self.pending_leading.clearRetainingCapacity();
+    return owned;
+}
+
+fn attachLeading(self: *Parser, id: AST.Node.Id, leading: ?[]AST.Comment) void {
+    const owned = leading orelse return;
     self.arena.node_comments.items[id].leading = owned;
     self.comments_seen = true;
 }
@@ -390,8 +409,14 @@ fn parseListBlock(self: *Parser, indent: usize) ParserError!AST.Node.Id {
         if (l.indent > indent) return self.failAtLine(l, error.InvalidIndentation);
         if (l.kind != .dash) return self.failAtLine(l, error.ExpectedListItem);
         self.pos += 1;
+        // Snapshot the item's own leading comment BEFORE recursing into its
+        // value: a list item has no node of its own until `parseItemValue`
+        // returns, and if the value is itself a nested container, its first
+        // entry would otherwise claim this comment first (see `takeLeading`'s
+        // doc comment).
+        const leading = try self.takeLeading();
         const value_id = try self.parseItemValue(l.content, indent);
-        try self.claimLeading(value_id);
+        self.attachLeading(value_id, leading);
         self.appendSeqItem(seq_id, value_id);
         end = self.arena.spans.items[value_id].end;
     }
@@ -850,4 +875,21 @@ test "leading comment attaches to the following key" {
     const cs = ast.comments(key_node.id);
     try testing.expectEqual(@as(usize, 1), cs.leading.len);
     try testing.expectEqualStrings(" a header comment", cs.leading[0].text);
+}
+
+test "leading comment above a list item attaches to the ITEM, not a descendant of its nested value" {
+    // Regression: a list item has no node of its own until its value is
+    // fully parsed, so a comment captured just above it must be snapshotted
+    // BEFORE recursing into a nested value — otherwise that value's own
+    // first entry (here, the `nested` key) claims it first. See
+    // `takeLeading`'s doc comment.
+    var ast = try parseAbstract(testing.allocator, "- a\n# middle item note\n-\n    nested: 1\n- c\n", .NESTEDTEXT);
+    defer ast.deinit();
+    const item = try AST.getValByPath(&ast, &.{.{ .index = 1 }});
+    const cs = ast.comments(item.id);
+    try testing.expectEqual(@as(usize, 1), cs.leading.len);
+    try testing.expectEqualStrings(" middle item note", cs.leading[0].text);
+
+    const nested_key = (try AST.firstChildKey(&ast, &item)).?;
+    try testing.expectEqual(@as(usize, 0), ast.comments(nested_key.id).leading.len);
 }

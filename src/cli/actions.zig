@@ -120,9 +120,14 @@ pub fn runEdit(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, binary_n
             return error.FormatDisabled,
         // gron is a CLI-only get/echo format with no in-place editor.
         .gron => return error.UnsupportedGronEdit,
-        // NestedText: reader + printer + conformance only so far — see
-        // `edit_ops.applyStructuralEdit`'s matching arm.
-        .nestedtext => return error.UnsupportedNestedtextEdit,
+        // NestedText: `Editor(NestedText)` renders the replacement as a raw
+        // scalar (same-line or a nested `>`-block, per its shape) rather than
+        // splicing it verbatim as syntax — this format has no typed/quoted
+        // literal to splice in the first place. See `nt_edit.ntReplaceValue`.
+        .nestedtext => if (comptime build_options.lang_nestedtext)
+            try edit_ops.applyToFile(fig.Language.NESTEDTEXT, a, io, input, opts.path, opts.replacement, op, fig.Language.NESTEDTEXT.default_type)
+        else
+            return error.FormatDisabled,
     }
 }
 
@@ -566,7 +571,14 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
             else
                 return error.FormatDisabled,
             .gron => return error.UnsupportedGronEdit,
-            .nestedtext => return error.UnsupportedNestedtextEdit,
+            // A leading (own-line) comment reads fine; `--inline` surfaces
+            // `error.CommentsUnsupported` from the editor — NestedText has no
+            // same-line trailing comment syntax (see `Editor`'s
+            // `trailingCommentMarker`), matching INI.
+            .nestedtext => if (comptime build_options.lang_nestedtext)
+                try edit_ops.getCommentFromFile(fig.Language.NESTEDTEXT, a, io, input, opts.path, opts.inline_comment, fig.Language.NESTEDTEXT.default_type)
+            else
+                return error.FormatDisabled,
         };
         // Print the comment followed by a newline. An absent comment (null)
         // and a present-but-empty one both print just the newline — the CLI
@@ -635,7 +647,12 @@ pub fn runComment(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stder
         else
             return error.FormatDisabled,
         .gron => return error.UnsupportedGronEdit,
-        .nestedtext => return error.UnsupportedNestedtextEdit,
+        // `add`/`delete` leading comment ops work; `--inline` set/delete
+        // surfaces `error.CommentsUnsupported` (see the `--get` branch above).
+        .nestedtext => if (comptime build_options.lang_nestedtext)
+            try edit_ops.applyToFile(fig.Language.NESTEDTEXT, a, io, input, opts.path, opts.text, op, fig.Language.NESTEDTEXT.default_type)
+        else
+            return error.FormatDisabled,
     }
 }
 
