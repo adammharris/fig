@@ -23,6 +23,22 @@ export enum Format {
   /** The native `fig` authoring dialect (see `src/languages/fig/DESIGN.md` in
    *  the core repo) — a memorable, typeable surface over the same AST. */
   Fig = 8,
+  /** INI (`[section]` + `key = value`). Read/edit/serialize. Untyped-string
+   *  scalars: `port = 8080` reads back as the string "8080". */
+  Ini = 9,
+  /** dotenv / `.env` (flat `KEY=value`). Read/edit/serialize. Flat string map
+   *  only — no nesting, untyped scalars (serialize surfaces a diagnostic when
+   *  a nested value cannot be represented). */
+  Dotenv = 10,
+  /** Java `.properties` (flat `key=value`). Read/edit/serialize. Same flat,
+   *  untyped limits as {@link Format.Dotenv}. */
+  Properties = 11,
+  /** Apple XML property list. Read/edit/serialize. Typed and nested
+   *  (dict/array/string/integer/real/bool, date/data via the extended scalar). */
+  Plist = 12,
+  /** NestedText (https://nestedtext.org). Read/edit/serialize. Nested
+   *  (dict/list) but deliberately untyped — every leaf is a string. */
+  Nestedtext = 13,
 }
 
 /** Controls how {@link serialize} renders output. Omitted fields fall back to

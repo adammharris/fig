@@ -26,7 +26,7 @@ const abi_version: u8 = 1;
 /// alongside the Rust/npm floor checks), since the CLI always embeds
 /// whatever core it's built against. Surfaced via `fig version`, which prints
 /// both numbers.
-const cli_version = std.SemanticVersion.parse("3.3.0") catch
+const cli_version = std.SemanticVersion.parse("3.4.0") catch
     @compileError("invalid cli_version");
 
 /// The current "epoch" — a marketing name that changes far less often than

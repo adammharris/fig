@@ -17,7 +17,7 @@ extern "C" {
 // also exposed as a string by fig_version_string().
 // ============================================================================
 #define FIG_VERSION_MAJOR 2
-#define FIG_VERSION_MINOR 3
+#define FIG_VERSION_MINOR 4
 #define FIG_VERSION_PATCH 0
 #define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
@@ -126,6 +126,22 @@ typedef enum FigFormat {
     // Appended (not inserted) to keep the ABI values of the existing members
     // stable, same as FIG_FORMAT_JSON5 before it.
     FIG_FORMAT_FIG = 8,
+    // INI (`[section]` + `key = value`). Read/edit/serialize. Untyped-string
+    // scalars: `port = 8080` reads back as the string "8080".
+    FIG_FORMAT_INI = 9,
+    // dotenv / `.env` (flat `KEY=value`). Read/edit/serialize. Flat string map
+    // only — no nesting, untyped scalars (a nested tree cannot be represented;
+    // serialize surfaces a diagnostic).
+    FIG_FORMAT_DOTENV = 10,
+    // Java `.properties` (flat `key=value`). Read/edit/serialize. Same flat,
+    // untyped representational limits as dotenv.
+    FIG_FORMAT_PROPERTIES = 11,
+    // Apple XML property list. Read/edit/serialize. Genuinely typed and nested
+    // (dict/array/string/integer/real/bool, date/data via the extended scalar).
+    FIG_FORMAT_PLIST = 12,
+    // NestedText (https://nestedtext.org). Read/edit/serialize. Nested
+    // (dict/list) but deliberately untyped — every leaf is a string.
+    FIG_FORMAT_NESTEDTEXT = 13,
 } FigFormat;
 
 // Capability bits, OR-combined in the return of fig_format_capabilities.

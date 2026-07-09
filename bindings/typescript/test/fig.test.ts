@@ -429,6 +429,32 @@ test("Document.serialize converts cross-format", () => {
   );
 });
 
+// The config formats added in 2.4 (see Format.Ini … Format.Nestedtext). The
+// published wasm links in the four default-on ones; plist is opt-in (build with
+// FIG_WASM_PLIST=1), so it is absent from the module this suite tests.
+test("2.4 config formats: capabilities, parse/convert, and edit", () => {
+  for (const f of [Format.Ini, Format.Dotenv, Format.Properties, Format.Nestedtext]) {
+    assert.deepEqual(capabilities(f), { read: true, edit: true, serialize: true }, `capabilities(${Format[f]})`);
+  }
+  // plist is opt-in and not in the default payload — capabilities report it off,
+  // so a consumer can detect it at runtime instead of hitting an unsupported error.
+  assert.deepEqual(capabilities(Format.Plist), { read: false, edit: false, serialize: false });
+
+  // INI: read into the tree and convert out to JSON. Scalars are untyped
+  // strings (INI carries no type info), so `8080` round-trips as "8080".
+  {
+    using doc = Document.parse("[server]\nhost = localhost\nport = 8080\n", Format.Ini);
+    assert.equal(doc.get(["server", "port"]), "8080");
+  }
+
+  // dotenv edits in place, splicing source (comments/layout preserved).
+  {
+    using ed = Editor.open("# app\nHOST=localhost\n", Format.Dotenv);
+    ed.set(["PORT"], 8080);
+    assert.equal(ed.source(), "# app\nHOST=localhost\nPORT=8080\n");
+  }
+});
+
 test("Document.diagnose reports a dropped null for TOML", () => {
   using doc = Document.parse("a: null\nb: 1\n", Format.Yaml);
   const warns = doc.diagnose(Format.Toml);

@@ -23,7 +23,20 @@ const srcDir = resolve(here, "..", "src");
 // docs/typescript.md's Formats section). Either way, check `capabilities()` at
 // runtime rather than assuming — don't hard-code which module you're running.
 const includeZon = process.env.FIG_WASM_ZON === "1";
-const zigArgs = ["build", "wasm", includeZon ? "-Dzon=true" : "-Dzon=false"];
+// INI/dotenv/.properties/NestedText are `-D<lang>` default-on in build.zig, so
+// `zig build wasm` already links them into the published module. plist is
+// default-off and left out here too — its XML parser is the heaviest of the
+// group and the least likely to be needed by a typical consumer, so (like ZON)
+// it's opt-in to keep the inlined base64 payload smaller for everyone else. Set
+// FIG_WASM_PLIST=1 to build a module with it included. Either way, check
+// `capabilities()` at runtime rather than assuming which module you're running.
+const includePlist = process.env.FIG_WASM_PLIST === "1";
+const zigArgs = [
+  "build",
+  "wasm",
+  includeZon ? "-Dzon=true" : "-Dzon=false",
+  includePlist ? "-Dplist=true" : "-Dplist=false",
+];
 
 console.error(`· zig ${zigArgs.join(" ")}`);
 execFileSync("zig", zigArgs, { cwd: repoRoot, stdio: "inherit" });

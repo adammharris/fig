@@ -31,6 +31,21 @@ const XmlType = if (build_options.lang_xml) @import("languages/xml/xml.zig").Typ
 const FigDialectParser = if (build_options.lang_fig) @import("languages/fig/parser.zig") else void;
 const FigDialectType = if (build_options.lang_fig) @import("languages/fig/fig.zig").Type else void;
 const FigDialectLang = if (build_options.lang_fig) @import("languages/fig/fig.zig").Language else void;
+const IniParser = if (build_options.lang_ini) @import("languages/ini/parser.zig") else void;
+const IniType = if (build_options.lang_ini) @import("languages/ini/ini.zig").Type else void;
+const IniLang = if (build_options.lang_ini) @import("languages/ini/ini.zig").Language else void;
+const DotenvParser = if (build_options.lang_dotenv) @import("languages/dotenv/parser.zig") else void;
+const DotenvType = if (build_options.lang_dotenv) @import("languages/dotenv/dotenv.zig").Type else void;
+const DotenvLang = if (build_options.lang_dotenv) @import("languages/dotenv/dotenv.zig").Language else void;
+const PropertiesParser = if (build_options.lang_properties) @import("languages/properties/parser.zig") else void;
+const PropertiesType = if (build_options.lang_properties) @import("languages/properties/properties.zig").Type else void;
+const PropertiesLang = if (build_options.lang_properties) @import("languages/properties/properties.zig").Language else void;
+const PlistParser = if (build_options.lang_plist) @import("languages/plist/parser.zig") else void;
+const PlistType = if (build_options.lang_plist) @import("languages/plist/plist.zig").Type else void;
+const PlistLang = if (build_options.lang_plist) @import("languages/plist/plist.zig").Language else void;
+const NestedTextParser = if (build_options.lang_nestedtext) @import("languages/nestedtext/parser.zig") else void;
+const NestedTextType = if (build_options.lang_nestedtext) @import("languages/nestedtext/nestedtext.zig").Type else void;
+const NestedTextLang = if (build_options.lang_nestedtext) @import("languages/nestedtext/nestedtext.zig").Language else void;
 // Cross-format conversion helpers used by `fig_document_serialize`. `Lossless` is
 // format-agnostic (always compiled in); `materialize` is YAML-only, so it follows
 // the gated-import pattern above (collapses to `void` when YAML is off, and every
@@ -68,10 +83,11 @@ pub const FigStatus = enum(c_int) {
 };
 
 /// Translation of fig.Language.Type to C ABI. Not every function accepts every
-/// member: `fig_parse` accepts all of them; the editor (`fig_editor_*`) supports
-/// `json`/`jsonc`/`json5`/`yaml`/`toml`/`fig` (others return `unsupported_format`);
-/// the serializer (`fig_value_serialize`) accepts `json`/`jsonc`/`json5`/`yaml`/
-/// `toml`/`zon`/`fig` (JSONC = plain-JSON syntax with comments).
+/// member: `fig_parse` accepts all of them; the serializer (`fig_value_serialize`)
+/// accepts all of them; the editor (`fig_editor_*`) supports every member EXCEPT
+/// `xml` (which returns `unsupported_format` — no in-place XML editor yet). Use
+/// `fig_format_capabilities` to query the exact support in a given build (JSONC =
+/// plain-JSON syntax with comments).
 pub const FigFormat = enum(c_int) {
     json = 1,
     jsonc = 2,
@@ -87,6 +103,25 @@ pub const FigFormat = enum(c_int) {
     /// The native `fig` authoring dialect (see src/languages/fig/DESIGN.md).
     /// Read, written, and edited (via `fig_editor_*`). Appended, same as JSON5.
     fig = 8,
+    /// INI (`[section]` + `key = value`, `;`/`#` comments). Read, written, and
+    /// edited. Scalars are untyped strings — the grammar carries no type info,
+    /// so `port = 8080` reads back as the string `"8080"`. Appended, stable.
+    ini = 9,
+    /// dotenv / `.env` (flat `KEY=value`, optional `export`, `"`/`'` quoting).
+    /// Read, written, and edited. Flat string map only — no nesting, untyped
+    /// scalars; a nested value tree cannot be represented (serialize warns).
+    dotenv = 10,
+    /// Java `.properties` (flat `key=value`/`:`/space, backslash escapes, line
+    /// continuation, `#`/`!` comments). Read, written, and edited. Flat and
+    /// untyped, same representational limits as dotenv.
+    properties = 11,
+    /// Apple XML property list (`<plist><dict>…</dict></plist>`). Read, written,
+    /// and edited. Genuinely typed and nested (dict/array/string/integer/real/
+    /// bool, with date/data on the `extended` scalar).
+    plist = 12,
+    /// NestedText (https://nestedtext.org). Read, written, and edited. Nested
+    /// (dict/list) but deliberately untyped — every leaf is a string.
+    nestedtext = 13,
 };
 
 // ==================
@@ -158,6 +193,11 @@ pub export fn fig_format_capabilities(format: c_int) u32 {
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) read | edit | serialize else 0,
         @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) read | serialize else 0,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.ini) => if (comptime build_options.lang_ini) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.dotenv) => if (comptime build_options.lang_dotenv) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.properties) => if (comptime build_options.lang_properties) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.plist) => if (comptime build_options.lang_plist) read | edit | serialize else 0,
+        @intFromEnum(FigFormat.nestedtext) => if (comptime build_options.lang_nestedtext) read | edit | serialize else 0,
         else => 0,
     };
 }
@@ -308,6 +348,11 @@ pub export fn fig_parse_ex(
         @intFromEnum(FigFormat.zon) => .zon,
         @intFromEnum(FigFormat.xml) => .xml,
         @intFromEnum(FigFormat.fig) => .fig,
+        @intFromEnum(FigFormat.ini) => .ini,
+        @intFromEnum(FigFormat.dotenv) => .dotenv,
+        @intFromEnum(FigFormat.properties) => .properties,
+        @intFromEnum(FigFormat.plist) => .plist,
+        @intFromEnum(FigFormat.nestedtext) => .nestedtext,
         else => return fillError(out_err, .unsupported_format, "unsupported or unknown format"),
     };
 
@@ -362,6 +407,31 @@ pub export fn fig_parse_ex(
             return formatDisabled(out_err, source, handle),
         .fig => if (comptime build_options.lang_fig)
             FigDialectParser.parse(allocator, source, FigDialectType.Fig) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .ini => if (comptime build_options.lang_ini)
+            IniParser.parse(allocator, source, IniType.INI) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .dotenv => if (comptime build_options.lang_dotenv)
+            DotenvParser.parse(allocator, source, DotenvType.DOTENV) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .properties => if (comptime build_options.lang_properties)
+            PropertiesParser.parse(allocator, source, PropertiesType.PROPERTIES) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .plist => if (comptime build_options.lang_plist)
+            PlistParser.parse(allocator, source, PlistType.XML) catch |err|
+                return parseFailed(out_err, err, source, handle)
+        else
+            return formatDisabled(out_err, source, handle),
+        .nestedtext => if (comptime build_options.lang_nestedtext)
+            NestedTextParser.parse(allocator, source, NestedTextType.NESTEDTEXT) catch |err|
                 return parseFailed(out_err, err, source, handle)
         else
             return formatDisabled(out_err, source, handle),
@@ -765,6 +835,11 @@ const editor_variants = blk: {
     if (build_options.lang_toml) variants = variants ++ &[_]Variant{.{ .name = "toml", .Lang = TomlLang }};
     if (build_options.lang_fig) variants = variants ++ &[_]Variant{.{ .name = "fig", .Lang = FigDialectLang }};
     if (build_options.lang_zon) variants = variants ++ &[_]Variant{.{ .name = "zon", .Lang = ZonLang }};
+    if (build_options.lang_ini) variants = variants ++ &[_]Variant{.{ .name = "ini", .Lang = IniLang }};
+    if (build_options.lang_dotenv) variants = variants ++ &[_]Variant{.{ .name = "dotenv", .Lang = DotenvLang }};
+    if (build_options.lang_properties) variants = variants ++ &[_]Variant{.{ .name = "properties", .Lang = PropertiesLang }};
+    if (build_options.lang_plist) variants = variants ++ &[_]Variant{.{ .name = "plist", .Lang = PlistLang }};
+    if (build_options.lang_nestedtext) variants = variants ++ &[_]Variant{.{ .name = "nestedtext", .Lang = NestedTextLang }};
     break :blk variants;
 };
 
@@ -831,6 +906,11 @@ pub export fn fig_editor_create(
         @intFromEnum(FigFormat.toml) => if (comptime build_options.lang_toml) .toml else return .unsupported_format,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else return .unsupported_format,
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else return .unsupported_format,
+        @intFromEnum(FigFormat.ini) => if (comptime build_options.lang_ini) .ini else return .unsupported_format,
+        @intFromEnum(FigFormat.dotenv) => if (comptime build_options.lang_dotenv) .dotenv else return .unsupported_format,
+        @intFromEnum(FigFormat.properties) => if (comptime build_options.lang_properties) .properties else return .unsupported_format,
+        @intFromEnum(FigFormat.plist) => if (comptime build_options.lang_plist) .plist else return .unsupported_format,
+        @intFromEnum(FigFormat.nestedtext) => if (comptime build_options.lang_nestedtext) .nestedtext else return .unsupported_format,
         else => return .unsupported_format,
     };
 
@@ -852,6 +932,11 @@ pub export fn fig_editor_create(
         .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         .fig => if (comptime build_options.lang_fig) .{ .fig = .{ .allocator = allocator } } else unreachable,
         .zon => if (comptime build_options.lang_zon) .{ .zon = .{ .allocator = allocator } } else unreachable,
+        .ini => if (comptime build_options.lang_ini) .{ .ini = .{ .allocator = allocator } } else unreachable,
+        .dotenv => if (comptime build_options.lang_dotenv) .{ .dotenv = .{ .allocator = allocator } } else unreachable,
+        .properties => if (comptime build_options.lang_properties) .{ .properties = .{ .allocator = allocator } } else unreachable,
+        .plist => if (comptime build_options.lang_plist) .{ .plist = .{ .allocator = allocator } } else unreachable,
+        .nestedtext => if (comptime build_options.lang_nestedtext) .{ .nestedtext = .{ .allocator = allocator } } else unreachable,
         // Filtered out by the format switch above; XML editing is not yet wired.
         .xml => unreachable,
     };
@@ -1996,6 +2081,11 @@ fn serializeFormatOf(format: c_int) ?AST.SerializeFormat {
         @intFromEnum(FigFormat.zon) => if (comptime build_options.lang_zon) .zon else null,
         @intFromEnum(FigFormat.xml) => if (comptime build_options.lang_xml) .xml else null,
         @intFromEnum(FigFormat.fig) => if (comptime build_options.lang_fig) .fig else null,
+        @intFromEnum(FigFormat.ini) => if (comptime build_options.lang_ini) .ini else null,
+        @intFromEnum(FigFormat.dotenv) => if (comptime build_options.lang_dotenv) .dotenv else null,
+        @intFromEnum(FigFormat.properties) => if (comptime build_options.lang_properties) .properties else null,
+        @intFromEnum(FigFormat.plist) => if (comptime build_options.lang_plist) .plist else null,
+        @intFromEnum(FigFormat.nestedtext) => if (comptime build_options.lang_nestedtext) .nestedtext else null,
         else => null,
     };
 }
@@ -2370,17 +2460,14 @@ fn prepareDocumentAst(handle: *DocumentHandle, fmt: AST.SerializeFormat, options
             .yaml => .yaml,
             .toml => .toml,
             .zon => .zon,
-            // None of these has a `Lossless.Target` counterpart: `.canonical` is
-            // never yielded by `serializeFormatOf` (not a member of the C ABI's
-            // `FigFormat`), `.fig` has no envelope encoding of its own yet, and
-            // XML has no type-carrying envelope to encode into — every scalar
-            // becomes element/attribute text regardless (see
-            // `languages/xml/printer.zig`), so an envelope couldn't preserve
-            // anything an envelope-free print doesn't already lose. INI is the
-            // same story (no C ABI `FigFormat.ini` exists yet either). All
-            // four fall through to decode-only (no envelope on output). plist
-            // is the same story too (also no C ABI `FigFormat.plist`), as is
-            // NestedText (no C ABI `FigFormat.nestedtext` either).
+            // None of these has a `Lossless.Target` counterpart, so all fall
+            // through to decode-only (no envelope on output): `.canonical` is
+            // never yielded by `serializeFormatOf`; `.fig` has no envelope
+            // encoding of its own yet; and XML/INI/dotenv/.properties/plist/
+            // NestedText have no type-carrying envelope to encode into — their
+            // scalars are plain text (or, for plist, a fixed DTD-typed element),
+            // so an envelope couldn't preserve anything an envelope-free print
+            // doesn't already lose.
             .canonical, .fig, .xml, .ini, .dotenv, .properties, .plist, .nestedtext => null,
         };
         const decoded = try arena.create(AST);
