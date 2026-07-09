@@ -118,6 +118,61 @@ fn skipSpace(text: []const u8, idx: usize) usize {
     return i;
 }
 
+/// Range of the bare (unquoted) value of the `version = X.Y.Z` line in a
+/// `.figl` source (e.g. `figl/build.zig.figl`, which *generates* build.zig.zon).
+/// Anchors on a line whose first non-space token is exactly `version` followed
+/// by `=`, so `minimum_zig_version = ...` on another line is never matched. The
+/// value is unquoted, so the range runs from the first non-space after `=` up to
+/// the first space / `#` comment / end of line.
+pub fn figlVersionRange(text: []const u8) ?Range {
+    var i: usize = 0;
+    while (i < text.len) {
+        const nl = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const line = text[i..nl];
+        const lead = line.len - std.mem.trimStart(u8, line, " \t").len;
+        const trimmed = line[lead..];
+        const is_version_key = std.mem.startsWith(u8, trimmed, "version") and
+            (trimmed.len == "version".len or trimmed["version".len] == ' ' or
+                trimmed["version".len] == '\t' or trimmed["version".len] == '=');
+        if (is_version_key) {
+            if (std.mem.indexOfScalarPos(u8, text, i + lead, '=')) |eq| {
+                if (eq < nl) {
+                    var s = eq + 1;
+                    while (s < nl and (text[s] == ' ' or text[s] == '\t')) s += 1;
+                    var e = s;
+                    while (e < nl and text[e] != ' ' and text[e] != '\t' and
+                        text[e] != '#' and text[e] != '\r') e += 1;
+                    if (e > s) return .{ .start = s, .end = e };
+                }
+            }
+        }
+        i = nl + 1;
+    }
+    return null;
+}
+pub fn figlVersion(text: []const u8) ?[]const u8 {
+    const r = figlVersionRange(text) orelse return null;
+    return text[r.start..r.end];
+}
+
+/// Range of the integer value of a `#define <macro> <int>` line in the C header
+/// (`FIG_VERSION_MAJOR` / `_MINOR` / `_PATCH` in `bindings/c/include/fig.h`).
+/// Anchors on the first occurrence of `macro` — the `#define` precedes every use
+/// in `FIG_VERSION_NUM` — and takes the run of digits after it (so the `<< 16`
+/// uses, which have no digits following the name, are never mistaken for it).
+pub fn cMacroIntRange(text: []const u8, macro: []const u8) ?Range {
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, text, from, macro)) |at| {
+        var s = at + macro.len;
+        while (s < text.len and (text[s] == ' ' or text[s] == '\t')) s += 1;
+        var e = s;
+        while (e < text.len and text[e] >= '0' and text[e] <= '9') e += 1;
+        if (e > s) return .{ .start = s, .end = e };
+        from = at + macro.len;
+    }
+    return null;
+}
+
 /// Range of the string after the first `"version"` key in a package.json.
 pub fn jsonVersionRange(text: []const u8) ?Range {
     const at = std.mem.indexOf(u8, text, "\"version\"") orelse return null;

@@ -17,6 +17,10 @@
 //!   --dry-run: print the edits it *would* make and touch nothing.
 //!
 //! What it keeps consistent, in one shot:
+//!   * a `core` bump edits not just the generated `build.zig.zon` but its `.figl`
+//!     source (`figl/build.zig.figl`, so `check-figl` stays green) and the three
+//!     `FIG_VERSION_*` macros in the C header (`bindings/c/include/fig.h`, which
+//!     `abi-check` asserts equal the `.version`);
 //!   * fig-wasi's package.json version is pinned EXACTLY to `cli_version`, so any
 //!     change to `cli` carries `wasi` with it (and `version-set wasi ...` is
 //!     rejected — bump the CLI instead);
@@ -48,11 +52,21 @@ const Bump = enum { major, minor, patch };
 
 // Manifest paths, relative to the repo root, keyed by which field lives there.
 const zon_rel = "build.zig.zon";
+// `build.zig.zon` is GENERATED from this `.figl` source by `zig build sync-figl`
+// (and `check-figl` fails the build if they drift). A core bump therefore has to
+// edit the source too, not just the generated file, or the next `check-figl`
+// trips. We splice the same new version into both so they stay consistent
+// without needing a regen pass.
+const figl_rel = "figl/build.zig.figl";
 const build_zig_rel = "build.zig";
 const cargo_rel = "bindings/rust/Cargo.toml";
 const ts_pkg_rel = "bindings/typescript/package.json";
 const wasi_pkg_rel = "bindings/wasi/package.json";
 const fig_md_rel = "fig.md";
+// The C ABI header carries the core version as three `#define FIG_VERSION_*`
+// macros (`abi-check` asserts they equal build.zig.zon's `.version`), so a core
+// bump must update them as well.
+const fig_h_rel = "bindings/c/include/fig.h";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -93,10 +107,12 @@ pub fn main(init: std.process.Init) !void {
     // originals, so overlapping edits in one file splice cleanly).
     const cwd = Dir.cwd();
     const zon = try readRel(io, arena, cwd, repo_root, zon_rel);
+    const figl = try readRel(io, arena, cwd, repo_root, figl_rel);
     const build_zig = try readRel(io, arena, cwd, repo_root, build_zig_rel);
     const cargo = try readRel(io, arena, cwd, repo_root, cargo_rel);
     const ts_pkg = try readRel(io, arena, cwd, repo_root, ts_pkg_rel);
     const wasi_pkg = try readRel(io, arena, cwd, repo_root, wasi_pkg_rel);
+    const fig_h = try readRel(io, arena, cwd, repo_root, fig_h_rel);
 
     // Current values.
     const core_cur = fields.zonVersion(zon) orelse fail("no `.version` in {s}", .{zon_rel});
@@ -155,9 +171,35 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, d_core, core_cur)) {
         any = true;
         touched_fig_md = true;
-        const edits = [_]Edit{.{ .range = fields.zonVersionRange(zon).?, .value = d_core }};
-        try writeEdits(io, arena, cwd, repo_root, zon_rel, zon, &edits, dry_run);
-        report(zon_rel, "core", core_cur, d_core);
+        // build.zig.zon (generated) — splice the new version.
+        {
+            const edits = [_]Edit{.{ .range = fields.zonVersionRange(zon).?, .value = d_core }};
+            try writeEdits(io, arena, cwd, repo_root, zon_rel, zon, &edits, dry_run);
+            report(zon_rel, "core", core_cur, d_core);
+        }
+        // figl source — build.zig.zon is generated from it, so edit it in lockstep
+        // (otherwise the next `check-figl` reports build.zig.zon as stale).
+        {
+            const figl_cur = fields.figlVersion(figl) orelse fail("no `version = ...` in {s}", .{figl_rel});
+            const edits = [_]Edit{.{ .range = fields.figlVersionRange(figl).?, .value = d_core }};
+            try writeEdits(io, arena, cwd, repo_root, figl_rel, figl, &edits, dry_run);
+            report(figl_rel, "version", figl_cur, d_core);
+        }
+        // C ABI header: the three FIG_VERSION_* macros (`abi-check` asserts they
+        // equal build.zig.zon's `.version`).
+        {
+            const maj_r = fields.cMacroIntRange(fig_h, "FIG_VERSION_MAJOR") orelse fail("no FIG_VERSION_MAJOR in {s}", .{fig_h_rel});
+            const min_r = fields.cMacroIntRange(fig_h, "FIG_VERSION_MINOR") orelse fail("no FIG_VERSION_MINOR in {s}", .{fig_h_rel});
+            const pat_r = fields.cMacroIntRange(fig_h, "FIG_VERSION_PATCH") orelse fail("no FIG_VERSION_PATCH in {s}", .{fig_h_rel});
+            const v = std.SemanticVersion.parse(d_core) catch fail("core target {s} is not valid SemVer", .{d_core});
+            const edits = [_]Edit{
+                .{ .range = maj_r, .value = try std.fmt.allocPrint(arena, "{d}", .{v.major}) },
+                .{ .range = min_r, .value = try std.fmt.allocPrint(arena, "{d}", .{v.minor}) },
+                .{ .range = pat_r, .value = try std.fmt.allocPrint(arena, "{d}", .{v.patch}) },
+            };
+            try writeEdits(io, arena, cwd, repo_root, fig_h_rel, fig_h, &edits, dry_run);
+            report(fig_h_rel, "FIG_VERSION_{MAJOR,MINOR,PATCH}", core_cur, d_core);
+        }
         report(fig_md_rel, "version (frontmatter, via `fig set`)", core_cur, d_core);
     }
     if (!std.mem.eql(u8, d_cli, cli_cur)) {
