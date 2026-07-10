@@ -424,6 +424,14 @@ typedef enum FigEmbedType {
     FIG_EMBED_ENDMATTER_YAML   = 2,
     // A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
     FIG_EMBED_FRONTMATTER_FIG  = 3,
+    // `+++` ... `+++` TOML frontmatter (the Hugo/Zola convention).
+    FIG_EMBED_FRONTMATTER_TOML = 4,
+    // ```yaml / ```json / ```toml fenced frontmatter blocks: the same inner
+    // format as `---` / `;;;` / `+++`, but shown as a labeled code block that
+    // renders on any markdown viewer.
+    FIG_EMBED_FRONTMATTER_YAML_FENCED = 5,
+    FIG_EMBED_FRONTMATTER_JSON_FENCED = 6,
+    FIG_EMBED_FRONTMATTER_TOML_FENCED = 7,
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in

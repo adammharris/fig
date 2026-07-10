@@ -1361,6 +1361,14 @@ pub const FigEmbedType = enum(c_int) {
     endmatter_yaml = 2,
     /// A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
     frontmatter_fig = 3,
+    /// `+++` … `+++` TOML frontmatter (the Hugo/Zola convention).
+    frontmatter_toml = 4,
+    /// A ```yaml fenced frontmatter block (YAML shown as a labeled code block).
+    frontmatter_yaml_fenced = 5,
+    /// A ```json fenced frontmatter block.
+    frontmatter_json_fenced = 6,
+    /// A ```toml fenced frontmatter block.
+    frontmatter_toml_fenced = 7,
 };
 
 fn embedTypeOf(t: c_int) ?Embed.Type {
@@ -1369,6 +1377,10 @@ fn embedTypeOf(t: c_int) ?Embed.Type {
         @intFromEnum(FigEmbedType.frontmatter_json) => .FrontmatterJson,
         @intFromEnum(FigEmbedType.endmatter_yaml) => .EndmatterYaml,
         @intFromEnum(FigEmbedType.frontmatter_fig) => .FrontmatterFig,
+        @intFromEnum(FigEmbedType.frontmatter_toml) => .FrontmatterToml,
+        @intFromEnum(FigEmbedType.frontmatter_yaml_fenced) => .FrontmatterYamlFenced,
+        @intFromEnum(FigEmbedType.frontmatter_json_fenced) => .FrontmatterJsonFenced,
+        @intFromEnum(FigEmbedType.frontmatter_toml_fenced) => .FrontmatterTomlFenced,
         else => null,
     };
 }
@@ -1380,6 +1392,10 @@ fn figEmbedTypeOf(t: Embed.Type) FigEmbedType {
         .FrontmatterJson => .frontmatter_json,
         .EndmatterYaml => .endmatter_yaml,
         .FrontmatterFig => .frontmatter_fig,
+        .FrontmatterToml => .frontmatter_toml,
+        .FrontmatterYamlFenced => .frontmatter_yaml_fenced,
+        .FrontmatterJsonFenced => .frontmatter_json_fenced,
+        .FrontmatterTomlFenced => .frontmatter_toml_fenced,
     };
 }
 
@@ -1492,6 +1508,7 @@ fn embedInnerSupported(t: Embed.Type) bool {
         .yaml => build_options.lang_yaml,
         .json => build_options.lang_json,
         .fig => build_options.lang_fig,
+        .toml => build_options.lang_toml,
     };
 }
 
@@ -1521,6 +1538,7 @@ fn embedHandleFromHost(
             .yaml => if (comptime build_options.lang_yaml) .{ .yaml = .{ .allocator = allocator } } else unreachable,
             .json => if (comptime build_options.lang_json) .{ .json = .{ .allocator = allocator } } else unreachable,
             .fig => if (comptime build_options.lang_fig) .{ .fig = .{ .allocator = allocator } } else unreachable,
+            .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         },
     };
     const content = host[region.content.start..region.content.end];
@@ -3195,6 +3213,10 @@ test "embed c abi detects each archetype by its open delimiter" {
         .{ .src = ";;;\n{\"k\": 1}\n;;;\nbody\n", .want = .frontmatter_json },
         .{ .src = "```fig\nk = v\n```\nbody\n", .want = .frontmatter_fig },
         .{ .src = "body\n```endmatter\nk: v\n```\n", .want = .endmatter_yaml },
+        .{ .src = "+++\nk = \"v\"\n+++\nbody\n", .want = .frontmatter_toml },
+        .{ .src = "```toml\nk = \"v\"\n```\nbody\n", .want = .frontmatter_toml_fenced },
+        .{ .src = "```yaml\nk: v\n```\nbody\n", .want = .frontmatter_yaml_fenced },
+        .{ .src = "```json\n{\"k\": 1}\n```\nbody\n", .want = .frontmatter_json_fenced },
     };
     for (cases) |case| {
         var out: c_int = -1;

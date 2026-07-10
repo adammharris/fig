@@ -128,18 +128,25 @@ pub fn getCommentFromEmbed(
     const region = embedded.region;
     const inner = content[region.content.start..region.content.end];
 
-    return switch (embed_type) {
-        .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
+    // Keyed on the archetype's inner FORMAT, not the archetype itself, so every
+    // archetype sharing a format (`---`/endmatter/```yaml ⇒ YAML, `;;;`/```json
+    // ⇒ JSON, `+++`/```toml ⇒ TOML) routes to the same reader.
+    return switch (fig.Embed.innerFormat(embed_type)) {
+        .yaml => if (comptime build_options.lang_yaml)
             try getComment(fig.Language.YAML, allocator, inner, path, inline_comment, fig.Language.YAML.default_type)
         else
             return error.FormatDisabled,
         // Strict JSON frontmatter has no comment syntax: nothing to read.
-        .FrontmatterJson => if (comptime build_options.lang_json)
+        .json => if (comptime build_options.lang_json)
             try getComment(fig.Language.JSON, allocator, inner, path, inline_comment, .JSON)
         else
             return error.FormatDisabled,
-        .FrontmatterFig => if (comptime build_options.lang_fig)
+        .fig => if (comptime build_options.lang_fig)
             try getComment(fig.Language.FIG, allocator, inner, path, inline_comment, fig.Language.FIG.default_type)
+        else
+            return error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml)
+            try getComment(fig.Language.TOML, allocator, inner, path, inline_comment, fig.Language.TOML.default_type)
         else
             return error.FormatDisabled,
     };
@@ -183,20 +190,26 @@ pub fn applyToEmbed(
     };
     const inner = base[region.content.start..region.content.end];
 
-    const edited_inner = switch (embed_type) {
-        .FrontmatterYaml, .EndmatterYaml => if (comptime build_options.lang_yaml)
+    // Keyed on the archetype's inner FORMAT, not the archetype itself: a fenced
+    // ```yaml block edits identically to `---` YAML, `+++`/```toml to TOML, etc.
+    const edited_inner = switch (fig.Embed.innerFormat(embed_type)) {
+        .yaml => if (comptime build_options.lang_yaml)
             try applyEdit(fig.Language.YAML, allocator, inner, path, text, op, fig.Language.YAML.default_type)
         else
             return error.FormatDisabled,
         // JSON frontmatter is plain (strict) JSON: an inserted/replaced key or
         // value is quoted as a JSON string, while a comment op rides through
         // unquoted and the editor rejects it (strict JSON has no comment syntax).
-        .FrontmatterJson => if (comptime build_options.lang_json) blk: {
+        .json => if (comptime build_options.lang_json) blk: {
             const j = try jsonifyEdit(allocator, op, text);
             break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, j.text, j.op, .JSON);
         } else return error.FormatDisabled,
-        .FrontmatterFig => if (comptime build_options.lang_fig)
+        .fig => if (comptime build_options.lang_fig)
             try applyEdit(fig.Language.FIG, allocator, inner, path, text, op, fig.Language.FIG.default_type)
+        else
+            return error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml)
+            try applyEdit(fig.Language.TOML, allocator, inner, path, text, op, fig.Language.TOML.default_type)
         else
             return error.FormatDisabled,
     };

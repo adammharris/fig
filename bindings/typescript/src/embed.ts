@@ -56,13 +56,18 @@ export interface Region {
 }
 
 /** The inner editing format an embed archetype carries (`---`/endmatter ⇒ YAML,
- *  `;;;` ⇒ JSON, ```fig ⇒ the fig authoring dialect). */
+ *  `;;;` ⇒ JSON, `+++` ⇒ TOML, ```fig ⇒ the fig authoring dialect, and each
+ *  ```lang fenced label ⇒ that `lang`). */
 function innerFormat(kind: EmbedType): Format {
   switch (kind) {
     case EmbedType.FrontmatterJson:
+    case EmbedType.FrontmatterJsonFenced:
       return Format.Json;
     case EmbedType.FrontmatterFig:
       return Format.Fig;
+    case EmbedType.FrontmatterToml:
+    case EmbedType.FrontmatterTomlFenced:
+      return Format.Toml;
     default:
       return Format.Yaml;
   }

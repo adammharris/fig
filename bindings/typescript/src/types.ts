@@ -138,6 +138,14 @@ export enum EmbedType {
   EndmatterYaml = 2,
   /** ```fig fenced frontmatter, in the native fig authoring dialect. */
   FrontmatterFig = 3,
+  /** `+++` … `+++` TOML frontmatter (the Hugo/Zola convention). */
+  FrontmatterToml = 4,
+  /** ```yaml fenced frontmatter — YAML shown as a labeled code block. */
+  FrontmatterYamlFenced = 5,
+  /** ```json fenced frontmatter. */
+  FrontmatterJsonFenced = 6,
+  /** ```toml fenced frontmatter. */
+  FrontmatterTomlFenced = 7,
 }
 
 const STATUS_MESSAGE: Record<number, string> = {

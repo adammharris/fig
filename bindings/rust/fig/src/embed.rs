@@ -30,6 +30,18 @@ pub enum EmbedType {
     /// ```` ```fig ```` … ```` ``` ```` frontmatter at the top of a markdown file,
     /// in the native fig authoring dialect.
     FrontmatterFig,
+    /// `+++` … `+++` TOML frontmatter at the top of a markdown file — the
+    /// Hugo/Zola convention.
+    FrontmatterToml,
+    /// ```` ```yaml ```` … ```` ``` ```` frontmatter: YAML shown as a labeled
+    /// code block rather than as a `---` rule.
+    FrontmatterYamlFenced,
+    /// ```` ```json ```` … ```` ``` ```` frontmatter: JSON shown as a labeled
+    /// code block rather than behind `;;;` fences.
+    FrontmatterJsonFenced,
+    /// ```` ```toml ```` … ```` ``` ```` frontmatter: TOML shown as a labeled
+    /// code block rather than behind bare `+++` fences.
+    FrontmatterTomlFenced,
 }
 
 impl EmbedType {
@@ -39,6 +51,10 @@ impl EmbedType {
             EmbedType::FrontmatterJson => ffi::FigEmbedType::FrontmatterJson,
             EmbedType::EndmatterYaml => ffi::FigEmbedType::EndmatterYaml,
             EmbedType::FrontmatterFig => ffi::FigEmbedType::FrontmatterFig,
+            EmbedType::FrontmatterToml => ffi::FigEmbedType::FrontmatterToml,
+            EmbedType::FrontmatterYamlFenced => ffi::FigEmbedType::FrontmatterYamlFenced,
+            EmbedType::FrontmatterJsonFenced => ffi::FigEmbedType::FrontmatterJsonFenced,
+            EmbedType::FrontmatterTomlFenced => ffi::FigEmbedType::FrontmatterTomlFenced,
         }
     }
 
@@ -51,6 +67,16 @@ impl EmbedType {
             v if v == ffi::FigEmbedType::FrontmatterJson as i32 => Some(EmbedType::FrontmatterJson),
             v if v == ffi::FigEmbedType::EndmatterYaml as i32 => Some(EmbedType::EndmatterYaml),
             v if v == ffi::FigEmbedType::FrontmatterFig as i32 => Some(EmbedType::FrontmatterFig),
+            v if v == ffi::FigEmbedType::FrontmatterToml as i32 => Some(EmbedType::FrontmatterToml),
+            v if v == ffi::FigEmbedType::FrontmatterYamlFenced as i32 => {
+                Some(EmbedType::FrontmatterYamlFenced)
+            }
+            v if v == ffi::FigEmbedType::FrontmatterJsonFenced as i32 => {
+                Some(EmbedType::FrontmatterJsonFenced)
+            }
+            v if v == ffi::FigEmbedType::FrontmatterTomlFenced as i32 => {
+                Some(EmbedType::FrontmatterTomlFenced)
+            }
             _ => None,
         }
     }
@@ -62,9 +88,12 @@ impl EmbedType {
     /// archetype→format mapping.
     pub fn inner_format(self) -> Format {
         match self {
-            EmbedType::FrontmatterYaml | EmbedType::EndmatterYaml => Format::Yaml,
-            EmbedType::FrontmatterJson => Format::Json,
+            EmbedType::FrontmatterYaml
+            | EmbedType::EndmatterYaml
+            | EmbedType::FrontmatterYamlFenced => Format::Yaml,
+            EmbedType::FrontmatterJson | EmbedType::FrontmatterJsonFenced => Format::Json,
             EmbedType::FrontmatterFig => Format::Fig,
+            EmbedType::FrontmatterToml | EmbedType::FrontmatterTomlFenced => Format::Toml,
         }
     }
 }

@@ -38,8 +38,9 @@ pub const Help = struct {
             \\  path format: dot syntax for keys, bracket syntax for indices
             \\    example: school.class[0].student[3]
             \\  .md/.markdown files: edits the frontmatter/endmatter in place —
-            \\    its archetype (YAML/JSON/fig frontmatter, YAML endmatter) is
-            \\    sniffed from the file, defaulting to YAML when none is found
+            \\    its archetype (YAML/JSON/TOML/fig frontmatter, fenced ```lang
+            \\    frontmatter, YAML endmatter) is sniffed from the file,
+            \\    defaulting to YAML when none is found
             \\
         , .{binary_name});
         try term.writer.flush();
@@ -63,9 +64,10 @@ pub const Help = struct {
             \\    the comments on items that survive (only new items are inserted,
             \\    only dropped ones removed; result order matches the arguments).
             \\  --embed <archetype>: target an embedded region of a host file —
-            \\    `frontmatter` (---/YAML), `frontmatter-json`
-            \\    (;;;/JSON), `frontmatter-fig` (```fig fenced block), or
-            \\    `endmatter` (trailing ```endmatter block). When the host has no
+            \\    `frontmatter` (---/YAML), `frontmatter-json` (;;;/JSON),
+            \\    `frontmatter-toml` (+++/TOML), `frontmatter-fig` (```fig fenced
+            \\    block), `frontmatter-{{yaml,json,toml}}-fenced` (```lang fenced
+            \\    block), or `endmatter` (trailing ```endmatter block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
             \\    the bottom) and seeded with <path>: <value>.
             \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON

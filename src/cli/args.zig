@@ -120,10 +120,18 @@ pub fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
         return .FrontmatterYaml;
     if (std.mem.eql(u8, name, "frontmatter-json")) return .FrontmatterJson;
     if (std.mem.eql(u8, name, "frontmatter-fig")) return .FrontmatterFig;
+    if (std.mem.eql(u8, name, "frontmatter-toml")) return .FrontmatterToml;
+    if (std.mem.eql(u8, name, "frontmatter-yaml-fenced")) return .FrontmatterYamlFenced;
+    if (std.mem.eql(u8, name, "frontmatter-json-fenced")) return .FrontmatterJsonFenced;
+    if (std.mem.eql(u8, name, "frontmatter-toml-fenced")) return .FrontmatterTomlFenced;
     if (std.mem.eql(u8, name, "endmatter") or std.mem.eql(u8, name, "endmatter-yaml"))
         return .EndmatterYaml;
     return null;
 }
+
+/// The `--embed <archetype>` names accepted by `embedTypeFromName`, for error
+/// messages — one source of truth so a new archetype is listed everywhere.
+pub const embed_archetype_names = "frontmatter, frontmatter-json, frontmatter-toml, frontmatter-fig, frontmatter-yaml-fenced, frontmatter-json-fenced, frontmatter-toml-fenced, endmatter";
 
 /// The CLI `Format` an embed archetype's content is written in — the `get`
 /// action's `--input`/`--output` twin of `Embed.innerFormat`. Lets an explicit
@@ -137,6 +145,7 @@ pub fn embedFormat(t: fig.Embed.Type) Format {
         .yaml => .yaml,
         .json => .json,
         .fig => .fig,
+        .toml => .toml,
     };
 }
 
@@ -263,7 +272,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                     return ArgError.MissingSetArgument;
                 };
                 embed_override = embedTypeFromName(name) orelse {
-                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, endmatter)\n", .{name});
+                    log.err("Unknown --embed archetype: {s} (" ++ embed_archetype_names ++ ")\n", .{name});
                     return ArgError.UnsupportedFileFormat;
                 };
             } else {
@@ -481,7 +490,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                     return ArgError.MissingGetArgument;
                 };
                 embed_override = embedTypeFromName(name) orelse {
-                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, endmatter)\n", .{name});
+                    log.err("Unknown --embed archetype: {s} (" ++ embed_archetype_names ++ ")\n", .{name});
                     return ArgError.UnsupportedFileFormat;
                 };
             } else if (std.mem.eql(u8, arg, "--body")) {
@@ -680,7 +689,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                     return ArgError.MissingFmtArgument;
                 };
                 embed_override = embedTypeFromName(name) orelse {
-                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, frontmatter-fig, endmatter)\n", .{name});
+                    log.err("Unknown --embed archetype: {s} (" ++ embed_archetype_names ++ ")\n", .{name});
                     return ArgError.UnsupportedFileFormat;
                 };
             } else if (std.mem.eql(u8, arg, "--indent")) {
@@ -810,7 +819,7 @@ pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConf
                     return ArgError.MissingConvertArgument;
                 };
                 embed_override = embedTypeFromName(name) orelse {
-                    log.err("Unknown --embed archetype: {s} (frontmatter, frontmatter-json, frontmatter-fig, endmatter)\n", .{name});
+                    log.err("Unknown --embed archetype: {s} (" ++ embed_archetype_names ++ ")\n", .{name});
                     return ArgError.UnsupportedFileFormat;
                 };
             } else if (std.mem.eql(u8, arg, "--to-embed")) {

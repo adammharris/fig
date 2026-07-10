@@ -58,11 +58,11 @@ Run `fig help` for instructions for how to use it on your files.
 
 ## Planned features
 
-- Better testing for the Typescript bindings
 - Styling directives (maintain styling across formats, such as mapping TOML inline->YAML inline)
-- More distribution options (package managers, etc.)
-- More bindings
+- More distribution options (depends on user need)
+- More bindings (depends on user need)
 - Advanced filtering/querying capabilties ("convert to this format, except without this node")
+- Structure-aware diff & 3-way merge.
 
 ## Fine print
 

@@ -15,11 +15,11 @@ const Delimiter = struct {
     match: enum { whole_line, prefix },
 };
 
-/// The format an archetype's content is written in — `---`/`;;;` fences imply
-/// YAML/JSON by convention; the fenced ```fig``` block implies fig. Named (not
-/// an inline anon enum) so callers outside this file can name it too — see
-/// `innerFormat`.
-pub const InnerFormat = enum { yaml, json, fig };
+/// The format an archetype's content is written in — `---`/`;;;`/`+++` fences
+/// imply YAML/JSON/TOML by convention; a fenced ```` ```lang ```` block implies
+/// that `lang`. Named (not an inline anon enum) so callers outside this file can
+/// name it too — see `innerFormat`.
+pub const InnerFormat = enum { yaml, json, fig, toml };
 
 const Archetype = struct {
     open: Delimiter,
@@ -54,13 +54,40 @@ fn archetypeOf(t: Type) Archetype {
             .location = .start,
             .inner = .fig,
         },
+        .FrontmatterToml => .{
+            .open = .{ .tokens = &.{"+++"}, .match = .whole_line },
+            .close = .{ .tokens = &.{"+++"}, .match = .whole_line },
+            .location = .start,
+            .inner = .toml,
+        },
+        .FrontmatterYamlFenced => .{
+            .open = .{ .tokens = &.{"```yaml"}, .match = .whole_line },
+            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
+            .location = .start,
+            .inner = .yaml,
+        },
+        .FrontmatterJsonFenced => .{
+            .open = .{ .tokens = &.{"```json"}, .match = .whole_line },
+            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
+            .location = .start,
+            .inner = .json,
+        },
+        .FrontmatterTomlFenced => .{
+            .open = .{ .tokens = &.{"```toml"}, .match = .whole_line },
+            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
+            .location = .start,
+            .inner = .toml,
+        },
     };
 }
 
 /// An archetypal "config embedded in a host file" pattern. Each variant fixes
 /// both *where* the config lives (the host's delimiter convention) and *what*
 /// inner format it is — `---` fences imply YAML, by convention. This coupling
-/// is deliberate: it keeps invalid (delimiter, format) combinations unspellable.
+/// is deliberate: each named archetype is a blessed (delimiter, format) preset,
+/// which keeps invalid combinations unspellable and gives `detect` a small,
+/// unambiguous set to sniff. New conventions are added here as presets rather
+/// than by exposing a free (delimiter × format) product.
 pub const Type = enum {
     /// `---` … `---`/`...` YAML frontmatter at the top of a markdown file.
     FrontmatterYaml,
@@ -74,6 +101,20 @@ pub const Type = enum {
     /// highlighting) on any markdown viewer instead of looking like a
     /// broken/empty rule.
     FrontmatterFig,
+    /// `+++` … `+++` TOML frontmatter at the top of a markdown file — the
+    /// Hugo/Zola convention, the TOML analogue of `---` YAML / `;;;` JSON.
+    FrontmatterToml,
+    /// A ```` ```yaml ```` fenced code block … bare ```` ``` ```` close, at the
+    /// top of a markdown file: YAML content that still renders as a labeled code
+    /// block on any markdown viewer (see `FrontmatterFig` for the fenced-vs-bare
+    /// rationale) rather than as a `---` horizontal rule.
+    FrontmatterYamlFenced,
+    /// A ```` ```json ```` fenced frontmatter block — JSON content shown as a
+    /// labeled code block rather than hidden behind `;;;` fences.
+    FrontmatterJsonFenced,
+    /// A ```` ```toml ```` fenced frontmatter block — TOML content shown as a
+    /// labeled code block rather than behind bare `+++` fences.
+    FrontmatterTomlFenced,
 };
 
 /// A located region, in *outer-source* byte coordinates. The fence spans are
@@ -164,11 +205,24 @@ pub fn locateRegion(source: []const u8, t: Type) Error!Region {
 
 /// The archetypes `detect` tries, in order. Earlier entries are the
 /// position-anchored (`.start`) conventions, checked at the very top of the
-/// file where each one's open token is unambiguous (`---`, `;;;`, and
-/// ```` ```fig ```` can't be confused with one another); `EndmatterYaml` is
-/// last because locating it requires scanning the whole document for its
-/// ```` ```endmatter ```` fence rather than just checking position zero.
-const detect_order = [_]Type{ .FrontmatterFig, .FrontmatterJson, .FrontmatterYaml, .EndmatterYaml };
+/// file where each one's open token is unambiguous: every open delimiter is
+/// matched whole-line-exact, and the tokens are mutually distinct (`---`,
+/// `;;;`, `+++`, and the ```` ```lang ```` fences can't be confused with one
+/// another), so order among the `.start` archetypes doesn't affect which one
+/// wins — only that the fenced group is grouped first for readability.
+/// `EndmatterYaml` is last because locating it requires scanning the whole
+/// document for its ```` ```endmatter ```` fence rather than just checking
+/// position zero.
+const detect_order = [_]Type{
+    .FrontmatterFig,
+    .FrontmatterYamlFenced,
+    .FrontmatterJsonFenced,
+    .FrontmatterTomlFenced,
+    .FrontmatterJson,
+    .FrontmatterToml,
+    .FrontmatterYaml,
+    .EndmatterYaml,
+};
 
 /// Best-effort content sniffing for which embed archetype `source` uses, the
 /// `Embed` counterpart to `Language.detect`: try each known archetype's OPEN
@@ -231,12 +285,13 @@ pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialize
     const close_tok = a.close.tokens[0];
     // The empty inner document seeded between the fences. JSON gets a trailing
     // newline so the close fence stays on its own line after the flow-mapping
-    // insert (which preserves it); YAML's and fig's block inserts emit their own
-    // newline, so their empty content needs none. fig seeds empty like YAML: an
-    // empty fig document is a valid empty map (see `fig/parser.zig`'s `buildRoot`),
-    // so a subsequent set/insert lands the first key into it.
+    // insert (which preserves it); YAML's, fig's, and TOML's block inserts emit
+    // their own newline, so their empty content needs none. Those three all seed
+    // empty because an empty document is a valid empty map / empty root table
+    // (see `fig/parser.zig`'s `buildRoot`), so a subsequent set/insert lands the
+    // first key into it.
     const seed: []const u8 = switch (a.inner) {
-        .yaml, .fig => "",
+        .yaml, .fig, .toml => "",
         .json => "{}\n",
     };
 
@@ -338,6 +393,10 @@ pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Typ
         .fig => if (comptime build_options.lang_fig) blk: {
             var parser = Language.FIG.Parser{ .allocator = allocator };
             break :blk Language.FIG.parse(&parser, slice, Language.FIG.default_type);
+        } else error.FormatDisabled,
+        .toml => if (comptime build_options.lang_toml) blk: {
+            var parser = Language.TOML.Parser{ .allocator = allocator };
+            break :blk Language.TOML.parse(&parser, slice, Language.TOML.default_type);
         } else error.FormatDisabled,
     };
 }
@@ -623,6 +682,85 @@ test "innerFormat reports each archetype's content format" {
     try testing.expectEqual(InnerFormat.yaml, innerFormat(.EndmatterYaml));
     try testing.expectEqual(InnerFormat.json, innerFormat(.FrontmatterJson));
     try testing.expectEqual(InnerFormat.fig, innerFormat(.FrontmatterFig));
+    try testing.expectEqual(InnerFormat.toml, innerFormat(.FrontmatterToml));
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.FrontmatterYamlFenced));
+    try testing.expectEqual(InnerFormat.json, innerFormat(.FrontmatterJsonFenced));
+    try testing.expectEqual(InnerFormat.toml, innerFormat(.FrontmatterTomlFenced));
+}
+
+test "extract: TOML frontmatter (+++ fences) locates and parses" {
+    if (comptime !build_options.lang_toml) return error.SkipZigTest;
+    const src =
+        \\+++
+        \\title = "hi"
+        \\tags = ["a", "b"]
+        \\+++
+        \\# body
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .FrontmatterToml);
+    defer embedded.deinit(testing.allocator);
+    try testing.expectEqualStrings("+++\n", src[embedded.region.open_fence.start..embedded.region.open_fence.end]);
+    try testing.expectEqualStrings("+++\n", src[embedded.region.close_fence.start..embedded.region.close_fence.end]);
+    try testing.expectEqualStrings("# body\n", src[embedded.region.body.start..embedded.region.body.end]);
+    try testing.expectEqualSlices(u8, "hi", (try embedded.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "extract: fenced ```toml / ```yaml / ```json frontmatter locate and parse" {
+    if (comptime !build_options.lang_toml or !build_options.lang_yaml or !build_options.lang_json)
+        return error.SkipZigTest;
+
+    const toml_src =
+        \\```toml
+        \\title = "hi"
+        \\```
+        \\body
+        \\
+    ;
+    const t = try extract(testing.allocator, toml_src, .FrontmatterTomlFenced);
+    defer t.deinit(testing.allocator);
+    try testing.expectEqualStrings("```toml\n", toml_src[t.region.open_fence.start..t.region.open_fence.end]);
+    try testing.expectEqualSlices(u8, "hi", (try t.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+
+    const yaml_src =
+        \\```yaml
+        \\title: hi
+        \\```
+        \\body
+        \\
+    ;
+    const y = try extract(testing.allocator, yaml_src, .FrontmatterYamlFenced);
+    defer y.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "hi", (try y.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+
+    const json_src =
+        \\```json
+        \\{"title": "hi"}
+        \\```
+        \\body
+        \\
+    ;
+    const j = try extract(testing.allocator, json_src, .FrontmatterJsonFenced);
+    defer j.deinit(testing.allocator);
+    try testing.expectEqualSlices(u8, "hi", (try j.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "detect: recognizes TOML and fenced-label frontmatter" {
+    // Content-only sniff (no parser needed): the open delimiters are distinct.
+    try testing.expectEqual(@as(?Type, .FrontmatterToml), detect("+++\ntitle = \"hi\"\n+++\nbody\n"));
+    try testing.expectEqual(@as(?Type, .FrontmatterTomlFenced), detect("```toml\ntitle = \"hi\"\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .FrontmatterYamlFenced), detect("```yaml\ntitle: hi\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .FrontmatterJsonFenced), detect("```json\n{\"t\":1}\n```\nbody\n"));
+    // A ```fig fence still wins its own detection, not the new fenced labels.
+    try testing.expectEqual(@as(?Type, .FrontmatterFig), detect("```fig\nt = 1\n```\nbody\n"));
+}
+
+test "initRegion: a TOML-inner archetype seeds an empty +++ block" {
+    const init = try initRegion(testing.allocator, "body text\n", .FrontmatterToml);
+    defer testing.allocator.free(init.host);
+    try testing.expectEqualStrings("+++\n+++\nbody text\n", init.host);
+    try testing.expectEqual(init.region.content.start, init.region.content.end);
+    try testing.expectEqualStrings("body text\n", init.host[init.region.body.start..init.region.body.end]);
 }
 
 test "initRegion: a fig-inner archetype seeds an empty block from nothing" {
