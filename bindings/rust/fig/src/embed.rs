@@ -17,49 +17,65 @@ use crate::error::Error;
 use crate::value::{Value, value_text, value_text_with};
 use crate::{Format, SerializeOptions, ffi};
 
-/// Which embedded config to open. Each fixes both the host delimiters and the
-/// inner format, mirroring fig's `Embed.Type`.
+/// Which embedded config to open — the flat mirror of fig's parametric
+/// `Embed.Type`. The three parametric families (markdown `---<lang>`
+/// frontmatter, ```` ```<lang> ```` fenced blocks, `<script type>` HTML data
+/// islands) are enumerated once per format. The first four names are historical
+/// (`FrontmatterJson` is the `;;;` block, `FrontmatterFig` is the ```` ```fig ````
+/// fenced block); the rest are grouped by container.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmbedType {
-    /// `---` … `---` YAML frontmatter at the top of a markdown file.
+    /// `---` … `---`/`...` bare YAML frontmatter.
     FrontmatterYaml,
-    /// `;;;` … `;;;` JSON frontmatter at the top of a markdown file.
+    /// `;;;` … `;;;` JSON frontmatter.
     FrontmatterJson,
     /// YAML in a trailing ```` ```endmatter ```` code block.
     EndmatterYaml,
-    /// ```` ```fig ```` … ```` ``` ```` frontmatter at the top of a markdown file,
-    /// in the native fig authoring dialect.
+    /// ```` ```fig ```` … ```` ``` ```` fenced block (the fig authoring dialect).
     FrontmatterFig,
-    /// `+++` … `+++` TOML frontmatter at the top of a markdown file — the
-    /// Hugo/Zola convention.
-    FrontmatterToml,
-    /// ```` ```yaml ```` … ```` ``` ```` frontmatter: YAML shown as a labeled
-    /// code block rather than as a `---` rule.
-    FrontmatterYamlFenced,
-    /// ```` ```json ```` … ```` ``` ```` frontmatter: JSON shown as a labeled
-    /// code block rather than behind `;;;` fences.
-    FrontmatterJsonFenced,
-    /// ```` ```toml ```` … ```` ``` ```` frontmatter: TOML shown as a labeled
-    /// code block rather than behind bare `+++` fences.
-    FrontmatterTomlFenced,
-    /// `<script type="application/figl">` … `</script>` data island in an HTML
-    /// page — figl config, invisible on render, read by a program. Located
-    /// mid-document by scanning; the open tag is matched attribute-tolerantly.
+    /// `+++` … `+++` TOML frontmatter — the Hugo/Zola convention.
+    PlusToml,
+    /// ```` ```yaml ```` fenced block.
+    FencedYaml,
+    /// ```` ```json ```` fenced block.
+    FencedJson,
+    /// ```` ```toml ```` fenced block.
+    FencedToml,
+    /// `---json` … `---` markdown frontmatter.
+    MdFrontmatterJson,
+    /// `---toml` … `---` markdown frontmatter.
+    MdFrontmatterToml,
+    /// `---fig` … `---` markdown frontmatter.
+    MdFrontmatterFig,
+    /// `<script type="application/figl">` … `</script>` HTML data island.
     HtmlScriptFig,
+    /// `<script type="application/yaml">` … `</script>` HTML data island.
+    HtmlScriptYaml,
+    /// `<script type="application/json">` … `</script>` HTML data island.
+    HtmlScriptJson,
+    /// `<script type="application/toml">` … `</script>` HTML data island.
+    HtmlScriptToml,
 }
 
 impl EmbedType {
     fn ffi(self) -> ffi::FigEmbedType {
+        use ffi::FigEmbedType as F;
         match self {
-            EmbedType::FrontmatterYaml => ffi::FigEmbedType::FrontmatterYaml,
-            EmbedType::FrontmatterJson => ffi::FigEmbedType::FrontmatterJson,
-            EmbedType::EndmatterYaml => ffi::FigEmbedType::EndmatterYaml,
-            EmbedType::FrontmatterFig => ffi::FigEmbedType::FrontmatterFig,
-            EmbedType::FrontmatterToml => ffi::FigEmbedType::FrontmatterToml,
-            EmbedType::FrontmatterYamlFenced => ffi::FigEmbedType::FrontmatterYamlFenced,
-            EmbedType::FrontmatterJsonFenced => ffi::FigEmbedType::FrontmatterJsonFenced,
-            EmbedType::FrontmatterTomlFenced => ffi::FigEmbedType::FrontmatterTomlFenced,
-            EmbedType::HtmlScriptFig => ffi::FigEmbedType::HtmlScriptFig,
+            EmbedType::FrontmatterYaml => F::FrontmatterYaml,
+            EmbedType::FrontmatterJson => F::FrontmatterJson,
+            EmbedType::EndmatterYaml => F::EndmatterYaml,
+            EmbedType::FrontmatterFig => F::FrontmatterFig,
+            EmbedType::PlusToml => F::PlusToml,
+            EmbedType::FencedYaml => F::FencedYaml,
+            EmbedType::FencedJson => F::FencedJson,
+            EmbedType::FencedToml => F::FencedToml,
+            EmbedType::MdFrontmatterJson => F::MdFrontmatterJson,
+            EmbedType::MdFrontmatterToml => F::MdFrontmatterToml,
+            EmbedType::MdFrontmatterFig => F::MdFrontmatterFig,
+            EmbedType::HtmlScriptFig => F::HtmlScriptFig,
+            EmbedType::HtmlScriptYaml => F::HtmlScriptYaml,
+            EmbedType::HtmlScriptJson => F::HtmlScriptJson,
+            EmbedType::HtmlScriptToml => F::HtmlScriptToml,
         }
     }
 
@@ -67,39 +83,47 @@ impl EmbedType {
     /// library (e.g. by `fig_embed_detect`). `None` for an unknown value — a
     /// newer core may know archetypes this binding doesn't.
     fn from_ffi(value: i32) -> Option<Self> {
-        match value {
-            v if v == ffi::FigEmbedType::FrontmatterYaml as i32 => Some(EmbedType::FrontmatterYaml),
-            v if v == ffi::FigEmbedType::FrontmatterJson as i32 => Some(EmbedType::FrontmatterJson),
-            v if v == ffi::FigEmbedType::EndmatterYaml as i32 => Some(EmbedType::EndmatterYaml),
-            v if v == ffi::FigEmbedType::FrontmatterFig as i32 => Some(EmbedType::FrontmatterFig),
-            v if v == ffi::FigEmbedType::FrontmatterToml as i32 => Some(EmbedType::FrontmatterToml),
-            v if v == ffi::FigEmbedType::FrontmatterYamlFenced as i32 => {
-                Some(EmbedType::FrontmatterYamlFenced)
-            }
-            v if v == ffi::FigEmbedType::FrontmatterJsonFenced as i32 => {
-                Some(EmbedType::FrontmatterJsonFenced)
-            }
-            v if v == ffi::FigEmbedType::FrontmatterTomlFenced as i32 => {
-                Some(EmbedType::FrontmatterTomlFenced)
-            }
-            v if v == ffi::FigEmbedType::HtmlScriptFig as i32 => Some(EmbedType::HtmlScriptFig),
-            _ => None,
-        }
+        use ffi::FigEmbedType as F;
+        Some(match value {
+            v if v == F::FrontmatterYaml as i32 => EmbedType::FrontmatterYaml,
+            v if v == F::FrontmatterJson as i32 => EmbedType::FrontmatterJson,
+            v if v == F::EndmatterYaml as i32 => EmbedType::EndmatterYaml,
+            v if v == F::FrontmatterFig as i32 => EmbedType::FrontmatterFig,
+            v if v == F::PlusToml as i32 => EmbedType::PlusToml,
+            v if v == F::FencedYaml as i32 => EmbedType::FencedYaml,
+            v if v == F::FencedJson as i32 => EmbedType::FencedJson,
+            v if v == F::FencedToml as i32 => EmbedType::FencedToml,
+            v if v == F::MdFrontmatterJson as i32 => EmbedType::MdFrontmatterJson,
+            v if v == F::MdFrontmatterToml as i32 => EmbedType::MdFrontmatterToml,
+            v if v == F::MdFrontmatterFig as i32 => EmbedType::MdFrontmatterFig,
+            v if v == F::HtmlScriptFig as i32 => EmbedType::HtmlScriptFig,
+            v if v == F::HtmlScriptYaml as i32 => EmbedType::HtmlScriptYaml,
+            v if v == F::HtmlScriptJson as i32 => EmbedType::HtmlScriptJson,
+            v if v == F::HtmlScriptToml as i32 => EmbedType::HtmlScriptToml,
+            _ => return None,
+        })
     }
 
-    /// The inner format this archetype's content is written in (and serialized
-    /// to when spliced in) — `---`/endmatter ⇒ YAML, `;;;` ⇒ JSON,
-    /// ```` ```fig ```` ⇒ the fig authoring dialect. Lets a caller resolve the
-    /// parser to use for a detected embed's content instead of duplicating the
-    /// archetype→format mapping.
+    /// The inner format this archetype's content is written in (and serialized to
+    /// when spliced in). Lets a caller resolve the parser to use for a detected
+    /// embed's content instead of duplicating the archetype→format mapping.
     pub fn inner_format(self) -> Format {
         match self {
             EmbedType::FrontmatterYaml
             | EmbedType::EndmatterYaml
-            | EmbedType::FrontmatterYamlFenced => Format::Yaml,
-            EmbedType::FrontmatterJson | EmbedType::FrontmatterJsonFenced => Format::Json,
-            EmbedType::FrontmatterFig | EmbedType::HtmlScriptFig => Format::Fig,
-            EmbedType::FrontmatterToml | EmbedType::FrontmatterTomlFenced => Format::Toml,
+            | EmbedType::FencedYaml
+            | EmbedType::HtmlScriptYaml => Format::Yaml,
+            EmbedType::FrontmatterJson
+            | EmbedType::FencedJson
+            | EmbedType::MdFrontmatterJson
+            | EmbedType::HtmlScriptJson => Format::Json,
+            EmbedType::FrontmatterFig
+            | EmbedType::MdFrontmatterFig
+            | EmbedType::HtmlScriptFig => Format::Fig,
+            EmbedType::PlusToml
+            | EmbedType::FencedToml
+            | EmbedType::MdFrontmatterToml
+            | EmbedType::HtmlScriptToml => Format::Toml,
         }
     }
 }

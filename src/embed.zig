@@ -11,41 +11,155 @@ const build_options = @import("build_options");
 const Embed = @This();
 
 const Delimiter = struct {
-    /// The strings this delimiter matches against. Their meaning depends on
-    /// `match`: for `whole_line`/`line_trimmed` each is an exact line body; for
-    /// `prefix` each is a line prefix; for `script_open` there is exactly one —
-    /// the required `type` attribute value (a MIME string), not literal tag text.
-    tokens: []const []const u8,
-    match: enum {
-        /// The line, trimmed of trailing space/tab, equals a token exactly.
-        /// Leading whitespace is significant (a markdown fence must sit at
-        /// column 0), so an indented line never matches.
-        whole_line,
-        /// The line (untrimmed) starts with a token.
-        prefix,
-        /// The line, trimmed of leading AND trailing whitespace, equals a token
-        /// exactly — the indentation-tolerant `whole_line`, for delimiters that
-        /// may sit indented inside a host (e.g. a `</script>` close tag nested in
-        /// an HTML `<head>`).
-        line_trimmed,
-        /// The line, trimmed both sides, is an HTML `<script …>` open tag (on its
-        /// own line) whose `type` attribute equals `tokens[0]`. Attribute order,
-        /// quoting, and surrounding whitespace are tolerated; a same-line block
-        /// (`<script …>body</script>`) is deliberately not matched.
-        script_open,
-    },
+    /// The exact line bodies this delimiter matches — used only by the FIXED
+    /// match modes (`whole_line`/`line_trimmed`/`prefix`). The PARAMETRIC modes
+    /// (`fenced_open`/`frontmatter_open`/`script_open`) ignore `tokens`: they
+    /// parse a language tag out of the line and resolve it, carrying the expected
+    /// format in the mode payload instead.
+    tokens: []const []const u8 = &.{},
+    match: Match,
     /// The exact text emitted for this delimiter when *synthesizing* a region
-    /// (`initRegion`/`retype`), when it differs from `tokens[0]`. Needed for
-    /// `script_open`, whose match token is a MIME value but whose literal fence
-    /// is the full `<script type="…">` tag. Null ⇒ emit `tokens[0]` verbatim.
+    /// (`initRegion`/`retype`), when it differs from `tokens[0]`. Required for the
+    /// parametric opens, whose match logic reads a tag rather than a literal —
+    /// e.g. `fenced` emits ```` ```toml ````, `frontmatter` emits `---toml` (or a
+    /// bare `---` for YAML), `script` emits the full `<script type="…">` tag.
+    /// Null ⇒ emit `tokens[0]` verbatim.
     literal: ?[]const u8 = null,
 };
 
-/// The format an archetype's content is written in — `---`/`;;;`/`+++` fences
-/// imply YAML/JSON/TOML by convention; a fenced ```` ```lang ```` block implies
-/// that `lang`. Named (not an inline anon enum) so callers outside this file can
-/// name it too — see `innerFormat`.
+/// How a `Delimiter` decides whether a host line is that delimiter.
+const Match = union(enum) {
+    /// The line, trimmed of trailing space/tab, equals a token exactly. Leading
+    /// whitespace is significant (a markdown fence must sit at column 0), so an
+    /// indented line never matches.
+    whole_line,
+    /// The line (untrimmed) starts with a token.
+    prefix,
+    /// The line, trimmed of leading AND trailing whitespace, equals a token
+    /// exactly — the indentation-tolerant `whole_line`, for delimiters that may
+    /// sit indented inside a host (e.g. a `</script>` close tag nested in a
+    /// `<head>`).
+    line_trimmed,
+    /// The line opens a ```` ```<lang> ```` fenced block whose `<lang>` resolves
+    /// (`formatFromLangTag`) to this exact format. A bare ```` ``` ```` (no tag)
+    /// is a close, not an open, and never matches.
+    fenced_open: InnerFormat,
+    /// The line opens a `---<lang>` markdown-frontmatter block whose `<lang>`
+    /// resolves to this format; a bare `---` (no tag) resolves to `.yaml`.
+    frontmatter_open: InnerFormat,
+    /// The line, trimmed both sides, is an HTML `<script …>` open tag (on its own
+    /// line) whose `type` attribute's MIME resolves (`formatFromScriptMime`) to
+    /// this format. Attribute order, quoting, and whitespace are tolerated; a
+    /// same-line block (`<script …>body</script>`) is deliberately not matched.
+    script_open: InnerFormat,
+};
+
+/// The format an archetype's content is written in. A parametric archetype
+/// carries one of these as its parameter (`fenced`/`frontmatter`/`html_script`);
+/// the blessed presets each pin one. Named so callers outside this file can name
+/// it too — see `innerFormat`.
 pub const InnerFormat = enum { yaml, json, fig, toml };
+
+/// Resolve a `fenced`/`frontmatter` language tag (a code-fence info string's
+/// first token, or a `---<tag>`) to a config format — or null when it is not one
+/// this project understands, so a ```` ```python ```` code sample or a `---foo`
+/// line is left alone rather than mistaken for embedded config. `yml`/`figl` are
+/// accepted spellings of `yaml`/`fig`.
+fn formatFromLangTag(tag: []const u8) ?InnerFormat {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(tag, "yaml") or eq(tag, "yml")) return .yaml;
+    if (eq(tag, "json")) return .json;
+    if (eq(tag, "toml")) return .toml;
+    if (eq(tag, "fig") or eq(tag, "figl")) return .fig;
+    return null;
+}
+
+/// Resolve an HTML `<script type>` MIME to a config format, or null. Accepts the
+/// canonical `application/<lang>` plus a few established aliases (`ld+json` for
+/// JSON-LD, `application/figl` for the fig authoring dialect, `x-yaml`/`text/*`
+/// for YAML). Mirrors `formatFromLangTag` for the HTML projection.
+fn formatFromScriptMime(mime: []const u8) ?InnerFormat {
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(mime, "application/yaml") or eq(mime, "application/x-yaml") or eq(mime, "text/yaml")) return .yaml;
+    if (eq(mime, "application/json") or eq(mime, "application/ld+json")) return .json;
+    if (eq(mime, "application/toml")) return .toml;
+    if (eq(mime, "application/figl") or eq(mime, "application/fig")) return .fig;
+    return null;
+}
+
+/// The canonical ```` ```<lang> ```` open fence a `fenced` archetype emits.
+fn fencedLiteral(f: InnerFormat) []const u8 {
+    return switch (f) {
+        .yaml => "```yaml",
+        .json => "```json",
+        .toml => "```toml",
+        .fig => "```fig",
+    };
+}
+
+/// The canonical `---<lang>` open a `frontmatter` archetype emits — a bare `---`
+/// for YAML (the ecosystem default), a tagged `---<lang>` otherwise.
+fn frontmatterLiteral(f: InnerFormat) []const u8 {
+    return switch (f) {
+        .yaml => "---",
+        .json => "---json",
+        .toml => "---toml",
+        .fig => "---fig",
+    };
+}
+
+/// The canonical `<script type="…">` open tag an `html_script` archetype emits.
+fn scriptLiteral(f: InnerFormat) []const u8 {
+    return switch (f) {
+        .yaml => "<script type=\"application/yaml\">",
+        .json => "<script type=\"application/json\">",
+        .toml => "<script type=\"application/toml\">",
+        .fig => "<script type=\"application/figl\">",
+    };
+}
+
+/// The first whitespace-delimited token of `s` (a code-fence info string may
+/// carry extra words after the language; "first token wins").
+fn firstToken(s: []const u8) []const u8 {
+    const t = std.mem.trim(u8, s, " \t");
+    const end = std.mem.indexOfAny(u8, t, " \t") orelse return t;
+    return t[0..end];
+}
+
+/// If already-trimmed `t` opens a ```` ```<lang> ```` config fence, the format;
+/// else null (a bare ```` ``` ```` close, or a non-config info string).
+fn parseFencedOpen(t: []const u8) ?InnerFormat {
+    if (!std.mem.startsWith(u8, t, "```")) return null;
+    const tag = std.mem.trim(u8, t["```".len..], " \t");
+    if (tag.len == 0) return null; // bare ``` is a close
+    return formatFromLangTag(firstToken(tag));
+}
+
+/// If already-trimmed `t` opens a `---<lang>` frontmatter block, the format
+/// (bare `---` ⇒ `.yaml`); else null. `----`, `--- somescalar`, and other
+/// non-tag lines resolve to null, preserving the "only bare `---` or a known
+/// `---<lang>`" rule.
+fn parseFrontmatterOpen(t: []const u8) ?InnerFormat {
+    if (!std.mem.startsWith(u8, t, "---")) return null;
+    const rest = std.mem.trim(u8, t["---".len..], " \t");
+    if (rest.len == 0) return .yaml;
+    return formatFromLangTag(firstToken(rest));
+}
+
+/// If already-trimmed `t` is an HTML `<script …>` open tag (on its own line)
+/// with a config `type`, the resolved format; else null. See `Match.script_open`.
+fn parseScriptOpen(t: []const u8) ?InnerFormat {
+    const tag = "<script";
+    if (!std.ascii.startsWithIgnoreCase(t, tag)) return null; // HTML folds tag-name case
+    const rest = t[tag.len..];
+    // The char after `<script` must be whitespace or `>` — never a name char, so
+    // `<scripts …>` (a different element) is not mistaken for `<script …>`.
+    if (rest.len == 0 or (!isHspace(rest[0]) and rest[0] != '>')) return null;
+    const gt = std.mem.indexOfScalar(u8, rest, '>') orelse return null;
+    if (gt != rest.len - 1) return null; // `>` must end the line
+    const mime = scriptTypeValue(rest[0..gt]) orelse return null;
+    return formatFromScriptMime(mime);
+}
 
 const Archetype = struct {
     open: Delimiter,
@@ -56,112 +170,85 @@ const Archetype = struct {
 
 fn archetypeOf(t: Type) Archetype {
     return switch (t) {
-        .FrontmatterYaml => .{
-            .open = .{ .tokens = &.{"---"}, .match = .whole_line },
+        // --- parametric families (format carried in the union payload) ---
+        .frontmatter => |f| .{
+            // Bare `---` (YAML) or `---<lang>`; closes on a bare `---`/`...`.
+            .open = .{ .match = .{ .frontmatter_open = f }, .literal = frontmatterLiteral(f) },
             .close = .{ .tokens = &.{ "---", "..." }, .match = .whole_line },
             .location = .start,
-            .inner = .yaml,
+            .inner = f,
         },
-        .FrontmatterJson => .{
+        .fenced => |f| .{
+            // ```` ```<lang> ```` … bare ```` ``` ````, a labeled code block that
+            // renders on any markdown viewer instead of a bare-delimiter rule.
+            .open = .{ .match = .{ .fenced_open = f }, .literal = fencedLiteral(f) },
+            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
+            .location = .start,
+            .inner = f,
+        },
+        .html_script => |f| .{
+            // `<script type="application/<mime>">` … `</script>` HTML data
+            // island — the web's typed inert "data block" (cf. JSON-LD). It sits
+            // MID-document (typically in `<head>`), so it is located by scanning.
+            .open = .{ .match = .{ .script_open = f }, .literal = scriptLiteral(f) },
+            .close = .{ .tokens = &.{"</script>"}, .match = .line_trimmed },
+            .location = .middle,
+            .inner = f,
+        },
+
+        // --- blessed presets (distinct fixed delimiters) ---
+        .semicolons_json => .{
             .open = .{ .tokens = &.{";;;"}, .match = .whole_line },
             .close = .{ .tokens = &.{";;;"}, .match = .whole_line },
             .location = .start,
             .inner = .json,
         },
-        .EndmatterYaml => .{
-            .open = .{ .tokens = &.{"```endmatter"}, .match = .whole_line },
-            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
-            .location = .end,
-            .inner = .yaml,
-        },
-        .FrontmatterFig => .{
-            .open = .{ .tokens = &.{"```fig"}, .match = .whole_line },
-            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
-            .location = .start,
-            .inner = .fig,
-        },
-        .FrontmatterToml => .{
+        .plus_toml => .{
             .open = .{ .tokens = &.{"+++"}, .match = .whole_line },
             .close = .{ .tokens = &.{"+++"}, .match = .whole_line },
             .location = .start,
             .inner = .toml,
         },
-        .FrontmatterYamlFenced => .{
-            .open = .{ .tokens = &.{"```yaml"}, .match = .whole_line },
+        .endmatter_yaml => .{
+            .open = .{ .tokens = &.{"```endmatter"}, .match = .whole_line },
             .close = .{ .tokens = &.{"```"}, .match = .whole_line },
-            .location = .start,
+            .location = .end,
             .inner = .yaml,
-        },
-        .FrontmatterJsonFenced => .{
-            .open = .{ .tokens = &.{"```json"}, .match = .whole_line },
-            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
-            .location = .start,
-            .inner = .json,
-        },
-        .FrontmatterTomlFenced => .{
-            .open = .{ .tokens = &.{"```toml"}, .match = .whole_line },
-            .close = .{ .tokens = &.{"```"}, .match = .whole_line },
-            .location = .start,
-            .inner = .toml,
-        },
-        .HtmlScriptFig => .{
-            // Matched by the `type` MIME value; emitted as the full open tag.
-            .open = .{
-                .tokens = &.{"application/figl"},
-                .match = .script_open,
-                .literal = "<script type=\"application/figl\">",
-            },
-            .close = .{ .tokens = &.{"</script>"}, .match = .line_trimmed },
-            // A data island lives mid-document (typically in `<head>`), so it is
-            // located by scanning, not anchored at byte 0.
-            .location = .middle,
-            .inner = .fig,
         },
     };
 }
 
-/// An archetypal "config embedded in a host file" pattern. Each variant fixes
-/// both *where* the config lives (the host's delimiter convention) and *what*
-/// inner format it is — `---` fences imply YAML, by convention. This coupling
-/// is deliberate: each named archetype is a blessed (delimiter, format) preset,
-/// which keeps invalid combinations unspellable and gives `detect` a small,
-/// unambiguous set to sniff. New conventions are added here as presets rather
-/// than by exposing a free (delimiter × format) product.
-pub const Type = enum {
-    /// `---` … `---`/`...` YAML frontmatter at the top of a markdown file.
-    FrontmatterYaml,
-    /// `;;;` … `;;;` JSON frontmatter at the top of a markdown file.
-    FrontmatterJson,
-    /// For Stephen Deken. YAML in an ending codeblock.
-    EndmatterYaml,
-    /// A "fig" fenced code block … a bare "```" close, at the top of a
-    /// markdown file — a fenced code block rather than a bare `---`/`;;;`
-    /// delimiter, so it renders as a labeled code block (with fig syntax
-    /// highlighting) on any markdown viewer instead of looking like a
-    /// broken/empty rule.
-    FrontmatterFig,
-    /// `+++` … `+++` TOML frontmatter at the top of a markdown file — the
-    /// Hugo/Zola convention, the TOML analogue of `---` YAML / `;;;` JSON.
-    FrontmatterToml,
-    /// A ```` ```yaml ```` fenced code block … bare ```` ``` ```` close, at the
-    /// top of a markdown file: YAML content that still renders as a labeled code
-    /// block on any markdown viewer (see `FrontmatterFig` for the fenced-vs-bare
-    /// rationale) rather than as a `---` horizontal rule.
-    FrontmatterYamlFenced,
-    /// A ```` ```json ```` fenced frontmatter block — JSON content shown as a
-    /// labeled code block rather than hidden behind `;;;` fences.
-    FrontmatterJsonFenced,
-    /// A ```` ```toml ```` fenced frontmatter block — TOML content shown as a
-    /// labeled code block rather than behind bare `+++` fences.
-    FrontmatterTomlFenced,
-    /// An HTML `<script type="application/figl">` … `</script>` data island:
-    /// figl config carried inside an HTML document (typically in `<head>`),
-    /// invisible when the page renders and read by a program — the web's typed
-    /// "data block" convention (cf. JSON-LD's `application/ld+json`). Unlike the
-    /// markdown archetypes it sits MID-document and is located by scanning, and
-    /// its `<script …>` open tag is matched attribute-tolerantly (see
-    /// `matchScriptOpen`) rather than as a fixed line.
-    HtmlScriptFig,
+/// An archetypal "config embedded in a host file" pattern. Each value fixes both
+/// *where* the config lives (the host's delimiter convention) and *what* inner
+/// format it is.
+///
+/// The three PARAMETRIC families take the format as a payload — the delimiter
+/// convention is fixed but reads the format from a language tag (a fence info
+/// string, a `---<lang>` tag, or a `<script type>` MIME):
+///   - `frontmatter` — `---<lang>` … `---`/`...` (bare `---` ⇒ YAML). The whole
+///     markdown-frontmatter ecosystem plus the self-describing `---<lang>` form.
+///   - `fenced`      — ```` ```<lang> ```` … ```` ``` ```` labeled code block.
+///   - `html_script` — `<script type="application/<lang>">` … `</script>`.
+///
+/// The remaining BLESSED presets are the popular, *nonparametric* conventions
+/// whose delimiter is its own distinct token (a reader decodes it without a
+/// tag): `;;;` (JSON), `+++` (TOML, Hugo/Zola), and the trailing ```` ```endmatter ````
+/// block. Keeping only these named — and expressing everything else
+/// parametrically — is what shrinks the surface while still making every
+/// (container, format) pair reachable.
+pub const Type = union(enum) {
+    /// `---<lang>` … `---`/`...`; a bare `---` (no tag) is YAML.
+    frontmatter: InnerFormat,
+    /// ```` ```<lang> ```` … ```` ``` ````.
+    fenced: InnerFormat,
+    /// `<script type="application/<lang>">` … `</script>` HTML data island.
+    html_script: InnerFormat,
+    /// `;;;` … `;;;` JSON frontmatter (blessed; distinct delimiter).
+    semicolons_json,
+    /// `+++` … `+++` TOML frontmatter — the Hugo/Zola convention (blessed).
+    plus_toml,
+    /// A trailing ```` ```endmatter ```` … ```` ``` ```` YAML block. For Stephen Deken.
+    endmatter_yaml,
 };
 
 /// A located region, in *outer-source* byte coordinates. The fence spans are
@@ -250,55 +337,42 @@ pub fn locateRegion(source: []const u8, t: Type) Error!Region {
     return locate(source, archetypeOf(t));
 }
 
-/// The archetypes `detect` tries, in order. Earlier entries are the
-/// position-anchored (`.start`) conventions, checked at the very top of the
-/// file where each one's open token is unambiguous: every open delimiter is
-/// matched whole-line-exact, and the tokens are mutually distinct (`---`,
-/// `;;;`, `+++`, and the ```` ```lang ```` fences can't be confused with one
-/// another), so order among the `.start` archetypes doesn't affect which one
-/// wins — only that the fenced group is grouped first for readability.
-/// `EndmatterYaml` and `HtmlScriptFig` are last because locating them requires
-/// scanning the whole document (for the ```` ```endmatter ```` fence, or the
-/// `<script type="application/figl">` tag) rather than just checking position
-/// zero; their open tokens are distinct from every other archetype's, so being
-/// last never costs a real match.
-const detect_order = [_]Type{
-    .FrontmatterFig,
-    .FrontmatterYamlFenced,
-    .FrontmatterJsonFenced,
-    .FrontmatterTomlFenced,
-    .FrontmatterJson,
-    .FrontmatterToml,
-    .FrontmatterYaml,
-    .EndmatterYaml,
-    .HtmlScriptFig,
-};
-
-/// Best-effort content sniffing for which embed archetype `source` uses, the
-/// `Embed` counterpart to `Language.detect`: try each known archetype's OPEN
-/// delimiter (not a full `locate`, which also demands a matching close — an
-/// unterminated block should still be *recognized* as that archetype so the
-/// caller's subsequent `extract`/`locateRegion` call surfaces the real
-/// `error.Unterminated` instead of a misleading "nothing found") and return the
-/// first that matches, or null if `source` opens none of them. Order matters
-/// the same way `Language.detect`'s does — see `detect_order`.
+/// Best-effort content sniffing for which embed archetype `source` uses — the
+/// `Embed` counterpart to `Language.detect`. Recognizes an OPEN delimiter (not a
+/// full `locate`, which also demands a matching close — an unterminated block
+/// should still be *recognized* so the caller's `extract`/`locateRegion` surfaces
+/// the real `error.Unterminated` rather than a misleading "nothing found").
+///
+/// The `.start` conventions are checked on the very first line (after a BOM): a
+/// fenced ```` ```<lang> ````, a `---<lang>` (or bare `---`) frontmatter, or a
+/// `;;;`/`+++` block — their leading tokens are mutually distinct, so order among
+/// them can't change the result. The scanned conventions come last because they
+/// need a whole-document sweep: the trailing ```` ```endmatter ```` fence, then an
+/// HTML `<script type>` data island anywhere in the page. A fenced tag that is
+/// not a known config language (```` ```python ````, ```` ```endmatter ````) resolves to
+/// null here, so it falls through to the next candidate rather than being taken
+/// for config.
 pub fn detect(source: []const u8) ?Type {
-    for (detect_order) |t| {
-        if (matchesOpen(source, archetypeOf(t))) return t;
-    }
-    return null;
-}
-
-/// Whether `source` opens archetype `a` — anchored at byte 0 (after an
-/// optional UTF-8 BOM) for a `.start` archetype, or anywhere in the document
-/// for an `.end` one (mirrors `locate`'s own open-delimiter search).
-fn matchesOpen(source: []const u8, a: Archetype) bool {
     var i: usize = 0;
     if (std.mem.startsWith(u8, source, "\xEF\xBB\xBF")) i += 3; // UTF-8 BOM
-    return if (a.location == .start)
-        matchDelim(source, i, a.open) != null
-    else
-        scanForDelim(source, i, a.open) != null;
+
+    // First-line (`.start`) conventions.
+    const eol = lineEnd(source, i);
+    const first = std.mem.trim(u8, std.mem.trimEnd(u8, source[i..eol], "\r\n"), " \t");
+    if (parseFencedOpen(first)) |f| return .{ .fenced = f };
+    if (parseFrontmatterOpen(first)) |f| return .{ .frontmatter = f };
+    if (std.mem.eql(u8, first, ";;;")) return .semicolons_json;
+    if (std.mem.eql(u8, first, "+++")) return .plus_toml;
+
+    // Scanned conventions.
+    if (scanForDelim(source, i, archetypeOf(.endmatter_yaml).open) != null) return .endmatter_yaml;
+    var line = i;
+    while (line < source.len) : (line = lineEnd(source, line)) {
+        const le = lineEnd(source, line);
+        const lt = std.mem.trim(u8, std.mem.trimEnd(u8, source[line..le], "\r\n"), " \t");
+        if (parseScriptOpen(lt)) |f| return .{ .html_script = f };
+    }
+    return null;
 }
 
 /// Whether `t`'s body (the host prose) sits BEFORE the open fence (endmatter)
@@ -663,7 +737,11 @@ fn matchDelim(source: []const u8, start: usize, d: Delimiter) ?Span {
             for (d.tokens) |tok| if (std.mem.eql(u8, trimmed, tok)) break :blk true;
             break :blk false;
         },
-        .script_open => matchScriptOpen(std.mem.trim(u8, line, " \t"), d.tokens[0]),
+        // Parametric opens: parse the line's tag and require it to resolve to the
+        // exact format this delimiter expects.
+        .fenced_open => |f| parseFencedOpen(std.mem.trim(u8, line, " \t")) == f,
+        .frontmatter_open => |f| parseFrontmatterOpen(std.mem.trim(u8, line, " \t")) == f,
+        .script_open => |f| parseScriptOpen(std.mem.trim(u8, line, " \t")) == f,
     };
     return if (matched) Span.init(start, eol) else null;
 }
@@ -672,29 +750,12 @@ fn isHspace(c: u8) bool {
     return c == ' ' or c == '\t';
 }
 
-/// Whether the already-both-sides-trimmed line `t` is an HTML `<script …>` open
-/// tag, standing on its own line, whose `type` attribute equals `mime`. The `>`
-/// must close the line: a same-line block (`<script …>body</script>`, whose
-/// trimmed line also ends in `>`) is rejected so it isn't mis-located with an
-/// empty content span.
-fn matchScriptOpen(t: []const u8, mime: []const u8) bool {
-    const tag = "<script";
-    if (!std.ascii.startsWithIgnoreCase(t, tag)) return false; // HTML folds tag-name case
-    const rest = t[tag.len..];
-    // The char after `<script` must be whitespace or `>` — never a name char, so
-    // `<scripts …>` (a different element) is not mistaken for `<script …>`.
-    if (rest.len == 0 or (!isHspace(rest[0]) and rest[0] != '>')) return false;
-    const gt = std.mem.indexOfScalar(u8, rest, '>') orelse return false;
-    if (gt != rest.len - 1) return false; // `>` must end the line
-    return scriptTypeEquals(rest[0..gt], mime);
-}
-
-/// Scan an HTML open tag's attribute region (`<script` and the closing `>`
-/// stripped) for a `type` attribute whose value equals `mime`. Tolerant of
-/// attribute order, extra attributes, single/double/unquoted values, and
-/// whitespace around `=`. Attribute names compare case-insensitively (HTML
-/// folds them); the value too, since MIME types are case-insensitive.
-fn scriptTypeEquals(attrs: []const u8, mime: []const u8) bool {
+/// The value of the `type` attribute in an HTML open tag's attribute region
+/// (`<script` and the closing `>` stripped), or null if there is none. Tolerant
+/// of attribute order, extra attributes, single/double/unquoted values, and
+/// whitespace around `=`; the attribute name compares case-insensitively (HTML
+/// folds them). The value is returned verbatim for the caller to resolve.
+fn scriptTypeValue(attrs: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < attrs.len) {
         while (i < attrs.len and isHspace(attrs[i])) i += 1;
@@ -720,10 +781,9 @@ fn scriptTypeEquals(attrs: []const u8, mime: []const u8) bool {
                 value = attrs[v_start..i];
             }
         }
-        if (std.ascii.eqlIgnoreCase(name, "type") and std.ascii.eqlIgnoreCase(value, mime))
-            return true;
+        if (std.ascii.eqlIgnoreCase(name, "type")) return value;
     }
-    return false;
+    return null;
 }
 
 /// Scan forward line-by-line for the first line matching `d`; null at EOF.
@@ -756,7 +816,7 @@ test "extract: YAML frontmatter comments survive into the parsed AST" {
         \\# body
         \\
     ;
-    const embedded = try extract(testing.allocator, src, .FrontmatterYaml);
+    const embedded = try extract(testing.allocator, src, .{ .frontmatter = .yaml });
     defer embedded.deinit(testing.allocator);
     const ast = embedded.document.ast;
     try testing.expect(ast.node_comments.len > 0);
@@ -776,7 +836,7 @@ test "extract: fig frontmatter (```fig fenced block) locates and parses" {
         \\# body
         \\
     ;
-    const embedded = try extract(testing.allocator, src, .FrontmatterFig);
+    const embedded = try extract(testing.allocator, src, .{ .fenced = .fig });
     defer embedded.deinit(testing.allocator);
     // Fences excluded from content; body is everything after the close fence.
     try testing.expectEqualStrings("```fig\n", src[embedded.region.open_fence.start..embedded.region.open_fence.end]);
@@ -803,18 +863,18 @@ test "extract: a generic ```something fence is not mistaken for ```fig" {
         \\```
         \\
     ;
-    try testing.expectError(Error.NotFound, locateRegion(src, .FrontmatterFig));
+    try testing.expectError(Error.NotFound, locateRegion(src, .{ .fenced = .fig }));
 }
 
 test "innerFormat reports each archetype's content format" {
-    try testing.expectEqual(InnerFormat.yaml, innerFormat(.FrontmatterYaml));
-    try testing.expectEqual(InnerFormat.yaml, innerFormat(.EndmatterYaml));
-    try testing.expectEqual(InnerFormat.json, innerFormat(.FrontmatterJson));
-    try testing.expectEqual(InnerFormat.fig, innerFormat(.FrontmatterFig));
-    try testing.expectEqual(InnerFormat.toml, innerFormat(.FrontmatterToml));
-    try testing.expectEqual(InnerFormat.yaml, innerFormat(.FrontmatterYamlFenced));
-    try testing.expectEqual(InnerFormat.json, innerFormat(.FrontmatterJsonFenced));
-    try testing.expectEqual(InnerFormat.toml, innerFormat(.FrontmatterTomlFenced));
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.{ .frontmatter = .yaml }));
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.endmatter_yaml));
+    try testing.expectEqual(InnerFormat.json, innerFormat(.semicolons_json));
+    try testing.expectEqual(InnerFormat.fig, innerFormat(.{ .fenced = .fig }));
+    try testing.expectEqual(InnerFormat.toml, innerFormat(.plus_toml));
+    try testing.expectEqual(InnerFormat.yaml, innerFormat(.{ .fenced = .yaml }));
+    try testing.expectEqual(InnerFormat.json, innerFormat(.{ .fenced = .json }));
+    try testing.expectEqual(InnerFormat.toml, innerFormat(.{ .fenced = .toml }));
 }
 
 test "extract: TOML frontmatter (+++ fences) locates and parses" {
@@ -827,7 +887,7 @@ test "extract: TOML frontmatter (+++ fences) locates and parses" {
         \\# body
         \\
     ;
-    const embedded = try extract(testing.allocator, src, .FrontmatterToml);
+    const embedded = try extract(testing.allocator, src, .plus_toml);
     defer embedded.deinit(testing.allocator);
     try testing.expectEqualStrings("+++\n", src[embedded.region.open_fence.start..embedded.region.open_fence.end]);
     try testing.expectEqualStrings("+++\n", src[embedded.region.close_fence.start..embedded.region.close_fence.end]);
@@ -846,7 +906,7 @@ test "extract: fenced ```toml / ```yaml / ```json frontmatter locate and parse" 
         \\body
         \\
     ;
-    const t = try extract(testing.allocator, toml_src, .FrontmatterTomlFenced);
+    const t = try extract(testing.allocator, toml_src, .{ .fenced = .toml });
     defer t.deinit(testing.allocator);
     try testing.expectEqualStrings("```toml\n", toml_src[t.region.open_fence.start..t.region.open_fence.end]);
     try testing.expectEqualSlices(u8, "hi", (try t.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
@@ -858,7 +918,7 @@ test "extract: fenced ```toml / ```yaml / ```json frontmatter locate and parse" 
         \\body
         \\
     ;
-    const y = try extract(testing.allocator, yaml_src, .FrontmatterYamlFenced);
+    const y = try extract(testing.allocator, yaml_src, .{ .fenced = .yaml });
     defer y.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "hi", (try y.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
 
@@ -869,7 +929,7 @@ test "extract: fenced ```toml / ```yaml / ```json frontmatter locate and parse" 
         \\body
         \\
     ;
-    const j = try extract(testing.allocator, json_src, .FrontmatterJsonFenced);
+    const j = try extract(testing.allocator, json_src, .{ .fenced = .json });
     defer j.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "hi", (try j.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
 }
@@ -891,7 +951,7 @@ test "extract: HTML <script type=\"application/figl\"> data island locates and p
         \\</html>
         \\
     ;
-    const embedded = try extract(testing.allocator, src, .HtmlScriptFig);
+    const embedded = try extract(testing.allocator, src, .{ .html_script = .fig });
     defer embedded.deinit(testing.allocator);
     // The open/close fence spans cover their whole (indented) lines; content is
     // exactly what sits between them, spliced back byte-for-byte on edit.
@@ -901,23 +961,26 @@ test "extract: HTML <script type=\"application/figl\"> data island locates and p
     try testing.expectEqualSlices(u8, "hi", (try embedded.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
 }
 
-test "matchScriptOpen: tolerates quoting, attribute order, and extra attributes; rejects near-misses" {
-    // Accepted variants.
-    try testing.expect(matchScriptOpen("<script type=\"application/figl\">", "application/figl"));
-    try testing.expect(matchScriptOpen("<script type='application/figl'>", "application/figl"));
-    try testing.expect(matchScriptOpen("<script id=\"cfg\" type=\"application/figl\">", "application/figl"));
-    try testing.expect(matchScriptOpen("<script type = \"application/figl\" defer>", "application/figl"));
-    try testing.expect(matchScriptOpen("<SCRIPT TYPE=\"application/figl\">", "application/figl")); // HTML folds names/mime case
-    // Rejected: wrong element, wrong/absent type, a same-line block.
-    try testing.expect(!matchScriptOpen("<scripts type=\"application/figl\">", "application/figl"));
-    try testing.expect(!matchScriptOpen("<script type=\"application/json\">", "application/figl"));
-    try testing.expect(!matchScriptOpen("<script>", "application/figl"));
-    try testing.expect(!matchScriptOpen("<script type=\"application/figl\">k = 1</script>", "application/figl"));
+test "parseScriptOpen: tolerates quoting/order/extra attrs, resolves the format, rejects near-misses" {
+    // Accepted variants → the resolved format (figl ⇒ .fig).
+    try testing.expectEqual(InnerFormat.fig, parseScriptOpen("<script type=\"application/figl\">"));
+    try testing.expectEqual(InnerFormat.fig, parseScriptOpen("<script type='application/figl'>"));
+    try testing.expectEqual(InnerFormat.fig, parseScriptOpen("<script id=\"cfg\" type=\"application/figl\">"));
+    try testing.expectEqual(InnerFormat.fig, parseScriptOpen("<script type = \"application/figl\" defer>"));
+    try testing.expectEqual(InnerFormat.fig, parseScriptOpen("<SCRIPT TYPE=\"application/figl\">")); // HTML folds case
+    // Other config MIMEs resolve to their formats.
+    try testing.expectEqual(InnerFormat.toml, parseScriptOpen("<script type=\"application/toml\">"));
+    try testing.expectEqual(InnerFormat.json, parseScriptOpen("<script type=\"application/ld+json\">"));
+    // Rejected (null): wrong element, unknown/absent type, a same-line block.
+    try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<scripts type=\"application/figl\">"));
+    try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script type=\"text/javascript\">"));
+    try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script>"));
+    try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script type=\"application/figl\">k = 1</script>"));
 }
 
 test "initRegion: an HTML-script archetype seeds an empty <script> island" {
     if (comptime !build_options.lang_fig) return error.SkipZigTest;
-    const init = try initRegion(testing.allocator, "<html></html>\n", .HtmlScriptFig);
+    const init = try initRegion(testing.allocator, "<html></html>\n", .{ .html_script = .fig });
     defer testing.allocator.free(init.host);
     try testing.expectEqualStrings("<script type=\"application/figl\">\n</script>\n<html></html>\n", init.host);
     try testing.expectEqual(init.region.content.start, init.region.content.end);
@@ -926,21 +989,21 @@ test "initRegion: an HTML-script archetype seeds an empty <script> island" {
 test "detect: recognizes an HTML <script> data island (scanned mid-document)" {
     if (comptime !build_options.lang_fig) return error.SkipZigTest;
     const src = "<html><head>\n<script type=\"application/figl\">\nk = v\n</script>\n</head></html>\n";
-    try testing.expectEqual(@as(?Type, .HtmlScriptFig), detect(src));
+    try testing.expectEqual(@as(?Type, .{ .html_script = .fig }), detect(src));
 }
 
 test "detect: recognizes TOML and fenced-label frontmatter" {
     // Content-only sniff (no parser needed): the open delimiters are distinct.
-    try testing.expectEqual(@as(?Type, .FrontmatterToml), detect("+++\ntitle = \"hi\"\n+++\nbody\n"));
-    try testing.expectEqual(@as(?Type, .FrontmatterTomlFenced), detect("```toml\ntitle = \"hi\"\n```\nbody\n"));
-    try testing.expectEqual(@as(?Type, .FrontmatterYamlFenced), detect("```yaml\ntitle: hi\n```\nbody\n"));
-    try testing.expectEqual(@as(?Type, .FrontmatterJsonFenced), detect("```json\n{\"t\":1}\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .plus_toml), detect("+++\ntitle = \"hi\"\n+++\nbody\n"));
+    try testing.expectEqual(@as(?Type, .{ .fenced = .toml }), detect("```toml\ntitle = \"hi\"\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .{ .fenced = .yaml }), detect("```yaml\ntitle: hi\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .{ .fenced = .json }), detect("```json\n{\"t\":1}\n```\nbody\n"));
     // A ```fig fence still wins its own detection, not the new fenced labels.
-    try testing.expectEqual(@as(?Type, .FrontmatterFig), detect("```fig\nt = 1\n```\nbody\n"));
+    try testing.expectEqual(@as(?Type, .{ .fenced = .fig }), detect("```fig\nt = 1\n```\nbody\n"));
 }
 
 test "initRegion: a TOML-inner archetype seeds an empty +++ block" {
-    const init = try initRegion(testing.allocator, "body text\n", .FrontmatterToml);
+    const init = try initRegion(testing.allocator, "body text\n", .plus_toml);
     defer testing.allocator.free(init.host);
     try testing.expectEqualStrings("+++\n+++\nbody text\n", init.host);
     try testing.expectEqual(init.region.content.start, init.region.content.end);
@@ -951,7 +1014,7 @@ test "initRegion: a fig-inner archetype seeds an empty block from nothing" {
     // An empty fig document is a valid empty map (see `fig/parser.zig`), so a
     // brand-new ```fig``` frontmatter block seeds empty (like YAML) and a
     // subsequent set/insert lands its first key.
-    const init = try initRegion(testing.allocator, "body text\n", .FrontmatterFig);
+    const init = try initRegion(testing.allocator, "body text\n", .{ .fenced = .fig });
     defer testing.allocator.free(init.host);
     try testing.expectEqualStrings("```fig\n```\nbody text\n", init.host);
     // The seeded content is an empty span between the fences.
@@ -967,7 +1030,7 @@ test "extract: fig frontmatter with no host body" {
         \\```
         \\
     ;
-    const embedded = try extract(testing.allocator, src, .FrontmatterFig);
+    const embedded = try extract(testing.allocator, src, .{ .fenced = .fig });
     defer embedded.deinit(testing.allocator);
     try testing.expectEqualStrings("", src[embedded.region.body.start..embedded.region.body.end]);
 }
@@ -1116,28 +1179,28 @@ test "extractStream: outerSpan lifts node spans into outer coordinates" {
 
 test "detect: recognizes YAML frontmatter" {
     const src = "---\ntitle: hi\n---\nbody\n";
-    try testing.expectEqual(@as(?Type, .FrontmatterYaml), detect(src));
+    try testing.expectEqual(@as(?Type, .{ .frontmatter = .yaml }), detect(src));
 }
 
 test "detect: recognizes JSON frontmatter" {
     const src = ";;;\n{\"title\":\"hi\"}\n;;;\nbody\n";
-    try testing.expectEqual(@as(?Type, .FrontmatterJson), detect(src));
+    try testing.expectEqual(@as(?Type, .semicolons_json), detect(src));
 }
 
 test "detect: recognizes fig frontmatter" {
     if (comptime !build_options.lang_fig) return error.SkipZigTest;
     const src = "```fig\ntitle = hi\n```\nbody\n";
-    try testing.expectEqual(@as(?Type, .FrontmatterFig), detect(src));
+    try testing.expectEqual(@as(?Type, .{ .fenced = .fig }), detect(src));
 }
 
 test "detect: recognizes YAML endmatter" {
     const src = "body prose\n```endmatter\ntitle: hi\n```\n";
-    try testing.expectEqual(@as(?Type, .EndmatterYaml), detect(src));
+    try testing.expectEqual(@as(?Type, .endmatter_yaml), detect(src));
 }
 
 test "detect: an unterminated block is still recognized (caller sees Unterminated, not NotFound)" {
     const src = "---\ntitle: hi\n";
-    try testing.expectEqual(@as(?Type, .FrontmatterYaml), detect(src));
+    try testing.expectEqual(@as(?Type, .{ .frontmatter = .yaml }), detect(src));
     try testing.expectError(Error.Unterminated, locateRegion(src, detect(src).?));
 }
 
@@ -1147,16 +1210,16 @@ test "detect: plain prose with no fences at all detects nothing" {
 
 test "retype: YAML frontmatter -> JSON frontmatter, body preserved byte-identical" {
     const src = "---\ntitle: hi\n---\n# body\n";
-    const region = try locateRegion(src, .FrontmatterYaml);
-    const out = try retype(testing.allocator, src, region, .FrontmatterJson, "{\"title\":\"hi\"}\n");
+    const region = try locateRegion(src, .{ .frontmatter = .yaml });
+    const out = try retype(testing.allocator, src, region, .semicolons_json, "{\"title\":\"hi\"}\n");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings(";;;\n{\"title\":\"hi\"}\n;;;\n# body\n", out);
 }
 
 test "retype: frontmatter -> endmatter moves the fences to the end, body first" {
     const src = "---\ntitle: hi\n---\n# body\n";
-    const region = try locateRegion(src, .FrontmatterYaml);
-    const out = try retype(testing.allocator, src, region, .EndmatterYaml, "title: hi\n");
+    const region = try locateRegion(src, .{ .frontmatter = .yaml });
+    const out = try retype(testing.allocator, src, region, .endmatter_yaml, "title: hi\n");
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("# body\n```endmatter\ntitle: hi\n```\n", out);
 }

@@ -1355,51 +1355,81 @@ fn regionCovers(size: u32, comptime field: []const u8) bool {
 }
 
 /// Mirrors `Embed.Type`.
+/// The flat C mirror of the parametric `Embed.Type` union: C enums can't carry a
+/// format parameter, so each (container, format) pair the union can spell is
+/// enumerated as its own value. Values 0–3 are ABI-frozen (shipped in 2.4.0);
+/// their historical names are kept even where the model has since renamed the
+/// concept — `frontmatter_json` is the `;;;` block, `frontmatter_fig` is the
+/// ```` ```fig ```` fenced block. Everything from 4 up is grouped by container.
 pub const FigEmbedType = enum(c_int) {
-    frontmatter_yaml = 0,
-    frontmatter_json = 1,
-    endmatter_yaml = 2,
-    /// A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
-    frontmatter_fig = 3,
-    /// `+++` … `+++` TOML frontmatter (the Hugo/Zola convention).
-    frontmatter_toml = 4,
-    /// A ```yaml fenced frontmatter block (YAML shown as a labeled code block).
-    frontmatter_yaml_fenced = 5,
-    /// A ```json fenced frontmatter block.
-    frontmatter_json_fenced = 6,
-    /// A ```toml fenced frontmatter block.
-    frontmatter_toml_fenced = 7,
-    /// An HTML `<script type="application/figl">` … `</script>` data island.
-    html_script_fig = 8,
+    // Frozen (2.4.0).
+    frontmatter_yaml = 0, // ---              → .{ .frontmatter = .yaml }
+    frontmatter_json = 1, // ;;;              → .semicolons_json
+    endmatter_yaml = 2, //   ```endmatter     → .endmatter_yaml
+    frontmatter_fig = 3, //  ```fig           → .{ .fenced = .fig }
+    // Blessed `+++`.
+    plus_toml = 4, //        +++              → .plus_toml
+    // Fenced ```<lang>.
+    fenced_yaml = 5, //      ```yaml          → .{ .fenced = .yaml }
+    fenced_json = 6, //      ```json          → .{ .fenced = .json }
+    fenced_toml = 7, //      ```toml          → .{ .fenced = .toml }
+    // Markdown `---<lang>` frontmatter (bare --- is `frontmatter_yaml` above).
+    md_frontmatter_json = 8, // ---json       → .{ .frontmatter = .json }
+    md_frontmatter_toml = 9, // ---toml       → .{ .frontmatter = .toml }
+    md_frontmatter_fig = 10, // ---fig        → .{ .frontmatter = .fig }
+    // HTML `<script type="application/<lang>">` data islands.
+    html_script_fig = 11, //  application/figl → .{ .html_script = .fig }
+    html_script_yaml = 12, // application/yaml → .{ .html_script = .yaml }
+    html_script_json = 13, // application/json → .{ .html_script = .json }
+    html_script_toml = 14, // application/toml → .{ .html_script = .toml }
 };
 
 fn embedTypeOf(t: c_int) ?Embed.Type {
     return switch (t) {
-        @intFromEnum(FigEmbedType.frontmatter_yaml) => .FrontmatterYaml,
-        @intFromEnum(FigEmbedType.frontmatter_json) => .FrontmatterJson,
-        @intFromEnum(FigEmbedType.endmatter_yaml) => .EndmatterYaml,
-        @intFromEnum(FigEmbedType.frontmatter_fig) => .FrontmatterFig,
-        @intFromEnum(FigEmbedType.frontmatter_toml) => .FrontmatterToml,
-        @intFromEnum(FigEmbedType.frontmatter_yaml_fenced) => .FrontmatterYamlFenced,
-        @intFromEnum(FigEmbedType.frontmatter_json_fenced) => .FrontmatterJsonFenced,
-        @intFromEnum(FigEmbedType.frontmatter_toml_fenced) => .FrontmatterTomlFenced,
-        @intFromEnum(FigEmbedType.html_script_fig) => .HtmlScriptFig,
+        @intFromEnum(FigEmbedType.frontmatter_yaml) => .{ .frontmatter = .yaml },
+        @intFromEnum(FigEmbedType.frontmatter_json) => .semicolons_json,
+        @intFromEnum(FigEmbedType.endmatter_yaml) => .endmatter_yaml,
+        @intFromEnum(FigEmbedType.frontmatter_fig) => .{ .fenced = .fig },
+        @intFromEnum(FigEmbedType.plus_toml) => .plus_toml,
+        @intFromEnum(FigEmbedType.fenced_yaml) => .{ .fenced = .yaml },
+        @intFromEnum(FigEmbedType.fenced_json) => .{ .fenced = .json },
+        @intFromEnum(FigEmbedType.fenced_toml) => .{ .fenced = .toml },
+        @intFromEnum(FigEmbedType.md_frontmatter_json) => .{ .frontmatter = .json },
+        @intFromEnum(FigEmbedType.md_frontmatter_toml) => .{ .frontmatter = .toml },
+        @intFromEnum(FigEmbedType.md_frontmatter_fig) => .{ .frontmatter = .fig },
+        @intFromEnum(FigEmbedType.html_script_fig) => .{ .html_script = .fig },
+        @intFromEnum(FigEmbedType.html_script_yaml) => .{ .html_script = .yaml },
+        @intFromEnum(FigEmbedType.html_script_json) => .{ .html_script = .json },
+        @intFromEnum(FigEmbedType.html_script_toml) => .{ .html_script = .toml },
         else => null,
     };
 }
 
-/// `embedTypeOf`'s inverse — total, since every `Embed.Type` has a C mirror.
+/// `embedTypeOf`'s inverse — total, since every `Embed.Type` (container, format)
+/// pair has a flat C mirror above.
 fn figEmbedTypeOf(t: Embed.Type) FigEmbedType {
     return switch (t) {
-        .FrontmatterYaml => .frontmatter_yaml,
-        .FrontmatterJson => .frontmatter_json,
-        .EndmatterYaml => .endmatter_yaml,
-        .FrontmatterFig => .frontmatter_fig,
-        .FrontmatterToml => .frontmatter_toml,
-        .FrontmatterYamlFenced => .frontmatter_yaml_fenced,
-        .FrontmatterJsonFenced => .frontmatter_json_fenced,
-        .FrontmatterTomlFenced => .frontmatter_toml_fenced,
-        .HtmlScriptFig => .html_script_fig,
+        .frontmatter => |f| switch (f) {
+            .yaml => .frontmatter_yaml,
+            .json => .md_frontmatter_json,
+            .toml => .md_frontmatter_toml,
+            .fig => .md_frontmatter_fig,
+        },
+        .fenced => |f| switch (f) {
+            .yaml => .fenced_yaml,
+            .json => .fenced_json,
+            .toml => .fenced_toml,
+            .fig => .frontmatter_fig,
+        },
+        .html_script => |f| switch (f) {
+            .yaml => .html_script_yaml,
+            .json => .html_script_json,
+            .toml => .html_script_toml,
+            .fig => .html_script_fig,
+        },
+        .semicolons_json => .frontmatter_json,
+        .plus_toml => .plus_toml,
+        .endmatter_yaml => .endmatter_yaml,
     };
 }
 
@@ -3217,10 +3247,11 @@ test "embed c abi detects each archetype by its open delimiter" {
         .{ .src = ";;;\n{\"k\": 1}\n;;;\nbody\n", .want = .frontmatter_json },
         .{ .src = "```fig\nk = v\n```\nbody\n", .want = .frontmatter_fig },
         .{ .src = "body\n```endmatter\nk: v\n```\n", .want = .endmatter_yaml },
-        .{ .src = "+++\nk = \"v\"\n+++\nbody\n", .want = .frontmatter_toml },
-        .{ .src = "```toml\nk = \"v\"\n```\nbody\n", .want = .frontmatter_toml_fenced },
-        .{ .src = "```yaml\nk: v\n```\nbody\n", .want = .frontmatter_yaml_fenced },
-        .{ .src = "```json\n{\"k\": 1}\n```\nbody\n", .want = .frontmatter_json_fenced },
+        .{ .src = "+++\nk = \"v\"\n+++\nbody\n", .want = .plus_toml },
+        .{ .src = "```toml\nk = \"v\"\n```\nbody\n", .want = .fenced_toml },
+        .{ .src = "```yaml\nk: v\n```\nbody\n", .want = .fenced_yaml },
+        .{ .src = "```json\n{\"k\": 1}\n```\nbody\n", .want = .fenced_json },
+        .{ .src = "---toml\nk = \"v\"\n---\nbody\n", .want = .md_frontmatter_toml },
         .{ .src = "<html><head>\n<script type=\"application/figl\">\nk = \"v\"\n</script>\n</head></html>\n", .want = .html_script_fig },
     };
     for (cases) |case| {

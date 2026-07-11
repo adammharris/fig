@@ -116,24 +116,33 @@ pub fn detectLanguageFromFileEnding(file_path: []const u8) ?Detected {
 /// so endmatter and JSON frontmatter are reachable. Returns null for an
 /// unknown name.
 pub fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
-    if (std.mem.eql(u8, name, "frontmatter") or std.mem.eql(u8, name, "frontmatter-yaml"))
-        return .FrontmatterYaml;
-    if (std.mem.eql(u8, name, "frontmatter-json")) return .FrontmatterJson;
-    if (std.mem.eql(u8, name, "frontmatter-fig")) return .FrontmatterFig;
-    if (std.mem.eql(u8, name, "frontmatter-toml")) return .FrontmatterToml;
-    if (std.mem.eql(u8, name, "frontmatter-yaml-fenced")) return .FrontmatterYamlFenced;
-    if (std.mem.eql(u8, name, "frontmatter-json-fenced")) return .FrontmatterJsonFenced;
-    if (std.mem.eql(u8, name, "frontmatter-toml-fenced")) return .FrontmatterTomlFenced;
-    if (std.mem.eql(u8, name, "html-script") or std.mem.eql(u8, name, "html-script-fig"))
-        return .HtmlScriptFig;
-    if (std.mem.eql(u8, name, "endmatter") or std.mem.eql(u8, name, "endmatter-yaml"))
-        return .EndmatterYaml;
+    const eql = std.mem.eql;
+    // Markdown `---<lang>` frontmatter (bare `---` ⇒ yaml).
+    if (eql(u8, name, "frontmatter") or eql(u8, name, "frontmatter-yaml")) return .{ .frontmatter = .yaml };
+    if (eql(u8, name, "md-json")) return .{ .frontmatter = .json };
+    if (eql(u8, name, "md-toml")) return .{ .frontmatter = .toml };
+    if (eql(u8, name, "md-fig")) return .{ .frontmatter = .fig };
+    // Fenced ```<lang> (`frontmatter-fig` is the legacy alias of `fenced-fig`).
+    if (eql(u8, name, "fenced-yaml")) return .{ .fenced = .yaml };
+    if (eql(u8, name, "fenced-json")) return .{ .fenced = .json };
+    if (eql(u8, name, "fenced-toml")) return .{ .fenced = .toml };
+    if (eql(u8, name, "fenced-fig") or eql(u8, name, "frontmatter-fig")) return .{ .fenced = .fig };
+    // Blessed distinct-delimiter presets (`frontmatter-json/-toml` are the
+    // historical names for the `;;;`/`+++` blocks).
+    if (eql(u8, name, "semicolons") or eql(u8, name, "frontmatter-json")) return .semicolons_json;
+    if (eql(u8, name, "plus") or eql(u8, name, "frontmatter-toml")) return .plus_toml;
+    if (eql(u8, name, "endmatter") or eql(u8, name, "endmatter-yaml")) return .endmatter_yaml;
+    // HTML `<script type="application/<lang>">` data islands.
+    if (eql(u8, name, "html-script") or eql(u8, name, "html-script-fig")) return .{ .html_script = .fig };
+    if (eql(u8, name, "html-script-yaml")) return .{ .html_script = .yaml };
+    if (eql(u8, name, "html-script-json")) return .{ .html_script = .json };
+    if (eql(u8, name, "html-script-toml")) return .{ .html_script = .toml };
     return null;
 }
 
 /// The `--embed <archetype>` names accepted by `embedTypeFromName`, for error
 /// messages — one source of truth so a new archetype is listed everywhere.
-pub const embed_archetype_names = "frontmatter, frontmatter-json, frontmatter-toml, frontmatter-fig, frontmatter-yaml-fenced, frontmatter-json-fenced, frontmatter-toml-fenced, html-script, endmatter";
+pub const embed_archetype_names = "frontmatter, md-json, md-toml, md-fig, fenced-yaml, fenced-json, fenced-toml, fenced-fig, frontmatter-json (;;;), frontmatter-toml (+++), html-script, html-script-yaml, html-script-json, html-script-toml, endmatter";
 
 /// The CLI `Format` an embed archetype's content is written in — the `get`
 /// action's `--input`/`--output` twin of `Embed.innerFormat`. Lets an explicit
@@ -167,7 +176,7 @@ pub fn embedFormat(t: fig.Embed.Type) Format {
 pub fn resolveEmbedTypeFromContent(content: []const u8, embed: ?fig.Embed.Type, detect_embed: bool) ?fig.Embed.Type {
     if (embed) |e| return e;
     if (!detect_embed) return null;
-    return fig.Embed.detect(content) orelse .FrontmatterYaml;
+    return fig.Embed.detect(content) orelse .{ .frontmatter = .yaml };
 }
 
 /// Same as `resolveEmbedTypeFromContent`, but reads `input` itself first, for
@@ -182,7 +191,7 @@ pub fn resolveEmbedType(io: Io, allocator: std.mem.Allocator, input: Io.File, em
     if (!detect_embed) return null;
     const content = try fileio.readAll(allocator, io, input);
     defer allocator.free(content);
-    return fig.Embed.detect(content) orelse .FrontmatterYaml;
+    return fig.Embed.detect(content) orelse .{ .frontmatter = .yaml };
 }
 
 pub fn parseConfig(allocator: std.mem.Allocator, args: anytype) ArgError!CliConfig {
@@ -1023,11 +1032,14 @@ test "parseConfig routes insert/delete to the right action and path tail" {
 
 test "embedTypeFromName maps archetype names" {
     const t = std.testing;
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter"));
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), embedTypeFromName("frontmatter-yaml"));
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterJson), embedTypeFromName("frontmatter-json"));
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), embedTypeFromName("frontmatter-fig"));
-    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), embedTypeFromName("endmatter"));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .frontmatter = .yaml }), embedTypeFromName("frontmatter"));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .frontmatter = .yaml }), embedTypeFromName("frontmatter-yaml"));
+    try t.expectEqual(@as(?fig.Embed.Type, .semicolons_json), embedTypeFromName("frontmatter-json"));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .fenced = .fig }), embedTypeFromName("frontmatter-fig"));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .frontmatter = .toml }), embedTypeFromName("md-toml"));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .fenced = .yaml }), embedTypeFromName("fenced-yaml"));
+    try t.expectEqual(@as(?fig.Embed.Type, .plus_toml), embedTypeFromName("frontmatter-toml"));
+    try t.expectEqual(@as(?fig.Embed.Type, .endmatter_yaml), embedTypeFromName("endmatter"));
     try t.expectEqual(@as(?fig.Embed.Type, null), embedTypeFromName("bogus"));
 }
 
@@ -1058,7 +1070,7 @@ test "resolveEmbedTypeFromContent: explicit override wins, else sniffs, else fal
     const t = std.testing;
 
     // An explicit override always wins, regardless of content.
-    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), resolveEmbedTypeFromContent("anything", .EndmatterYaml, true));
+    try t.expectEqual(@as(?fig.Embed.Type, .endmatter_yaml), resolveEmbedTypeFromContent("anything", .endmatter_yaml, true));
 
     // Not a detect_embed case at all (e.g. a plain .json file): no embed.
     try t.expectEqual(@as(?fig.Embed.Type, null), resolveEmbedTypeFromContent("{}", null, false));
@@ -1068,23 +1080,23 @@ test "resolveEmbedTypeFromContent: explicit override wins, else sniffs, else fal
     // ```fig fenced block must resolve to FrontmatterFig, not be assumed to
     // be YAML just because the extension is `.md`.
     try t.expectEqual(
-        @as(?fig.Embed.Type, .FrontmatterFig),
+        @as(?fig.Embed.Type, .{ .fenced = .fig }),
         resolveEmbedTypeFromContent("```fig\ntitle = hi\n```\nbody\n", null, true),
     );
     try t.expectEqual(
-        @as(?fig.Embed.Type, .FrontmatterJson),
+        @as(?fig.Embed.Type, .semicolons_json),
         resolveEmbedTypeFromContent(";;;\n{\"a\":1}\n;;;\nbody\n", null, true),
     );
     try t.expectEqual(
-        @as(?fig.Embed.Type, .FrontmatterYaml),
+        @as(?fig.Embed.Type, .{ .frontmatter = .yaml }),
         resolveEmbedTypeFromContent("---\na: 1\n---\nbody\n", null, true),
     );
 
     // Nothing detected at all (e.g. a brand-new/plain host file): falls back
     // to the historical FrontmatterYaml default rather than `null`, so `set`'s
     // open-or-init still seeds the same archetype it always has.
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), resolveEmbedTypeFromContent("just prose\n", null, true));
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterYaml), resolveEmbedTypeFromContent("", null, true));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .frontmatter = .yaml }), resolveEmbedTypeFromContent("just prose\n", null, true));
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .frontmatter = .yaml }), resolveEmbedTypeFromContent("", null, true));
 }
 
 test "parseConfig routes set, --seq, and --embed" {
@@ -1112,12 +1124,12 @@ test "parseConfig routes set, --seq, and --embed" {
     // --embed selects the archetype explicitly (endmatter here).
     var em = TestArgs{ .items = &.{ "fig", "set", "--embed", "endmatter", "post.md", "k", "v" } };
     const emc = try parseConfig(a, &em);
-    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), emc.options.set.embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .endmatter_yaml), emc.options.set.embed);
 
     // --embed frontmatter-fig routes to the fig-fenced archetype.
     var fm = TestArgs{ .items = &.{ "fig", "set", "--embed", "frontmatter-fig", "post.md", "k", "v" } };
     const fmc = try parseConfig(a, &fm);
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), fmc.options.set.embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .fenced = .fig }), fmc.options.set.embed);
 
     // No --embed on a `.md` file: the fix for the fig-frontmatter
     // autodetection bug — `embed` stays null and `detect_embed` fires, so
@@ -1155,7 +1167,7 @@ test "parseConfig routes convert: whole-file mode, embed mode, and their guards"
     // archetype here (not .md), so `embed` stays null.
     var em = TestArgs{ .items = &.{ "fig", "convert", "--to-embed", "frontmatter-json", "f.txt" } };
     const emc = try parseConfig(a, &em);
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterJson), emc.options.convert.to_embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .semicolons_json), emc.options.convert.to_embed);
     try t.expectEqual(@as(?fig.Embed.Type, null), emc.options.convert.embed);
     try t.expect(emc.options.convert.detect_embed);
 
@@ -1171,8 +1183,8 @@ test "parseConfig routes convert: whole-file mode, embed mode, and their guards"
     // Embed mode: explicit --embed overrides the extension default.
     var ov = TestArgs{ .items = &.{ "fig", "convert", "--embed", "endmatter", "--to-embed", "frontmatter-fig", "post.md" } };
     const ovc = try parseConfig(a, &ov);
-    try t.expectEqual(@as(?fig.Embed.Type, .EndmatterYaml), ovc.options.convert.embed);
-    try t.expectEqual(@as(?fig.Embed.Type, .FrontmatterFig), ovc.options.convert.to_embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .endmatter_yaml), ovc.options.convert.embed);
+    try t.expectEqual(@as(?fig.Embed.Type, .{ .fenced = .fig }), ovc.options.convert.to_embed);
 
     // The four guard rejections (no target at all; --output+--to-embed
     // together; --embed without --to-embed; whole-file --output on a `.md`

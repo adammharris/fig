@@ -418,25 +418,33 @@ typedef struct FigRegion {
     FigSpan body;
 } FigRegion;
 
+// The flat mirror of fig's parametric embed model. The three parametric
+// families (markdown `---<lang>` frontmatter, ```` ```<lang> ```` fenced blocks,
+// and `<script type="application/<lang>">` HTML data islands) can't carry a
+// format parameter in a C enum, so each (container, format) pair is its own
+// value. Values 0-3 are ABI-frozen; their historical names are kept even where
+// the concept was since renamed (`FRONTMATTER_JSON` is the `;;;` block,
+// `FRONTMATTER_FIG` is the ```` ```fig ```` fenced block). Everything from 4 up is
+// grouped by container.
 typedef enum FigEmbedType {
-    FIG_EMBED_FRONTMATTER_YAML = 0,
-    FIG_EMBED_FRONTMATTER_JSON = 1,
-    FIG_EMBED_ENDMATTER_YAML   = 2,
-    // A ```fig fenced frontmatter block, in the native `fig` authoring dialect.
-    FIG_EMBED_FRONTMATTER_FIG  = 3,
-    // `+++` ... `+++` TOML frontmatter (the Hugo/Zola convention).
-    FIG_EMBED_FRONTMATTER_TOML = 4,
-    // ```yaml / ```json / ```toml fenced frontmatter blocks: the same inner
-    // format as `---` / `;;;` / `+++`, but shown as a labeled code block that
-    // renders on any markdown viewer.
-    FIG_EMBED_FRONTMATTER_YAML_FENCED = 5,
-    FIG_EMBED_FRONTMATTER_JSON_FENCED = 6,
-    FIG_EMBED_FRONTMATTER_TOML_FENCED = 7,
-    // An HTML `<script type="application/figl">` ... `</script>` data island:
-    // figl config carried in an HTML page, invisible on render, read by a
-    // program. Located mid-document by scanning; the open tag is matched
-    // attribute-tolerantly.
-    FIG_EMBED_HTML_SCRIPT_FIG = 8,
+    FIG_EMBED_FRONTMATTER_YAML = 0,  // ---            markdown frontmatter, YAML
+    FIG_EMBED_FRONTMATTER_JSON = 1,  // ;;;            JSON frontmatter
+    FIG_EMBED_ENDMATTER_YAML   = 2,  // ```endmatter   trailing YAML block
+    FIG_EMBED_FRONTMATTER_FIG  = 3,  // ```fig         fenced fig block
+    FIG_EMBED_PLUS_TOML        = 4,  // +++            TOML frontmatter (Hugo/Zola)
+    // Fenced ```<lang> code blocks.
+    FIG_EMBED_FENCED_YAML      = 5,
+    FIG_EMBED_FENCED_JSON      = 6,
+    FIG_EMBED_FENCED_TOML      = 7,
+    // Markdown ---<lang> frontmatter (bare --- is FRONTMATTER_YAML above).
+    FIG_EMBED_MD_FRONTMATTER_JSON = 8,
+    FIG_EMBED_MD_FRONTMATTER_TOML = 9,
+    FIG_EMBED_MD_FRONTMATTER_FIG  = 10,
+    // HTML <script type="application/<lang>"> data islands.
+    FIG_EMBED_HTML_SCRIPT_FIG  = 11,
+    FIG_EMBED_HTML_SCRIPT_YAML = 12,
+    FIG_EMBED_HTML_SCRIPT_JSON = 13,
+    FIG_EMBED_HTML_SCRIPT_TOML = 14,
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in

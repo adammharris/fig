@@ -402,11 +402,17 @@ pub enum FigEmbedType {
     FrontmatterJson = 1,
     EndmatterYaml = 2,
     FrontmatterFig = 3,
-    FrontmatterToml = 4,
-    FrontmatterYamlFenced = 5,
-    FrontmatterJsonFenced = 6,
-    FrontmatterTomlFenced = 7,
-    HtmlScriptFig = 8,
+    PlusToml = 4,
+    FencedYaml = 5,
+    FencedJson = 6,
+    FencedToml = 7,
+    MdFrontmatterJson = 8,
+    MdFrontmatterToml = 9,
+    MdFrontmatterFig = 10,
+    HtmlScriptFig = 11,
+    HtmlScriptYaml = 12,
+    HtmlScriptJson = 13,
+    HtmlScriptToml = 14,
 }
 
 unsafe extern "C" {

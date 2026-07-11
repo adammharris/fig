@@ -265,7 +265,7 @@ pub fn runGet(a: std.mem.Allocator, io: Io, stdout_term: *Io.Terminal, stderr_te
     // no such region the whole file is the body.
     if (opts.body) {
         const content = try fileio.readAll(a, io, input);
-        const embed_type = args_mod.resolveEmbedTypeFromContent(content, opts.embed, opts.detect_embed) orelse fig.Embed.Type.FrontmatterYaml;
+        const embed_type = args_mod.resolveEmbedTypeFromContent(content, opts.embed, opts.detect_embed) orelse fig.Embed.Type{ .frontmatter = .yaml };
         if (fig.Embed.locateRegion(content, embed_type)) |region| {
             try stdout_term.writer.writeAll(content[region.body.start..region.body.end]);
         } else |err| switch (err) {

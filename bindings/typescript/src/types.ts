@@ -133,22 +133,26 @@ export interface Warning {
 
 /** An embedded region within a host file (e.g. markdown frontmatter). */
 export enum EmbedType {
-  FrontmatterYaml = 0,
-  FrontmatterJson = 1,
-  EndmatterYaml = 2,
-  /** ```fig fenced frontmatter, in the native fig authoring dialect. */
-  FrontmatterFig = 3,
-  /** `+++` … `+++` TOML frontmatter (the Hugo/Zola convention). */
-  FrontmatterToml = 4,
-  /** ```yaml fenced frontmatter — YAML shown as a labeled code block. */
-  FrontmatterYamlFenced = 5,
-  /** ```json fenced frontmatter. */
-  FrontmatterJsonFenced = 6,
-  /** ```toml fenced frontmatter. */
-  FrontmatterTomlFenced = 7,
-  /** `<script type="application/figl">` … `</script>` data island in an HTML
-   *  page — figl config, invisible on render, read by a program. */
-  HtmlScriptFig = 8,
+  // Values 0–3 are ABI-frozen; historical names kept (FrontmatterJson is `;;;`,
+  // FrontmatterFig is the ```fig fenced block).
+  FrontmatterYaml = 0, // ---            markdown frontmatter, YAML
+  FrontmatterJson = 1, // ;;;            JSON frontmatter
+  EndmatterYaml = 2, //   ```endmatter   trailing YAML block
+  FrontmatterFig = 3, //  ```fig         fenced fig block
+  PlusToml = 4, //        +++            TOML frontmatter (Hugo/Zola)
+  // Fenced ```<lang> code blocks.
+  FencedYaml = 5,
+  FencedJson = 6,
+  FencedToml = 7,
+  // Markdown ---<lang> frontmatter (bare --- is FrontmatterYaml above).
+  MdFrontmatterJson = 8,
+  MdFrontmatterToml = 9,
+  MdFrontmatterFig = 10,
+  // HTML <script type="application/<lang>"> data islands.
+  HtmlScriptFig = 11,
+  HtmlScriptYaml = 12,
+  HtmlScriptJson = 13,
+  HtmlScriptToml = 14,
 }
 
 const STATUS_MESSAGE: Record<number, string> = {

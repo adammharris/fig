@@ -63,13 +63,13 @@ pub const Help = struct {
             \\  --seq: reconcile the sequence at <path> to exactly <item>..., keeping
             \\    the comments on items that survive (only new items are inserted,
             \\    only dropped ones removed; result order matches the arguments).
-            \\  --embed <archetype>: target an embedded region of a host file —
-            \\    `frontmatter` (---/YAML), `frontmatter-json` (;;;/JSON),
-            \\    `frontmatter-toml` (+++/TOML), `frontmatter-fig` (```fig fenced
-            \\    block), `frontmatter-{{yaml,json,toml}}-fenced` (```lang fenced
-            \\    block), `html-script` (<script type="application/figl"> data
-            \\    island in an HTML page), or `endmatter` (trailing ```endmatter
-            \\    block). When the host has no
+            \\  --embed <archetype>: target an embedded region of a host file.
+            \\    Three parametric families take a language: `md-<lang>` (---<lang>
+            \\    frontmatter; bare `frontmatter` is ---/YAML), `fenced-<lang>`
+            \\    (```lang code block), and `html-script[-<lang>]` (<script
+            \\    type="application/<lang>"> data island). Plus the fixed presets
+            \\    `frontmatter-json` (;;;), `frontmatter-toml` (+++), and
+            \\    `endmatter` (trailing ```endmatter block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
             \\    the bottom) and seeded with <path>: <value>.
             \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON

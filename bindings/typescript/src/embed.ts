@@ -61,13 +61,18 @@ export interface Region {
 function innerFormat(kind: EmbedType): Format {
   switch (kind) {
     case EmbedType.FrontmatterJson:
-    case EmbedType.FrontmatterJsonFenced:
+    case EmbedType.FencedJson:
+    case EmbedType.MdFrontmatterJson:
+    case EmbedType.HtmlScriptJson:
       return Format.Json;
     case EmbedType.FrontmatterFig:
+    case EmbedType.MdFrontmatterFig:
     case EmbedType.HtmlScriptFig:
       return Format.Fig;
-    case EmbedType.FrontmatterToml:
-    case EmbedType.FrontmatterTomlFenced:
+    case EmbedType.PlusToml:
+    case EmbedType.FencedToml:
+    case EmbedType.MdFrontmatterToml:
+    case EmbedType.HtmlScriptToml:
       return Format.Toml;
     default:
       return Format.Yaml;
