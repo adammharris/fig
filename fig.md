@@ -61,8 +61,18 @@ Run `fig help` for instructions for how to use it on your files.
 - Styling directives (maintain styling across formats, such as mapping TOML inline->YAML inline)
 - More distribution options (depends on user need)
 - More bindings (depends on user need)
-- Advanced filtering/querying capabilties ("convert to this format, except without this node")
+- Advanced querying capabilties.
+  - Filtering nodes
+  - Redacting node
+  - Multi-match `fig get`
 - Structure-aware diff & 3-way merge.
+- `fig patch` (config overlays / patch apply, lossless)
+- `fig fmt` enhancements (sort keys, dedupe, stable array, etc.)
+
+**In consideration**
+- Schema validation
+- LSP enhancements
+- $ENV interpolation
 
 ## Fine print
 
