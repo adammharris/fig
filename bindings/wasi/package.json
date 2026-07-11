@@ -1,6 +1,6 @@
 {
   "name": "@adammharris/fig-wasi",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "EXPERIMENTAL: the fig CLI (parse/edit/convert JSON, JSONC, JSON5, YAML, TOML — while preserving comments) as an npx-able command, running the real fig CLI's WASI build under Node's built-in (experimental) WASI support. No install, no per-platform binary, no native build step.",
   "type": "module",
   "publishConfig": {
