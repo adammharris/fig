@@ -146,6 +146,9 @@ export enum EmbedType {
   FrontmatterJsonFenced = 6,
   /** ```toml fenced frontmatter. */
   FrontmatterTomlFenced = 7,
+  /** `<script type="application/figl">` … `</script>` data island in an HTML
+   *  page — figl config, invisible on render, read by a program. */
+  HtmlScriptFig = 8,
 }
 
 const STATUS_MESSAGE: Record<number, string> = {

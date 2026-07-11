@@ -67,7 +67,9 @@ pub const Help = struct {
             \\    `frontmatter` (---/YAML), `frontmatter-json` (;;;/JSON),
             \\    `frontmatter-toml` (+++/TOML), `frontmatter-fig` (```fig fenced
             \\    block), `frontmatter-{{yaml,json,toml}}-fenced` (```lang fenced
-            \\    block), or `endmatter` (trailing ```endmatter block). When the host has no
+            \\    block), `html-script` (<script type="application/figl"> data
+            \\    island in an HTML page), or `endmatter` (trailing ```endmatter
+            \\    block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
             \\    the bottom) and seeded with <path>: <value>.
             \\  value: a literal in the target format (YAML/TOML/ZON verbatim; JSON

@@ -11,8 +11,34 @@ const build_options = @import("build_options");
 const Embed = @This();
 
 const Delimiter = struct {
+    /// The strings this delimiter matches against. Their meaning depends on
+    /// `match`: for `whole_line`/`line_trimmed` each is an exact line body; for
+    /// `prefix` each is a line prefix; for `script_open` there is exactly one —
+    /// the required `type` attribute value (a MIME string), not literal tag text.
     tokens: []const []const u8,
-    match: enum { whole_line, prefix },
+    match: enum {
+        /// The line, trimmed of trailing space/tab, equals a token exactly.
+        /// Leading whitespace is significant (a markdown fence must sit at
+        /// column 0), so an indented line never matches.
+        whole_line,
+        /// The line (untrimmed) starts with a token.
+        prefix,
+        /// The line, trimmed of leading AND trailing whitespace, equals a token
+        /// exactly — the indentation-tolerant `whole_line`, for delimiters that
+        /// may sit indented inside a host (e.g. a `</script>` close tag nested in
+        /// an HTML `<head>`).
+        line_trimmed,
+        /// The line, trimmed both sides, is an HTML `<script …>` open tag (on its
+        /// own line) whose `type` attribute equals `tokens[0]`. Attribute order,
+        /// quoting, and surrounding whitespace are tolerated; a same-line block
+        /// (`<script …>body</script>`) is deliberately not matched.
+        script_open,
+    },
+    /// The exact text emitted for this delimiter when *synthesizing* a region
+    /// (`initRegion`/`retype`), when it differs from `tokens[0]`. Needed for
+    /// `script_open`, whose match token is a MIME value but whose literal fence
+    /// is the full `<script type="…">` tag. Null ⇒ emit `tokens[0]` verbatim.
+    literal: ?[]const u8 = null,
 };
 
 /// The format an archetype's content is written in — `---`/`;;;`/`+++` fences
@@ -78,6 +104,19 @@ fn archetypeOf(t: Type) Archetype {
             .location = .start,
             .inner = .toml,
         },
+        .HtmlScriptFig => .{
+            // Matched by the `type` MIME value; emitted as the full open tag.
+            .open = .{
+                .tokens = &.{"application/figl"},
+                .match = .script_open,
+                .literal = "<script type=\"application/figl\">",
+            },
+            .close = .{ .tokens = &.{"</script>"}, .match = .line_trimmed },
+            // A data island lives mid-document (typically in `<head>`), so it is
+            // located by scanning, not anchored at byte 0.
+            .location = .middle,
+            .inner = .fig,
+        },
     };
 }
 
@@ -115,6 +154,14 @@ pub const Type = enum {
     /// A ```` ```toml ```` fenced frontmatter block — TOML content shown as a
     /// labeled code block rather than behind bare `+++` fences.
     FrontmatterTomlFenced,
+    /// An HTML `<script type="application/figl">` … `</script>` data island:
+    /// figl config carried inside an HTML document (typically in `<head>`),
+    /// invisible when the page renders and read by a program — the web's typed
+    /// "data block" convention (cf. JSON-LD's `application/ld+json`). Unlike the
+    /// markdown archetypes it sits MID-document and is located by scanning, and
+    /// its `<script …>` open tag is matched attribute-tolerantly (see
+    /// `matchScriptOpen`) rather than as a fixed line.
+    HtmlScriptFig,
 };
 
 /// A located region, in *outer-source* byte coordinates. The fence spans are
@@ -210,9 +257,11 @@ pub fn locateRegion(source: []const u8, t: Type) Error!Region {
 /// `;;;`, `+++`, and the ```` ```lang ```` fences can't be confused with one
 /// another), so order among the `.start` archetypes doesn't affect which one
 /// wins — only that the fenced group is grouped first for readability.
-/// `EndmatterYaml` is last because locating it requires scanning the whole
-/// document for its ```` ```endmatter ```` fence rather than just checking
-/// position zero.
+/// `EndmatterYaml` and `HtmlScriptFig` are last because locating them requires
+/// scanning the whole document (for the ```` ```endmatter ```` fence, or the
+/// `<script type="application/figl">` tag) rather than just checking position
+/// zero; their open tokens are distinct from every other archetype's, so being
+/// last never costs a real match.
 const detect_order = [_]Type{
     .FrontmatterFig,
     .FrontmatterYamlFenced,
@@ -222,6 +271,7 @@ const detect_order = [_]Type{
     .FrontmatterToml,
     .FrontmatterYaml,
     .EndmatterYaml,
+    .HtmlScriptFig,
 };
 
 /// Best-effort content sniffing for which embed archetype `source` uses, the
@@ -266,6 +316,13 @@ pub fn innerFormat(t: Type) InnerFormat {
     return archetypeOf(t).inner;
 }
 
+/// The exact text to emit for delimiter `d` when synthesizing a region — its
+/// `literal` override, or `tokens[0]` when there is none. (`script_open`'s match
+/// token is a MIME value, not the `<script …>` tag it must emit.)
+fn delimLiteral(d: Delimiter) []const u8 {
+    return d.literal orelse d.tokens[0];
+}
+
 /// Built host for a source that has no region of type `t` — the create half of
 /// "open or create".
 pub const Initialized = struct { host: []u8, region: Region };
@@ -281,8 +338,8 @@ pub const Initialized = struct { host: []u8, region: Region };
 ///
 pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialized {
     const a = archetypeOf(t);
-    const open_tok = a.open.tokens[0];
-    const close_tok = a.close.tokens[0];
+    const open_tok = delimLiteral(a.open);
+    const close_tok = delimLiteral(a.close);
     // The empty inner document seeded between the fences. JSON gets a trailing
     // newline so the close fence stays on its own line after the flow-mapping
     // insert (which preserves it); YAML's, fig's, and TOML's block inserts emit
@@ -350,8 +407,8 @@ pub fn initRegion(allocator: Allocator, source: []const u8, t: Type) !Initialize
 /// rather than seeding an empty document. The returned buffer is caller-owned.
 pub fn retype(allocator: Allocator, source: []const u8, region: Region, to: Type, new_content: []const u8) ![]u8 {
     const a = archetypeOf(to);
-    const open_tok = a.open.tokens[0];
-    const close_tok = a.close.tokens[0];
+    const open_tok = delimLiteral(a.open);
+    const close_tok = delimLiteral(a.close);
     const body = Span.of(u8, region.body, source);
 
     var host: std.ArrayList(u8) = .empty;
@@ -564,9 +621,14 @@ fn locate(source: []const u8, a: Archetype) Error!Region {
     var line = open.end;
     while (line < source.len) {
         if (matchDelim(source, line, a.close)) |close| {
-            // The body is the host text outside the fences: the suffix after the
-            // close fence for frontmatter, the prefix before the open fence for
-            // endmatter (where the config trails the prose).
+            // The body is the host text outside the fences: the prefix before the
+            // open fence for endmatter (where the config trails the prose), else
+            // the suffix after the close fence — for frontmatter (`.start`) AND
+            // for a mid-document block (`.middle`, e.g. an HTML `<script>` data
+            // island). A `.middle` block also has host text BEFORE it, which this
+            // single-span body doesn't capture; in-place edits splice via the
+            // content spans and stay byte-identical on both sides regardless, so
+            // only `replace_body` is one-sided (it swaps the suffix).
             const body = if (a.location == .end)
                 Span.init(0, open.start)
             else
@@ -586,15 +648,82 @@ fn lineEnd(source: []const u8, from: usize) usize {
 fn matchDelim(source: []const u8, start: usize, d: Delimiter) ?Span {
     const eol = lineEnd(source, start);
     const line = std.mem.trimEnd(u8, source[start..eol], "\r\n");
-    const trimmed = std.mem.trimEnd(u8, line, " \t");
-    for (d.tokens) |tok| {
-        const ok = switch (d.match) {
-            .whole_line => std.mem.eql(u8, trimmed, tok),
-            .prefix => std.mem.startsWith(u8, line, tok),
-        };
-        if (ok) return Span.init(start, eol);
+    const matched = switch (d.match) {
+        .whole_line => blk: {
+            const trimmed = std.mem.trimEnd(u8, line, " \t");
+            for (d.tokens) |tok| if (std.mem.eql(u8, trimmed, tok)) break :blk true;
+            break :blk false;
+        },
+        .prefix => blk: {
+            for (d.tokens) |tok| if (std.mem.startsWith(u8, line, tok)) break :blk true;
+            break :blk false;
+        },
+        .line_trimmed => blk: {
+            const trimmed = std.mem.trim(u8, line, " \t");
+            for (d.tokens) |tok| if (std.mem.eql(u8, trimmed, tok)) break :blk true;
+            break :blk false;
+        },
+        .script_open => matchScriptOpen(std.mem.trim(u8, line, " \t"), d.tokens[0]),
+    };
+    return if (matched) Span.init(start, eol) else null;
+}
+
+fn isHspace(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+/// Whether the already-both-sides-trimmed line `t` is an HTML `<script …>` open
+/// tag, standing on its own line, whose `type` attribute equals `mime`. The `>`
+/// must close the line: a same-line block (`<script …>body</script>`, whose
+/// trimmed line also ends in `>`) is rejected so it isn't mis-located with an
+/// empty content span.
+fn matchScriptOpen(t: []const u8, mime: []const u8) bool {
+    const tag = "<script";
+    if (!std.ascii.startsWithIgnoreCase(t, tag)) return false; // HTML folds tag-name case
+    const rest = t[tag.len..];
+    // The char after `<script` must be whitespace or `>` — never a name char, so
+    // `<scripts …>` (a different element) is not mistaken for `<script …>`.
+    if (rest.len == 0 or (!isHspace(rest[0]) and rest[0] != '>')) return false;
+    const gt = std.mem.indexOfScalar(u8, rest, '>') orelse return false;
+    if (gt != rest.len - 1) return false; // `>` must end the line
+    return scriptTypeEquals(rest[0..gt], mime);
+}
+
+/// Scan an HTML open tag's attribute region (`<script` and the closing `>`
+/// stripped) for a `type` attribute whose value equals `mime`. Tolerant of
+/// attribute order, extra attributes, single/double/unquoted values, and
+/// whitespace around `=`. Attribute names compare case-insensitively (HTML
+/// folds them); the value too, since MIME types are case-insensitive.
+fn scriptTypeEquals(attrs: []const u8, mime: []const u8) bool {
+    var i: usize = 0;
+    while (i < attrs.len) {
+        while (i < attrs.len and isHspace(attrs[i])) i += 1;
+        if (i >= attrs.len) break;
+        const name_start = i;
+        while (i < attrs.len and attrs[i] != '=' and !isHspace(attrs[i])) i += 1;
+        const name = attrs[name_start..i];
+        while (i < attrs.len and isHspace(attrs[i])) i += 1;
+        var value: []const u8 = "";
+        if (i < attrs.len and attrs[i] == '=') {
+            i += 1;
+            while (i < attrs.len and isHspace(attrs[i])) i += 1;
+            if (i < attrs.len and (attrs[i] == '"' or attrs[i] == '\'')) {
+                const q = attrs[i];
+                i += 1;
+                const v_start = i;
+                while (i < attrs.len and attrs[i] != q) i += 1;
+                value = attrs[v_start..i];
+                if (i < attrs.len) i += 1; // consume closing quote
+            } else {
+                const v_start = i;
+                while (i < attrs.len and !isHspace(attrs[i])) i += 1;
+                value = attrs[v_start..i];
+            }
+        }
+        if (std.ascii.eqlIgnoreCase(name, "type") and std.ascii.eqlIgnoreCase(value, mime))
+            return true;
     }
-    return null;
+    return false;
 }
 
 /// Scan forward line-by-line for the first line matching `d`; null at EOF.
@@ -743,6 +872,61 @@ test "extract: fenced ```toml / ```yaml / ```json frontmatter locate and parse" 
     const j = try extract(testing.allocator, json_src, .FrontmatterJsonFenced);
     defer j.deinit(testing.allocator);
     try testing.expectEqualSlices(u8, "hi", (try j.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "extract: HTML <script type=\"application/figl\"> data island locates and parses" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    // A realistic page: doctype + head, the island indented inside <head>, prose
+    // both BEFORE and AFTER the block (the mid-document case).
+    const src =
+        \\<!doctype html>
+        \\<html>
+        \\  <head>
+        \\    <script type="application/figl">
+        \\title = hi
+        \\tags = [a, b]
+        \\    </script>
+        \\  </head>
+        \\  <body>page</body>
+        \\</html>
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .HtmlScriptFig);
+    defer embedded.deinit(testing.allocator);
+    // The open/close fence spans cover their whole (indented) lines; content is
+    // exactly what sits between them, spliced back byte-for-byte on edit.
+    try testing.expectEqualStrings("    <script type=\"application/figl\">\n", src[embedded.region.open_fence.start..embedded.region.open_fence.end]);
+    try testing.expectEqualStrings("    </script>\n", src[embedded.region.close_fence.start..embedded.region.close_fence.end]);
+    try testing.expectEqualStrings("title = hi\ntags = [a, b]\n", src[embedded.region.content.start..embedded.region.content.end]);
+    try testing.expectEqualSlices(u8, "hi", (try embedded.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "matchScriptOpen: tolerates quoting, attribute order, and extra attributes; rejects near-misses" {
+    // Accepted variants.
+    try testing.expect(matchScriptOpen("<script type=\"application/figl\">", "application/figl"));
+    try testing.expect(matchScriptOpen("<script type='application/figl'>", "application/figl"));
+    try testing.expect(matchScriptOpen("<script id=\"cfg\" type=\"application/figl\">", "application/figl"));
+    try testing.expect(matchScriptOpen("<script type = \"application/figl\" defer>", "application/figl"));
+    try testing.expect(matchScriptOpen("<SCRIPT TYPE=\"application/figl\">", "application/figl")); // HTML folds names/mime case
+    // Rejected: wrong element, wrong/absent type, a same-line block.
+    try testing.expect(!matchScriptOpen("<scripts type=\"application/figl\">", "application/figl"));
+    try testing.expect(!matchScriptOpen("<script type=\"application/json\">", "application/figl"));
+    try testing.expect(!matchScriptOpen("<script>", "application/figl"));
+    try testing.expect(!matchScriptOpen("<script type=\"application/figl\">k = 1</script>", "application/figl"));
+}
+
+test "initRegion: an HTML-script archetype seeds an empty <script> island" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const init = try initRegion(testing.allocator, "<html></html>\n", .HtmlScriptFig);
+    defer testing.allocator.free(init.host);
+    try testing.expectEqualStrings("<script type=\"application/figl\">\n</script>\n<html></html>\n", init.host);
+    try testing.expectEqual(init.region.content.start, init.region.content.end);
+}
+
+test "detect: recognizes an HTML <script> data island (scanned mid-document)" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src = "<html><head>\n<script type=\"application/figl\">\nk = v\n</script>\n</head></html>\n";
+    try testing.expectEqual(@as(?Type, .HtmlScriptFig), detect(src));
 }
 
 test "detect: recognizes TOML and fenced-label frontmatter" {

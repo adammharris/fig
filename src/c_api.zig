@@ -1369,6 +1369,8 @@ pub const FigEmbedType = enum(c_int) {
     frontmatter_json_fenced = 6,
     /// A ```toml fenced frontmatter block.
     frontmatter_toml_fenced = 7,
+    /// An HTML `<script type="application/figl">` … `</script>` data island.
+    html_script_fig = 8,
 };
 
 fn embedTypeOf(t: c_int) ?Embed.Type {
@@ -1381,6 +1383,7 @@ fn embedTypeOf(t: c_int) ?Embed.Type {
         @intFromEnum(FigEmbedType.frontmatter_yaml_fenced) => .FrontmatterYamlFenced,
         @intFromEnum(FigEmbedType.frontmatter_json_fenced) => .FrontmatterJsonFenced,
         @intFromEnum(FigEmbedType.frontmatter_toml_fenced) => .FrontmatterTomlFenced,
+        @intFromEnum(FigEmbedType.html_script_fig) => .HtmlScriptFig,
         else => null,
     };
 }
@@ -1396,6 +1399,7 @@ fn figEmbedTypeOf(t: Embed.Type) FigEmbedType {
         .FrontmatterYamlFenced => .frontmatter_yaml_fenced,
         .FrontmatterJsonFenced => .frontmatter_json_fenced,
         .FrontmatterTomlFenced => .frontmatter_toml_fenced,
+        .HtmlScriptFig => .html_script_fig,
     };
 }
 
@@ -3217,6 +3221,7 @@ test "embed c abi detects each archetype by its open delimiter" {
         .{ .src = "```toml\nk = \"v\"\n```\nbody\n", .want = .frontmatter_toml_fenced },
         .{ .src = "```yaml\nk: v\n```\nbody\n", .want = .frontmatter_yaml_fenced },
         .{ .src = "```json\n{\"k\": 1}\n```\nbody\n", .want = .frontmatter_json_fenced },
+        .{ .src = "<html><head>\n<script type=\"application/figl\">\nk = \"v\"\n</script>\n</head></html>\n", .want = .html_script_fig },
     };
     for (cases) |case| {
         var out: c_int = -1;

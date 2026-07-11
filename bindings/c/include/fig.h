@@ -432,6 +432,11 @@ typedef enum FigEmbedType {
     FIG_EMBED_FRONTMATTER_YAML_FENCED = 5,
     FIG_EMBED_FRONTMATTER_JSON_FENCED = 6,
     FIG_EMBED_FRONTMATTER_TOML_FENCED = 7,
+    // An HTML `<script type="application/figl">` ... `</script>` data island:
+    // figl config carried in an HTML page, invisible on render, read by a
+    // program. Located mid-document by scanning; the open tag is matched
+    // attribute-tolerantly.
+    FIG_EMBED_HTML_SCRIPT_FIG = 8,
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in

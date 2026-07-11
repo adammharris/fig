@@ -64,6 +64,7 @@ function innerFormat(kind: EmbedType): Format {
     case EmbedType.FrontmatterJsonFenced:
       return Format.Json;
     case EmbedType.FrontmatterFig:
+    case EmbedType.HtmlScriptFig:
       return Format.Fig;
     case EmbedType.FrontmatterToml:
     case EmbedType.FrontmatterTomlFenced:

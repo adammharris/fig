@@ -42,6 +42,10 @@ pub enum EmbedType {
     /// ```` ```toml ```` … ```` ``` ```` frontmatter: TOML shown as a labeled
     /// code block rather than behind bare `+++` fences.
     FrontmatterTomlFenced,
+    /// `<script type="application/figl">` … `</script>` data island in an HTML
+    /// page — figl config, invisible on render, read by a program. Located
+    /// mid-document by scanning; the open tag is matched attribute-tolerantly.
+    HtmlScriptFig,
 }
 
 impl EmbedType {
@@ -55,6 +59,7 @@ impl EmbedType {
             EmbedType::FrontmatterYamlFenced => ffi::FigEmbedType::FrontmatterYamlFenced,
             EmbedType::FrontmatterJsonFenced => ffi::FigEmbedType::FrontmatterJsonFenced,
             EmbedType::FrontmatterTomlFenced => ffi::FigEmbedType::FrontmatterTomlFenced,
+            EmbedType::HtmlScriptFig => ffi::FigEmbedType::HtmlScriptFig,
         }
     }
 
@@ -77,6 +82,7 @@ impl EmbedType {
             v if v == ffi::FigEmbedType::FrontmatterTomlFenced as i32 => {
                 Some(EmbedType::FrontmatterTomlFenced)
             }
+            v if v == ffi::FigEmbedType::HtmlScriptFig as i32 => Some(EmbedType::HtmlScriptFig),
             _ => None,
         }
     }
@@ -92,7 +98,7 @@ impl EmbedType {
             | EmbedType::EndmatterYaml
             | EmbedType::FrontmatterYamlFenced => Format::Yaml,
             EmbedType::FrontmatterJson | EmbedType::FrontmatterJsonFenced => Format::Json,
-            EmbedType::FrontmatterFig => Format::Fig,
+            EmbedType::FrontmatterFig | EmbedType::HtmlScriptFig => Format::Fig,
             EmbedType::FrontmatterToml | EmbedType::FrontmatterTomlFenced => Format::Toml,
         }
     }

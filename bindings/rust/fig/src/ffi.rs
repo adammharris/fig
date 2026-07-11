@@ -406,6 +406,7 @@ pub enum FigEmbedType {
     FrontmatterYamlFenced = 5,
     FrontmatterJsonFenced = 6,
     FrontmatterTomlFenced = 7,
+    HtmlScriptFig = 8,
 }
 
 unsafe extern "C" {
