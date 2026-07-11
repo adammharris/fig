@@ -137,12 +137,17 @@ pub fn embedTypeFromName(name: []const u8) ?fig.Embed.Type {
     if (eql(u8, name, "html-script-yaml")) return .{ .html_script = .yaml };
     if (eql(u8, name, "html-script-json")) return .{ .html_script = .json };
     if (eql(u8, name, "html-script-toml")) return .{ .html_script = .toml };
+    // HTML `<pre><code class="language-<lang>">` visible code blocks.
+    if (eql(u8, name, "html-code") or eql(u8, name, "html-code-fig")) return .{ .html_code = .fig };
+    if (eql(u8, name, "html-code-yaml")) return .{ .html_code = .yaml };
+    if (eql(u8, name, "html-code-json")) return .{ .html_code = .json };
+    if (eql(u8, name, "html-code-toml")) return .{ .html_code = .toml };
     return null;
 }
 
 /// The `--embed <archetype>` names accepted by `embedTypeFromName`, for error
 /// messages — one source of truth so a new archetype is listed everywhere.
-pub const embed_archetype_names = "frontmatter, md-json, md-toml, md-fig, fenced-yaml, fenced-json, fenced-toml, fenced-fig, frontmatter-json (;;;), frontmatter-toml (+++), html-script, html-script-yaml, html-script-json, html-script-toml, endmatter";
+pub const embed_archetype_names = "frontmatter, md-json, md-toml, md-fig, fenced-yaml, fenced-json, fenced-toml, fenced-fig, frontmatter-json (;;;), frontmatter-toml (+++), html-script[-yaml/json/toml], html-code[-yaml/json/toml], endmatter";
 
 /// The CLI `Format` an embed archetype's content is written in — the `get`
 /// action's `--input`/`--output` twin of `Embed.innerFormat`. Lets an explicit

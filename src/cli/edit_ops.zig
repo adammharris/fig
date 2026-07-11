@@ -125,8 +125,9 @@ pub fn getCommentFromEmbed(
 
     const embedded = try fig.Embed.extract(allocator, content, embed_type);
     defer embedded.deinit(allocator);
-    const region = embedded.region;
-    const inner = content[region.content.start..region.content.end];
+    // The DECODED content (entity-decoded for `<code>`, a borrow otherwise) — the
+    // bytes the parser saw, so comments read correctly through the codec.
+    const inner = embedded.decoded.text;
 
     // Keyed on the archetype's inner FORMAT, not the archetype itself, so every
     // archetype sharing a format (`---`/endmatter/```yaml ⇒ YAML, `;;;`/```json
@@ -190,11 +191,19 @@ pub fn applyToEmbed(
     };
     const inner = base[region.content.start..region.content.end];
 
+    // For a codec archetype (`<code>`), the on-disk content is entity-encoded:
+    // decode it (with provenance) so the editor sees real config, then re-encode
+    // span-aware so only the edited bytes change. Identity archetypes borrow
+    // `inner` unchanged and `reencodeEdited` is a passthrough.
+    const codec = fig.Embed.codecOf(embed_type);
+    const decoded = try fig.Embed.decodeForParse(allocator, inner, codec);
+    defer decoded.deinit(allocator);
+
     // Keyed on the archetype's inner FORMAT, not the archetype itself: a fenced
     // ```yaml block edits identically to `---` YAML, `+++`/```toml to TOML, etc.
-    const edited_inner = switch (fig.Embed.innerFormat(embed_type)) {
+    const edited_decoded = switch (fig.Embed.innerFormat(embed_type)) {
         .yaml => if (comptime build_options.lang_yaml)
-            try applyEdit(fig.Language.YAML, allocator, inner, path, text, op, fig.Language.YAML.default_type)
+            try applyEdit(fig.Language.YAML, allocator, decoded.text, path, text, op, fig.Language.YAML.default_type)
         else
             return error.FormatDisabled,
         // JSON frontmatter is plain (strict) JSON: an inserted/replaced key or
@@ -202,17 +211,20 @@ pub fn applyToEmbed(
         // unquoted and the editor rejects it (strict JSON has no comment syntax).
         .json => if (comptime build_options.lang_json) blk: {
             const j = try jsonifyEdit(allocator, op, text);
-            break :blk try applyEdit(fig.Language.JSON, allocator, inner, path, j.text, j.op, .JSON);
+            break :blk try applyEdit(fig.Language.JSON, allocator, decoded.text, path, j.text, j.op, .JSON);
         } else return error.FormatDisabled,
         .fig => if (comptime build_options.lang_fig)
-            try applyEdit(fig.Language.FIG, allocator, inner, path, text, op, fig.Language.FIG.default_type)
+            try applyEdit(fig.Language.FIG, allocator, decoded.text, path, text, op, fig.Language.FIG.default_type)
         else
             return error.FormatDisabled,
         .toml => if (comptime build_options.lang_toml)
-            try applyEdit(fig.Language.TOML, allocator, inner, path, text, op, fig.Language.TOML.default_type)
+            try applyEdit(fig.Language.TOML, allocator, decoded.text, path, text, op, fig.Language.TOML.default_type)
         else
             return error.FormatDisabled,
     };
+    defer allocator.free(edited_decoded);
+    const edited_inner = try fig.Embed.reencodeEdited(allocator, codec, inner, decoded, edited_decoded);
+    defer allocator.free(edited_inner);
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);

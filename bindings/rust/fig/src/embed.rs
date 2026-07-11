@@ -55,6 +55,17 @@ pub enum EmbedType {
     HtmlScriptJson,
     /// `<script type="application/toml">` … `</script>` HTML data island.
     HtmlScriptToml,
+    /// `<pre><code class="language-figl">` … `</code></pre>` visible code block.
+    /// Content is entity-encoded; editing decodes on open and re-encodes
+    /// span-aware on render, so an edit preserves every untouched byte's original
+    /// encoding while canonically encoding only what changed.
+    HtmlCodeFig,
+    /// `<pre><code class="language-yaml">` visible code block.
+    HtmlCodeYaml,
+    /// `<pre><code class="language-json">` visible code block.
+    HtmlCodeJson,
+    /// `<pre><code class="language-toml">` visible code block.
+    HtmlCodeToml,
 }
 
 impl EmbedType {
@@ -76,6 +87,10 @@ impl EmbedType {
             EmbedType::HtmlScriptYaml => F::HtmlScriptYaml,
             EmbedType::HtmlScriptJson => F::HtmlScriptJson,
             EmbedType::HtmlScriptToml => F::HtmlScriptToml,
+            EmbedType::HtmlCodeFig => F::HtmlCodeFig,
+            EmbedType::HtmlCodeYaml => F::HtmlCodeYaml,
+            EmbedType::HtmlCodeJson => F::HtmlCodeJson,
+            EmbedType::HtmlCodeToml => F::HtmlCodeToml,
         }
     }
 
@@ -100,6 +115,10 @@ impl EmbedType {
             v if v == F::HtmlScriptYaml as i32 => EmbedType::HtmlScriptYaml,
             v if v == F::HtmlScriptJson as i32 => EmbedType::HtmlScriptJson,
             v if v == F::HtmlScriptToml as i32 => EmbedType::HtmlScriptToml,
+            v if v == F::HtmlCodeFig as i32 => EmbedType::HtmlCodeFig,
+            v if v == F::HtmlCodeYaml as i32 => EmbedType::HtmlCodeYaml,
+            v if v == F::HtmlCodeJson as i32 => EmbedType::HtmlCodeJson,
+            v if v == F::HtmlCodeToml as i32 => EmbedType::HtmlCodeToml,
             _ => return None,
         })
     }
@@ -112,18 +131,22 @@ impl EmbedType {
             EmbedType::FrontmatterYaml
             | EmbedType::EndmatterYaml
             | EmbedType::FencedYaml
-            | EmbedType::HtmlScriptYaml => Format::Yaml,
+            | EmbedType::HtmlScriptYaml
+            | EmbedType::HtmlCodeYaml => Format::Yaml,
             EmbedType::FrontmatterJson
             | EmbedType::FencedJson
             | EmbedType::MdFrontmatterJson
-            | EmbedType::HtmlScriptJson => Format::Json,
+            | EmbedType::HtmlScriptJson
+            | EmbedType::HtmlCodeJson => Format::Json,
             EmbedType::FrontmatterFig
             | EmbedType::MdFrontmatterFig
-            | EmbedType::HtmlScriptFig => Format::Fig,
+            | EmbedType::HtmlScriptFig
+            | EmbedType::HtmlCodeFig => Format::Fig,
             EmbedType::PlusToml
             | EmbedType::FencedToml
             | EmbedType::MdFrontmatterToml
-            | EmbedType::HtmlScriptToml => Format::Toml,
+            | EmbedType::HtmlScriptToml
+            | EmbedType::HtmlCodeToml => Format::Toml,
         }
     }
 }

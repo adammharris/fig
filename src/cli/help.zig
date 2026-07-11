@@ -64,11 +64,12 @@ pub const Help = struct {
             \\    the comments on items that survive (only new items are inserted,
             \\    only dropped ones removed; result order matches the arguments).
             \\  --embed <archetype>: target an embedded region of a host file.
-            \\    Three parametric families take a language: `md-<lang>` (---<lang>
+            \\    Parametric families take a language: `md-<lang>` (---<lang>
             \\    frontmatter; bare `frontmatter` is ---/YAML), `fenced-<lang>`
-            \\    (```lang code block), and `html-script[-<lang>]` (<script
-            \\    type="application/<lang>"> data island). Plus the fixed presets
-            \\    `frontmatter-json` (;;;), `frontmatter-toml` (+++), and
+            \\    (```lang code block), `html-script[-<lang>]` (<script
+            \\    type="application/<lang>"> data island), and `html-code[-<lang>]`
+            \\    (<pre><code class="language-<lang>"> visible block). Plus the fixed
+            \\    presets `frontmatter-json` (;;;), `frontmatter-toml` (+++), and
             \\    `endmatter` (trailing ```endmatter block). When the host has no
             \\    such block, it is CREATED (frontmatter at the top, endmatter at
             \\    the bottom) and seeded with <path>: <value>.

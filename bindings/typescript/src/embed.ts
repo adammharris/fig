@@ -64,15 +64,18 @@ function innerFormat(kind: EmbedType): Format {
     case EmbedType.FencedJson:
     case EmbedType.MdFrontmatterJson:
     case EmbedType.HtmlScriptJson:
+    case EmbedType.HtmlCodeJson:
       return Format.Json;
     case EmbedType.FrontmatterFig:
     case EmbedType.MdFrontmatterFig:
     case EmbedType.HtmlScriptFig:
+    case EmbedType.HtmlCodeFig:
       return Format.Fig;
     case EmbedType.PlusToml:
     case EmbedType.FencedToml:
     case EmbedType.MdFrontmatterToml:
     case EmbedType.HtmlScriptToml:
+    case EmbedType.HtmlCodeToml:
       return Format.Toml;
     default:
       return Format.Yaml;

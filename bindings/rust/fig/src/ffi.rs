@@ -413,6 +413,10 @@ pub enum FigEmbedType {
     HtmlScriptYaml = 12,
     HtmlScriptJson = 13,
     HtmlScriptToml = 14,
+    HtmlCodeFig = 15,
+    HtmlCodeYaml = 16,
+    HtmlCodeJson = 17,
+    HtmlCodeToml = 18,
 }
 
 unsafe extern "C" {

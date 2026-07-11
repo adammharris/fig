@@ -52,6 +52,10 @@ const Match = union(enum) {
     /// this format. Attribute order, quoting, and whitespace are tolerated; a
     /// same-line block (`<script …>body</script>`) is deliberately not matched.
     script_open: InnerFormat,
+    /// The line opens an HTML `<code>` block (optionally wrapped in `<pre>`) whose
+    /// `class` list carries a `language-<lang>` token resolving to this format.
+    /// See `parseCodeOpen`.
+    code_open: InnerFormat,
 };
 
 /// The format an archetype's content is written in. A parametric archetype
@@ -118,6 +122,17 @@ fn scriptLiteral(f: InnerFormat) []const u8 {
     };
 }
 
+/// The canonical `<pre><code class="language-…">` open an `html_code` archetype
+/// emits (closed by `</code></pre>`).
+fn codeLiteral(f: InnerFormat) []const u8 {
+    return switch (f) {
+        .yaml => "<pre><code class=\"language-yaml\">",
+        .json => "<pre><code class=\"language-json\">",
+        .toml => "<pre><code class=\"language-toml\">",
+        .fig => "<pre><code class=\"language-figl\">",
+    };
+}
+
 /// The first whitespace-delimited token of `s` (a code-fence info string may
 /// carry extra words after the language; "first token wins").
 fn firstToken(s: []const u8) []const u8 {
@@ -157,8 +172,221 @@ fn parseScriptOpen(t: []const u8) ?InnerFormat {
     if (rest.len == 0 or (!isHspace(rest[0]) and rest[0] != '>')) return null;
     const gt = std.mem.indexOfScalar(u8, rest, '>') orelse return null;
     if (gt != rest.len - 1) return null; // `>` must end the line
-    const mime = scriptTypeValue(rest[0..gt]) orelse return null;
+    const mime = scriptAttrValue(rest[0..gt], "type") orelse return null;
     return formatFromScriptMime(mime);
+}
+
+/// If already-trimmed `t` opens an HTML `<code>` block (optionally wrapped in a
+/// leading `<pre>`) whose `class` list contains a `language-<lang>`/`lang-<lang>`
+/// token resolving to a config format, that format; else null. The tag(s) must
+/// stand on their own line, closing with `>` — a same-line block is rejected, as
+/// for `<script>`.
+fn parseCodeOpen(t: []const u8) ?InnerFormat {
+    var s = t;
+    // Strip an optional leading `<pre …>` wrapper (`<pre><code …>` on one line).
+    if (std.ascii.startsWithIgnoreCase(s, "<pre")) {
+        if (s.len < 4 or (!isHspace(s[4]) and s[4] != '>')) return null;
+        const gt = std.mem.indexOfScalar(u8, s, '>') orelse return null;
+        s = std.mem.trimStart(u8, s[gt + 1 ..], " \t");
+    }
+    const tag = "<code";
+    if (!std.ascii.startsWithIgnoreCase(s, tag)) return null;
+    const rest = s[tag.len..];
+    if (rest.len == 0 or (!isHspace(rest[0]) and rest[0] != '>')) return null;
+    const gt = std.mem.indexOfScalar(u8, rest, '>') orelse return null;
+    if (gt != rest.len - 1) return null; // `>` must end the line
+    const class = scriptAttrValue(rest[0..gt], "class") orelse return null;
+    // The class attribute is a whitespace-separated token list; the highlighter
+    // convention is `language-<lang>` (also `lang-<lang>`).
+    var it = std.mem.tokenizeAny(u8, class, " \t");
+    while (it.next()) |tok| {
+        const lang = if (std.mem.startsWith(u8, tok, "language-"))
+            tok["language-".len..]
+        else if (std.mem.startsWith(u8, tok, "lang-"))
+            tok["lang-".len..]
+        else
+            continue;
+        if (formatFromLangTag(lang)) |f| return f;
+    }
+    return null;
+}
+
+// --- HTML entity codec (span-aware) --------------------------------------
+
+/// One decoded↔source correspondence within a `Decoded`. `text[d_start..][0..
+/// d_len]` was produced from `src[s_start..][0..s_len]`. An identity run has
+/// `d_len == s_len`; an entity has `s_len` = the entity's source length and
+/// `d_len` = its decoded UTF-8 length (`&lt;`→`<` is d_len 1, s_len 4).
+const Seg = struct { d_start: usize, d_len: usize, s_start: usize, s_len: usize };
+
+/// The decode of a codec content slice: the decoded `text` plus a `segs`
+/// provenance map. The map lets an edit re-encode only the bytes it changed
+/// (keeping every untouched byte's ORIGINAL encoding) and lets a parsed node span
+/// lift back to source coordinates. For `identity` content `text` borrows the
+/// slice, `owned_text` is null, and `segs` is empty.
+pub const Decoded = struct {
+    text: []const u8,
+    owned_text: ?[]u8 = null,
+    segs: []const Seg = &.{},
+
+    pub fn deinit(self: Decoded, allocator: Allocator) void {
+        if (self.owned_text) |t| allocator.free(t);
+        if (self.segs.len != 0) allocator.free(@constCast(self.segs));
+    }
+
+    /// The source offset (within the content slice) for decoded offset `d`.
+    /// Linear inside an identity run; an entity is atomic, so a `d` that lands
+    /// inside a multi-byte entity expansion snaps to the entity's source start —
+    /// harmless because a cut never lands there (see `reencodeEdited`). With no
+    /// segments (identity content) the mapping is the identity `d`.
+    fn srcAt(self: Decoded, d: usize) usize {
+        for (self.segs) |g| {
+            if (d < g.d_start + g.d_len)
+                return if (g.d_len == g.s_len) g.s_start + (d - g.d_start) else g.s_start;
+        }
+        if (self.segs.len == 0) return d;
+        const last = self.segs[self.segs.len - 1];
+        return last.s_start + last.s_len;
+    }
+};
+
+const Entity = struct {
+    val: union(enum) { literal: []const u8, codepoint: u21 },
+    src_len: usize,
+};
+
+/// Parse an HTML entity starting at `s[0] == '&'`, or null if `s` doesn't open a
+/// recognized one (then `&` is a literal). Handles the five core named entities
+/// and numeric `&#dd;` / `&#xhh;`; other named entities are intentionally not
+/// decoded (rare in config — documented).
+fn parseEntity(s: []const u8) ?Entity {
+    const semi = std.mem.indexOfScalarPos(u8, s, 1, ';') orelse return null;
+    if (semi > 12) return null; // longer than any entity we accept
+    const body = s[1..semi];
+    if (body.len == 0) return null;
+    const src_len = semi + 1;
+    if (std.mem.eql(u8, body, "lt")) return .{ .val = .{ .literal = "<" }, .src_len = src_len };
+    if (std.mem.eql(u8, body, "gt")) return .{ .val = .{ .literal = ">" }, .src_len = src_len };
+    if (std.mem.eql(u8, body, "amp")) return .{ .val = .{ .literal = "&" }, .src_len = src_len };
+    if (std.mem.eql(u8, body, "quot")) return .{ .val = .{ .literal = "\"" }, .src_len = src_len };
+    if (std.mem.eql(u8, body, "apos")) return .{ .val = .{ .literal = "'" }, .src_len = src_len };
+    if (body[0] == '#') {
+        const cp: u21 = blk: {
+            if (body.len > 1 and (body[1] == 'x' or body[1] == 'X'))
+                break :blk std.fmt.parseInt(u21, body[2..], 16) catch return null
+            else
+                break :blk std.fmt.parseInt(u21, body[1..], 10) catch return null;
+        };
+        if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) return null; // invalid scalar
+        return .{ .val = .{ .codepoint = cp }, .src_len = src_len };
+    }
+    return null;
+}
+
+/// Decode HTML-entity-encoded `src` into decoded text plus its provenance map.
+fn decodeEntities(allocator: Allocator, src: []const u8) !Decoded {
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    var segs: std.ArrayList(Seg) = .empty;
+    errdefer segs.deinit(allocator);
+
+    var i: usize = 0;
+    var run_s: usize = 0; // source start of the pending identity run
+    var run_d: usize = 0; // decoded start of the pending identity run
+    while (i < src.len) {
+        if (src[i] == '&') {
+            if (parseEntity(src[i..])) |ent| {
+                if (i > run_s) // flush the identity run before this entity
+                    try segs.append(allocator, .{ .d_start = run_d, .d_len = i - run_s, .s_start = run_s, .s_len = i - run_s });
+                const d0 = text.items.len;
+                switch (ent.val) {
+                    .literal => |b| try text.appendSlice(allocator, b),
+                    .codepoint => |cp| {
+                        var buf: [4]u8 = undefined;
+                        const n = std.unicode.utf8Encode(cp, &buf) catch unreachable; // validated in parseEntity
+                        try text.appendSlice(allocator, buf[0..n]);
+                    },
+                }
+                try segs.append(allocator, .{ .d_start = d0, .d_len = text.items.len - d0, .s_start = i, .s_len = ent.src_len });
+                i += ent.src_len;
+                run_s = i;
+                run_d = text.items.len;
+                continue;
+            }
+        }
+        try text.append(allocator, src[i]);
+        i += 1;
+    }
+    if (i > run_s)
+        try segs.append(allocator, .{ .d_start = run_d, .d_len = i - run_s, .s_start = run_s, .s_len = i - run_s });
+
+    const owned = try text.toOwnedSlice(allocator);
+    return .{ .text = owned, .owned_text = owned, .segs = try segs.toOwnedSlice(allocator) };
+}
+
+/// Canonically HTML-entity-encode element-text `t` (`&`, `<`, `>` only — the
+/// characters that are significant in `<code>` content; `"`/`'` matter only in
+/// attributes). Caller owns the result.
+fn encodeEntities(allocator: Allocator, t: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    for (t) |c| switch (c) {
+        '&' => try out.appendSlice(allocator, "&amp;"),
+        '<' => try out.appendSlice(allocator, "&lt;"),
+        '>' => try out.appendSlice(allocator, "&gt;"),
+        else => try out.append(allocator, c),
+    };
+    return out.toOwnedSlice(allocator);
+}
+
+/// The codec of `t`'s archetype — `.identity` for all but `<code>`.
+pub fn codecOf(t: Type) Codec {
+    return archetypeOf(t).codec;
+}
+
+/// Decode a content slice for parsing/editing under `codec`. `identity` borrows
+/// `content` unchanged (no allocation); `html_entities` decodes with provenance.
+/// Caller owns the result and must `deinit` it (a no-op for `identity`).
+pub fn decodeForParse(allocator: Allocator, content: []const u8, codec: Codec) !Decoded {
+    return switch (codec) {
+        .identity => .{ .text = content },
+        .html_entities => try decodeEntities(allocator, content),
+    };
+}
+
+/// Reassemble the content bytes to splice between the fences after editing.
+///
+/// For `identity`, the editor already worked on the raw content, so this is its
+/// output copied. For `html_entities` it is SPAN-AWARE: the editor worked in
+/// decoded space, so the unchanged head and tail keep their ORIGINAL source
+/// encoding byte-for-byte (mapped back through `decoded`'s provenance), and only
+/// the region the editor actually changed is canonically re-encoded — so an
+/// untouched `&#60;` never normalizes to `&lt;`. `orig` is the original
+/// (encoded) content slice; `decoded` its `decodeForParse` result; `edited` the
+/// editor's decoded output. Caller owns the result.
+pub fn reencodeEdited(allocator: Allocator, codec: Codec, orig: []const u8, decoded: Decoded, edited: []const u8) ![]u8 {
+    if (codec == .identity) return allocator.dupe(u8, edited);
+
+    // fig's editor is minimal-diff in decoded space (it rewrites only touched
+    // spans), so a common-prefix/suffix scan recovers exactly the changed region.
+    const before = decoded.text;
+    var p: usize = 0;
+    while (p < before.len and p < edited.len and before[p] == edited[p]) p += 1;
+    var s: usize = 0;
+    while (s < before.len - p and s < edited.len - p and
+        before[before.len - 1 - s] == edited[edited.len - 1 - s]) s += 1;
+
+    const head_src = decoded.srcAt(p); // original bytes [0, head_src) unchanged
+    const tail_src = decoded.srcAt(before.len - s); // original bytes [tail_src, len) unchanged
+    const enc_mid = try encodeEntities(allocator, edited[p .. edited.len - s]);
+    defer allocator.free(enc_mid);
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, orig[0..head_src]);
+    try out.appendSlice(allocator, enc_mid);
+    try out.appendSlice(allocator, orig[tail_src..]);
+    return out.toOwnedSlice(allocator);
 }
 
 const Archetype = struct {
@@ -166,6 +394,21 @@ const Archetype = struct {
     close: Delimiter,
     location: enum { start, end, middle },
     inner: InnerFormat,
+    /// How the content is encoded on disk relative to its parsed form. All
+    /// archetypes but the HTML `<code>` block are `identity` (content bytes are
+    /// the parse input verbatim); `<code>` is `html_entities` (see `Codec`).
+    codec: Codec = .identity,
+};
+
+/// How an archetype's content bytes relate to the bytes the inner parser sees.
+pub const Codec = enum {
+    /// Content is the parse input verbatim — a plain slice, byte-identical splice.
+    identity,
+    /// Content is HTML-entity-encoded: `&lt;`→`<` on the way in, canonical
+    /// re-encode on the way out. Decoding is span-aware (`Decoded` carries a
+    /// provenance map) so an edit preserves the original encoding of every byte
+    /// it did not touch. Only the `<code class="language-…">` archetype uses it.
+    html_entities,
 };
 
 fn archetypeOf(t: Type) Archetype {
@@ -194,6 +437,17 @@ fn archetypeOf(t: Type) Archetype {
             .close = .{ .tokens = &.{"</script>"}, .match = .line_trimmed },
             .location = .middle,
             .inner = f,
+        },
+        .html_code => |f| .{
+            // `<pre><code class="language-<lang>">` … `</code></pre>` — a VISIBLE,
+            // highlighted code block that is also the authoritative config. Its
+            // content is HTML-entity-encoded, so it is the one archetype with a
+            // non-identity codec (span-aware: see `Codec`/`reencodeEdited`).
+            .open = .{ .match = .{ .code_open = f }, .literal = codeLiteral(f) },
+            .close = .{ .tokens = &.{ "</code></pre>", "</code>" }, .match = .line_trimmed },
+            .location = .middle,
+            .inner = f,
+            .codec = .html_entities,
         },
 
         // --- blessed presets (distinct fixed delimiters) ---
@@ -243,6 +497,9 @@ pub const Type = union(enum) {
     fenced: InnerFormat,
     /// `<script type="application/<lang>">` … `</script>` HTML data island.
     html_script: InnerFormat,
+    /// `<pre><code class="language-<lang>">` … `</code></pre>` — a visible,
+    /// highlighted, entity-encoded code block that is also the source of truth.
+    html_code: InnerFormat,
     /// `;;;` … `;;;` JSON frontmatter (blessed; distinct delimiter).
     semicolons_json,
     /// `+++` … `+++` TOML frontmatter — the Hugo/Zola convention (blessed).
@@ -266,21 +523,28 @@ pub const Region = struct {
 };
 
 /// Extraction result. `source` is the borrowed *outer* file; `region` indexes
-/// into it. `document`'s node spans are relative to `region.content` — call
-/// `outerSpan` to lift them back into outer-file coordinates.
+/// into it. `document`'s node spans are relative to the DECODED content — call
+/// `outerSpan` to lift them back into outer-file coordinates (which, for a codec
+/// archetype, routes through the decode provenance map). `decoded` holds the
+/// content the parser actually saw: a borrow of `source` for identity archetypes,
+/// an owned decoded buffer (+ map) for the entity-encoded `<code>` one.
 pub const Embedded = struct {
     source: []const u8,
     type: Type,
     region: Region,
     document: Document,
+    decoded: Decoded,
 
     pub fn deinit(self: Embedded, allocator: Allocator) void {
         self.document.deinit(allocator);
+        self.decoded.deinit(allocator);
     }
 
     pub fn outerSpan(self: Embedded, s: Span) Span {
         const base = self.region.content.start;
-        return Span.init(s.start + base, s.end + base);
+        // Map decoded coordinates back to source via the provenance map (a plain
+        // identity for the borrow case, where `segs` is empty).
+        return Span.init(self.decoded.srcAt(s.start) + base, self.decoded.srcAt(s.end) + base);
     }
 };
 
@@ -324,11 +588,16 @@ pub const Error = error{
     Unterminated,
 };
 
-/// Locate + parse the embedded document of type `t` in `source`.
+/// Locate + parse the embedded document of type `t` in `source`. For a codec
+/// archetype the content is decoded (with provenance) before parsing, and the
+/// decoded buffer is owned by the returned `Embedded`.
 pub fn extract(allocator: Allocator, source: []const u8, t: Type) !Embedded {
-    const region = try locate(source, archetypeOf(t));
-    const document = try parseSpan(allocator, source, region.content, t);
-    return .{ .source = source, .type = t, .region = region, .document = document };
+    const a = archetypeOf(t);
+    const region = try locate(source, a);
+    const decoded = try decodeForParse(allocator, Span.of(u8, region.content, source), a.codec);
+    errdefer decoded.deinit(allocator);
+    const document = try parseSlice(allocator, decoded.text, a.inner);
+    return .{ .source = source, .type = t, .region = region, .document = document, .decoded = decoded };
 }
 
 /// Locate the region of type `t` in `source` without parsing its content.
@@ -371,6 +640,7 @@ pub fn detect(source: []const u8) ?Type {
         const le = lineEnd(source, line);
         const lt = std.mem.trim(u8, std.mem.trimEnd(u8, source[line..le], "\r\n"), " \t");
         if (parseScriptOpen(lt)) |f| return .{ .html_script = f };
+        if (parseCodeOpen(lt)) |f| return .{ .html_code = f };
     }
     return null;
 }
@@ -509,10 +779,16 @@ pub fn retype(allocator: Allocator, source: []const u8, region: Region, to: Type
     return host.toOwnedSlice(allocator);
 }
 
-/// Parse an explicit content span as `t`'s inner format, no host scanning.
+/// Parse an explicit content span as `t`'s inner format, no host scanning. Note
+/// this parses the span VERBATIM — for a codec archetype the caller must decode
+/// first (`extract` does); `parseSlice` is the shared per-format parse.
 pub fn parseSpan(allocator: Allocator, source: []const u8, content: Span, t: Type) !Document {
-    const slice = Span.of(u8, content, source);
-    return switch (archetypeOf(t).inner) {
+    return parseSlice(allocator, Span.of(u8, content, source), archetypeOf(t).inner);
+}
+
+/// Parse a raw content slice as `inner`.
+fn parseSlice(allocator: Allocator, slice: []const u8, inner: InnerFormat) !Document {
+    return switch (inner) {
         .yaml => if (comptime build_options.lang_yaml) blk: {
             var parser = Language.YAML.Parser{ .allocator = allocator };
             break :blk Language.YAML.parse(&parser, slice, Language.YAML.default_type);
@@ -742,6 +1018,7 @@ fn matchDelim(source: []const u8, start: usize, d: Delimiter) ?Span {
         .fenced_open => |f| parseFencedOpen(std.mem.trim(u8, line, " \t")) == f,
         .frontmatter_open => |f| parseFrontmatterOpen(std.mem.trim(u8, line, " \t")) == f,
         .script_open => |f| parseScriptOpen(std.mem.trim(u8, line, " \t")) == f,
+        .code_open => |f| parseCodeOpen(std.mem.trim(u8, line, " \t")) == f,
     };
     return if (matched) Span.init(start, eol) else null;
 }
@@ -750,19 +1027,19 @@ fn isHspace(c: u8) bool {
     return c == ' ' or c == '\t';
 }
 
-/// The value of the `type` attribute in an HTML open tag's attribute region
-/// (`<script` and the closing `>` stripped), or null if there is none. Tolerant
-/// of attribute order, extra attributes, single/double/unquoted values, and
-/// whitespace around `=`; the attribute name compares case-insensitively (HTML
-/// folds them). The value is returned verbatim for the caller to resolve.
-fn scriptTypeValue(attrs: []const u8) ?[]const u8 {
+/// The value of attribute `name` in an HTML open tag's attribute region (the tag
+/// name and the closing `>` stripped), or null if absent. Tolerant of attribute
+/// order, extra attributes, single/double/unquoted values, and whitespace around
+/// `=`; the attribute name compares case-insensitively (HTML folds them). The
+/// value is returned verbatim for the caller to resolve.
+fn scriptAttrValue(attrs: []const u8, name: []const u8) ?[]const u8 {
     var i: usize = 0;
     while (i < attrs.len) {
         while (i < attrs.len and isHspace(attrs[i])) i += 1;
         if (i >= attrs.len) break;
         const name_start = i;
         while (i < attrs.len and attrs[i] != '=' and !isHspace(attrs[i])) i += 1;
-        const name = attrs[name_start..i];
+        const attr_name = attrs[name_start..i];
         while (i < attrs.len and isHspace(attrs[i])) i += 1;
         var value: []const u8 = "";
         if (i < attrs.len and attrs[i] == '=') {
@@ -781,7 +1058,7 @@ fn scriptTypeValue(attrs: []const u8) ?[]const u8 {
                 value = attrs[v_start..i];
             }
         }
-        if (std.ascii.eqlIgnoreCase(name, "type")) return value;
+        if (std.ascii.eqlIgnoreCase(attr_name, name)) return value;
     }
     return null;
 }
@@ -976,6 +1253,70 @@ test "parseScriptOpen: tolerates quoting/order/extra attrs, resolves the format,
     try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script type=\"text/javascript\">"));
     try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script>"));
     try testing.expectEqual(@as(?InnerFormat, null), parseScriptOpen("<script type=\"application/figl\">k = 1</script>"));
+}
+
+test "parseCodeOpen: matches language-/lang- tokens and the <pre> wrapper; rejects the rest" {
+    try testing.expectEqual(InnerFormat.fig, parseCodeOpen("<code class=\"language-figl\">"));
+    try testing.expectEqual(InnerFormat.fig, parseCodeOpen("<pre><code class=\"language-figl\">")); // pre wrapper
+    try testing.expectEqual(InnerFormat.fig, parseCodeOpen("<code class=\"lang-figl\">")); // lang- prefix
+    try testing.expectEqual(InnerFormat.fig, parseCodeOpen("<code class=\"hljs language-figl\">")); // token in a list
+    try testing.expectEqual(InnerFormat.toml, parseCodeOpen("<pre><code class='language-toml'>"));
+    // Rejected: no class, a non-config language, a same-line block.
+    try testing.expectEqual(@as(?InnerFormat, null), parseCodeOpen("<code>"));
+    try testing.expectEqual(@as(?InnerFormat, null), parseCodeOpen("<code class=\"language-python\">"));
+    try testing.expectEqual(@as(?InnerFormat, null), parseCodeOpen("<code class=\"language-figl\">k = 1</code>"));
+}
+
+test "html entity codec: decode/encode round-trip and provenance" {
+    // Decode maps entities back to their chars and records source provenance.
+    const dec = try decodeEntities(testing.allocator, "a &lt; b &amp; c &#61; d");
+    defer dec.deinit(testing.allocator);
+    try testing.expectEqualStrings("a < b & c = d", dec.text);
+    // A decoded offset lifts back to the right source offset through the map:
+    // the '<' (decoded index 2) came from `&lt;` at source index 2.
+    try testing.expectEqual(@as(usize, 2), dec.srcAt(2));
+    // Encode only touches the three significant characters.
+    const enc = try encodeEntities(testing.allocator, "x < y & z > w");
+    defer testing.allocator.free(enc);
+    try testing.expectEqualStrings("x &lt; y &amp; z &gt; w", enc);
+}
+
+test "reencodeEdited: span-aware — untouched encoding is byte-preserved, only the edit re-encodes" {
+    // Original content mixes encodings: `&#60;` (numeric) and a would-be `&lt;`.
+    const orig = "title = \"a &#60; b\"\nkeep = \"x &lt; y\"\n";
+    const dec = try decodeEntities(testing.allocator, orig);
+    defer dec.deinit(testing.allocator);
+    try testing.expectEqualStrings("title = \"a < b\"\nkeep = \"x < y\"\n", dec.text);
+    // Simulate an editor that changed ONLY the `title` line's value to `p > q`.
+    const edited = "title = \"p > q\"\nkeep = \"x < y\"\n";
+    const out = try reencodeEdited(testing.allocator, .html_entities, orig, dec, edited);
+    defer testing.allocator.free(out);
+    // The edited value is canonically encoded (`>`→`&gt;`); the untouched `keep`
+    // line keeps its ORIGINAL `&lt;` byte-for-byte (not normalized).
+    try testing.expectEqualStrings("title = \"p &gt; q\"\nkeep = \"x &lt; y\"\n", out);
+}
+
+test "extract: <code> block decodes entities, parses, and lifts spans to source" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    const src =
+        \\<p>see the config:</p>
+        \\<pre><code class="language-figl">
+        \\title = hi
+        \\expr = "a &lt; b"
+        \\</code></pre>
+        \\<p>after</p>
+        \\
+    ;
+    const embedded = try extract(testing.allocator, src, .{ .html_code = .fig });
+    defer embedded.deinit(testing.allocator);
+    // The value round-trips through entity decoding.
+    try testing.expectEqualStrings("a < b", (try embedded.document.ast.getValByPath(&.{.{ .key = "expr" }})).kind.string);
+    try testing.expectEqualStrings("hi", (try embedded.document.ast.getValByPath(&.{.{ .key = "title" }})).kind.string);
+}
+
+test "detect: recognizes a <code class=\"language-…\"> block" {
+    try testing.expectEqual(@as(?Type, .{ .html_code = .fig }), detect("<pre><code class=\"language-figl\">\nk = v\n</code></pre>\n"));
+    try testing.expectEqual(@as(?Type, .{ .html_code = .toml }), detect("<article>\n<code class=\"language-toml\">\nk = 1\n</code>\n</article>\n"));
 }
 
 test "initRegion: an HTML-script archetype seeds an empty <script> island" {

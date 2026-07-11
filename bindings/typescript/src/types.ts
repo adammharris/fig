@@ -153,6 +153,12 @@ export enum EmbedType {
   HtmlScriptYaml = 12,
   HtmlScriptJson = 13,
   HtmlScriptToml = 14,
+  // HTML <pre><code class="language-<lang>"> visible code blocks (entity-encoded;
+  // editing re-encodes span-aware, preserving untouched bytes' original encoding).
+  HtmlCodeFig = 15,
+  HtmlCodeYaml = 16,
+  HtmlCodeJson = 17,
+  HtmlCodeToml = 18,
 }
 
 const STATUS_MESSAGE: Record<number, string> = {

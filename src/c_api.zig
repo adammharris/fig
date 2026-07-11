@@ -1382,6 +1382,14 @@ pub const FigEmbedType = enum(c_int) {
     html_script_yaml = 12, // application/yaml → .{ .html_script = .yaml }
     html_script_json = 13, // application/json → .{ .html_script = .json }
     html_script_toml = 14, // application/toml → .{ .html_script = .toml }
+    // HTML `<pre><code class="language-<lang>">` visible code blocks. Content is
+    // entity-encoded; the editing handle decodes on open and re-encodes
+    // span-aware on render, so an edit preserves every untouched byte's original
+    // encoding (see `embedHandleFromHost`/`fig_embed_render`).
+    html_code_fig = 15, //  language-figl → .{ .html_code = .fig }
+    html_code_yaml = 16, // language-yaml → .{ .html_code = .yaml }
+    html_code_json = 17, // language-json → .{ .html_code = .json }
+    html_code_toml = 18, // language-toml → .{ .html_code = .toml }
 };
 
 fn embedTypeOf(t: c_int) ?Embed.Type {
@@ -1401,6 +1409,10 @@ fn embedTypeOf(t: c_int) ?Embed.Type {
         @intFromEnum(FigEmbedType.html_script_yaml) => .{ .html_script = .yaml },
         @intFromEnum(FigEmbedType.html_script_json) => .{ .html_script = .json },
         @intFromEnum(FigEmbedType.html_script_toml) => .{ .html_script = .toml },
+        @intFromEnum(FigEmbedType.html_code_fig) => .{ .html_code = .fig },
+        @intFromEnum(FigEmbedType.html_code_yaml) => .{ .html_code = .yaml },
+        @intFromEnum(FigEmbedType.html_code_json) => .{ .html_code = .json },
+        @intFromEnum(FigEmbedType.html_code_toml) => .{ .html_code = .toml },
         else => null,
     };
 }
@@ -1426,6 +1438,12 @@ fn figEmbedTypeOf(t: Embed.Type) FigEmbedType {
             .json => .html_script_json,
             .toml => .html_script_toml,
             .fig => .html_script_fig,
+        },
+        .html_code => |f| switch (f) {
+            .yaml => .html_code_yaml,
+            .json => .html_code_json,
+            .toml => .html_code_toml,
+            .fig => .html_code_fig,
         },
         .semicolons_json => .frontmatter_json,
         .plus_toml => .plus_toml,
@@ -1511,6 +1529,13 @@ const EmbedHandle = struct {
     /// (edited) content are untouched. Null means "keep the original body".
     body_override: ?[]u8 = null,
     editor: EditorUnion,
+    /// The content codec — `.identity` for all but `<code>`. When non-identity,
+    /// the editor works on `decoded.text` and `render` re-encodes span-aware.
+    codec: Embed.Codec = .identity,
+    /// The decode of the ORIGINAL content (decoded text + provenance map). For
+    /// identity archetypes it borrows the host content; for `<code>` it owns the
+    /// decoded buffer. Kept so `render` can re-encode only the edited bytes.
+    decoded: Embed.Decoded = .{ .text = "" },
     rendered: std.ArrayList(u8) = .empty,
     /// Reused buffer backing the borrowed bytes returned by the comment-read
     /// exports (`fig_embed_get_*_comment`); see the editor-handle twin.
@@ -1520,6 +1545,7 @@ const EmbedHandle = struct {
         switch (self.editor) {
             inline else => |*e| e.deinit(),
         }
+        self.decoded.deinit(self.allocator);
         if (self.body_override) |b| self.allocator.free(b);
         self.rendered.deinit(self.allocator);
         self.scratch.deinit(self.allocator);
@@ -1533,10 +1559,12 @@ fn embedFrom(em: ?*FigEmbed) ?*EmbedHandle {
 }
 
 /// Whether this build can edit `t`'s inner format (YAML frontmatter needs YAML,
-/// JSON frontmatter needs JSON, fig frontmatter needs the fig dialect). Gated
-/// formats are compiled out: `fig_embed_open`/`fig_embed_open_or_init` report
-/// `unsupported_format` for one, while `fig_embed_extract` (locate-only, no
-/// editor) still works regardless.
+/// JSON needs JSON, …). Gated formats are compiled out: `fig_embed_open`/
+/// `fig_embed_open_or_init` report `unsupported_format` for one, while
+/// `fig_embed_extract`/`fig_embed_detect` (locate-only, no editor) work
+/// regardless. The entity-encoded `<code>` archetype is fully editable — the
+/// handle decodes on open and re-encodes span-aware on render (see
+/// `embedHandleFromHost`/`fig_embed_render`).
 fn embedInnerSupported(t: Embed.Type) bool {
     return switch (Embed.innerFormat(t)) {
         .yaml => build_options.lang_yaml,
@@ -1575,10 +1603,23 @@ fn embedHandleFromHost(
             .toml => if (comptime build_options.lang_toml) .{ .toml = .{ .allocator = allocator } } else unreachable,
         },
     };
+    // Decode the content for editing. For `<code>` this entity-decodes into an
+    // owned buffer (+ provenance map) the editor works on; `render` re-encodes it
+    // span-aware. For identity archetypes it borrows the host content unchanged.
     const content = host[region.content.start..region.content.end];
+    handle.codec = Embed.codecOf(t);
+    handle.decoded = Embed.decodeForParse(allocator, content, handle.codec) catch {
+        switch (handle.editor) {
+            inline else => |*e| e.deinit(),
+        }
+        allocator.free(host);
+        allocator.destroy(handle);
+        return .out_of_memory;
+    };
     switch (handle.editor) {
-        inline else => |*e| e.init(content) catch |err| {
+        inline else => |*e| e.init(handle.decoded.text) catch |err| {
             e.deinit();
+            handle.decoded.deinit(allocator);
             allocator.free(host);
             allocator.destroy(handle);
             return editStatus(err);
@@ -1981,12 +2022,23 @@ pub export fn fig_embed_render(
     const l = out_len orelse return .invalid_argument;
     const handle = embedFrom(em) orelse return .invalid_argument;
 
-    const src = switch (handle.editor) {
+    const edited = switch (handle.editor) {
         inline else => |*e| e.source.items,
     };
     handle.rendered.clearRetainingCapacity();
     const host = handle.host;
     const region = handle.region;
+    // The content bytes to splice: the editor works in DECODED space, so for a
+    // codec archetype re-encode span-aware (untouched bytes keep their original
+    // encoding); identity splices the editor output verbatim.
+    var content_owned: ?[]u8 = null;
+    defer if (content_owned) |c| handle.allocator.free(c);
+    const src: []const u8 = if (handle.codec == .identity) edited else blk: {
+        const orig = host[region.content.start..region.content.end];
+        const enc = Embed.reencodeEdited(handle.allocator, handle.codec, orig, handle.decoded, edited) catch return .out_of_memory;
+        content_owned = enc;
+        break :blk enc;
+    };
     const append = struct {
         fn f(h: *EmbedHandle, bytes: []const u8) FigStatus {
             h.rendered.appendSlice(h.allocator, bytes) catch return .out_of_memory;
@@ -3292,6 +3344,29 @@ test "embed c abi fig_embed_open edits a ```fig fenced frontmatter block" {
     var len: usize = undefined;
     try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
     try std.testing.expectEqualStrings("```fig\nk = w\n```\nbody\n", ptr[0..len]);
+}
+
+test "embed c abi edits a <code> block span-aware (untouched entity encoding preserved)" {
+    if (comptime !build_options.lang_fig) return error.SkipZigTest;
+    // Mixed original encodings: `expr` uses numeric &#60;, `note` uses named &lt;.
+    const html = "<pre><code class=\"language-figl\">\nexpr = \"a &#60; b\"\nnote = \"x &lt; y\"\n</code></pre>\n";
+    var out_fm: ?*FigEmbed = null;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_open(html.ptr, html.len, @intFromEnum(FigEmbedType.html_code_fig), &out_fm));
+    defer fig_embed_destroy(out_fm);
+
+    // Edit `expr` to a quoted value containing `>` — it must canonically re-encode.
+    const path = [_]FigPathSegment{keySeg("expr")};
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_replace_val(out_fm, &path, 1, "\"p > q\"", 7));
+
+    var ptr: [*c]const u8 = undefined;
+    var len: usize = undefined;
+    try std.testing.expectEqual(FigStatus.ok, fig_embed_render(out_fm, &ptr, &len));
+    // The edited value is canonically encoded; the untouched `note` keeps its
+    // ORIGINAL `&lt;` byte-for-byte, and the fences stay identical.
+    try std.testing.expectEqualStrings(
+        "<pre><code class=\"language-figl\">\nexpr = \"p &gt; q\"\nnote = \"x &lt; y\"\n</code></pre>\n",
+        ptr[0..len],
+    );
 }
 
 test "embed c abi fig_embed_set splices a block map into a ```fig fence" {

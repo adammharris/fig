@@ -623,4 +623,21 @@ mod tests {
         fm.move_item(&[Segment::Key("tags")], 2, 0).unwrap();
         assert_eq!(fm.render().unwrap(), "---\ntags: [z, x, y]\n---\nbody\n");
     }
+
+    #[test]
+    fn html_code_edit_is_span_aware_over_the_entity_codec() {
+        // An entity-encoded <code> block with MIXED encodings (numeric &#60; vs
+        // named &lt;). Editing `expr` must canonically re-encode only that value
+        // and leave `note`'s original &lt; byte-for-byte.
+        let html =
+            "<pre><code class=\"language-figl\">\nexpr = \"a &#60; b\"\nnote = \"x &lt; y\"\n</code></pre>\n";
+        let mut ec = Embed::open(html.as_bytes(), EmbedType::HtmlCodeFig).unwrap();
+        ec.replace_value(&[Segment::Key("expr")], "p > q").unwrap();
+        // The edited value canonically encodes `>`→`&gt;`; the untouched `note`
+        // keeps its ORIGINAL `&lt;` byte-for-byte (not normalized).
+        assert_eq!(
+            ec.render().unwrap(),
+            "<pre><code class=\"language-figl\">\nexpr = p &gt; q\nnote = \"x &lt; y\"\n</code></pre>\n",
+        );
+    }
 }

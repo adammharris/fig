@@ -445,6 +445,14 @@ typedef enum FigEmbedType {
     FIG_EMBED_HTML_SCRIPT_YAML = 12,
     FIG_EMBED_HTML_SCRIPT_JSON = 13,
     FIG_EMBED_HTML_SCRIPT_TOML = 14,
+    // HTML <pre><code class="language-<lang>"> visible code blocks. Content is
+    // entity-encoded; the editing handle decodes on open and re-encodes
+    // span-aware on render, so an edit keeps every untouched byte's original
+    // encoding while canonically encoding only what changed.
+    FIG_EMBED_HTML_CODE_FIG  = 15,
+    FIG_EMBED_HTML_CODE_YAML = 16,
+    FIG_EMBED_HTML_CODE_JSON = 17,
+    FIG_EMBED_HTML_CODE_TOML = 18,
 } FigEmbedType;
 
 // Locate an embedded region and report its fence/content/body spans (in
