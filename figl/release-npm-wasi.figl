@@ -1,0 +1,104 @@
+name = Release (npm-wasi)
+
+# Publish @adammharris/fig-wasi (EXPERIMENTAL, bindings/wasi), the npx-able
+# *CLI* (same actions as the native binary), backed by the wasm32-wasi
+# command module (`zig build wasi`) run under Node's built-in (also
+# experimental) WASI support. See docs/npm-wasi.md. Split out from
+# release.figl (crates.io: fig + fig-macros) and release-npm.figl (the
+# @adammharris/fig library) so each publish, on its own tag line and with its
+# own version-pin checks, can run (and be re-triggered) independently of the
+# others.
+#
+# This job LIVEs on its own tag line (also runnable by hand via
+# `workflow_dispatch`, which runs it unconditionally): `cli/v*.*.*` — the
+# same tag release-binaries.yml (Windows/WASI CLI binaries) and homebrew.yml
+# (macOS/Linux CLI binaries) listen for, since fig-wasi repackages that same
+# CLI release. See "Release tagging" in docs/VERSIONING.md for the full
+# per-artifact tag scheme.
+#
+# fig-wasi is the odd one out among the three release jobs — it's a
+# repackaging of the CLI itself, so unlike the crate/npm-library jobs it has
+# no independent version track: it stays pinned exactly to `cli_version`,
+# enforced both by the version-floor tool's exact-equality check and by the
+# tag-vs-package-version check below.
+#
+# Required repository secret:
+# NPM_TOKEN  — npm automation token with publish rights (not yet set — this
+#              job will fail at the publish step until it's added: `gh secret
+#              set NPM_TOKEN`); needs publish rights to @adammharris/fig-wasi.
+on
+> workflow_dispatch = {}
+> push.tags = [cli/v*.*.*]
+
+permissions.id-token = write
+permissions.contents = read
+
+jobs.npm-wasi
+> name = Publish package (npm) — fig-wasi (experimental)
+> runs-on = ubuntu-latest
+
+jobs.npm-wasi.steps[]
+> uses = actions/checkout@v4
++
+> uses = mlugg/setup-zig@v2
+> with.version = 0.16.0
++
+> uses = actions/setup-node@v4
+> with.node-version = 24
+> with.registry-url = https://registry.npmjs.org
+> with.cache = npm
+> with.cache-dependency-path = bindings/wasi/package-lock.json
++
+> # fig-wasi repackages the CLI itself, so — unlike the crate/npm jobs — it
+> # stays pinned exactly to the CLI's version, checked two ways: the floor
+> # tool's exact-equality pin (cli_version), and this tag check (the tag IS
+> # cli_version by convention — see the header comment above).
+> name = Verify the cross-artifact version floor
+> run = zig build version-floor
++
+> name = Verify tag matches the package version
+> if = github.ref_type == 'tag'
+> run = '''
+pkg=$(node -p "require('./bindings/wasi/package.json').version")
+tag="${GITHUB_REF_NAME#cli/v}"
+if [ "$pkg" != "$tag" ]; then
+  echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
+  exit 1
+fi
+echo "version $pkg matches tag $GITHUB_REF_NAME"
+
+'''
++
+> run = npm ci
+> working-directory = bindings/wasi
++
+> # Builds its own `zig build wasi` (see scripts/build-wasm.mjs) rather than
+> # reusing release-binaries.yml's copy: independent workflows on the same
+> # tag have no ordering guarantee (the same reasoning homebrew.yml's doc
+> # comment gives for why its Linux binaries live in that workflow instead).
+> run = npm run build
+> working-directory = bindings/wasi
++
+> run = npm test
+> working-directory = bindings/wasi
++
+> # Idempotent like the other publishes: npm reports a duplicate version as
+> # E403 "cannot publish over the previously published versions" — only that
+> # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
+> # still fails.
+> name = Publish to npm
+> working-directory = bindings/wasi
+> env.NODE_AUTH_TOKEN = ${{ secrets.NPM_TOKEN }}
+> run = '''
+if out=$(npm publish --access public 2>&1); then
+  echo "$out"
+else
+  echo "$out"
+  if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
+    echo "::notice::npm version already published — skipping"
+  else
+    exit 1
+  fi
+fi
+
+'''

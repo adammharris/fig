@@ -483,10 +483,11 @@ pub fn build(b: *std.Build) void {
     const version_set_step = b.step("version-set", "Set/bump an artifact's version (core|cli|rust|npm) and keep the pins/floor valid");
     version_set_step.dependOn(&version_set_run.step);
 
-    // The `.figl` files under figl/ (build.zig.figl, ci.figl, homebrew.figl,
-    // release.figl) are the source of truth for their generated counterparts
-    // (build.zig.zon, the three .github/workflows/*.yml files) — the inverse
-    // of the usual setup,
+    // The `.figl` files under figl/ (build.zig.figl, ci.figl, ci-rust.figl,
+    // ci-npm.figl, homebrew.figl, release-binaries.figl, release.figl,
+    // release-npm.figl, release-npm-wasi.figl) are the source of truth for
+    // their generated counterparts (build.zig.zon, the eight
+    // .github/workflows/*.yml files) — the inverse of the usual setup,
     // dogfooding fig's own cross-format conversion for fig's own release
     // infra. This tool shells out to the just-built `fig` binary (`fig get -o
     // <format>`) to regenerate them; it never re-implements parsing/printing

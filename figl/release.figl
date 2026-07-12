@@ -1,50 +1,36 @@
-name = Release (npm + crates.io)
+name = Release (crate)
 
-# Publish the npm packages and the crates.io crate. There is no Zig package
-# step: Zig has no central registry — consumers `zig fetch` this repo at a git
-# tag, so pushing the tag *is* the Zig release. The macOS CLI binary +
-# Homebrew tap bump is a separate workflow (homebrew.yml); Linux/Windows/WASI
-# CLI binaries are release-binaries.yml.
+# Publish the crates.io crate (fig + fig-macros, from bindings/rust). There is
+# no Zig package step: Zig has no central registry — consumers `zig fetch`
+# this repo at a git tag, so pushing the tag *is* the Zig release. The macOS
+# CLI binary + Homebrew tap bump is a separate workflow (homebrew.yml);
+# Linux/Windows/WASI CLI binaries are release-binaries.yml.
 #
-# Two npm packages, both under bindings/, published independently (each is
-# its own job below):
-# - bindings/typescript -> @adammharris/fig, a JS *library* (parse/edit/
-#   serialize as an API) backed by a freestanding wasm reactor module.
-# - bindings/wasi -> @adammharris/fig-wasi (EXPERIMENTAL), the npx-able *CLI*
-#   (same actions as the native binary), backed by the wasm32-wasi command
-#   module (`zig build wasi`) run under Node's built-in (also experimental)
-#   WASI support. See docs/npm-wasi.md.
+# The two npm packages (bindings/typescript's @adammharris/fig and
+# bindings/wasi's @adammharris/fig-wasi) live in their own files —
+# release-npm.figl and release-npm-wasi.figl — split out from this one so
+# each publish, on its own tag line and with its own required secret, can run
+# (and be re-triggered) independently of the others.
 #
-# Each job below LIVE on its own tag line (also runnable by hand via
-# `workflow_dispatch`, which runs every job unconditionally):
-#   - `crate` (crates.io: fig + fig-macros)   -> `rust/v*.*.*`
-#   - `npm` (@adammharris/fig, the TS library) -> `npm/v*.*.*`
-#   - `npm-wasi` (@adammharris/fig-wasi)       -> `cli/v*.*.*`
-# See "Release tagging" in docs/VERSIONING.md for the full per-artifact tag
+# This job LIVEs on its own tag line (also runnable by hand via
+# `workflow_dispatch`, which runs it unconditionally): `rust/v*.*.*`. See
+# "Release tagging" in docs/VERSIONING.md for the full per-artifact tag
 # scheme (there's also a `core/v*.*.*` line that nothing here listens for —
 # it exists for `zig fetch` + the ABI semver baseline, not npm/crates.io).
 # The crate carries the `license`, `description`, and `readme` crates.io
 # needs (the README and license text are vendored in from the repo root by
 # the `vendor-rust` step that runs before `cargo publish`).
 #
-# `rust/*` and `npm/*` are independent tracks with no required relation to
-# their tag's version beyond the cross-artifact floor (`zig build
-# version-floor`, checked in each job below): they publish whatever their own
-# manifest says and no-op if that exact version is already out. `fig-wasi` is
-# the odd one out — it's a repackaging of the CLI itself, so it stays pinned
-# exactly to `cli_version` (enforced both by its own job's check below and by
-# `version-floor`), and rides the `cli/` tag rather than getting its own line.
+# `rust/*` is an independent track with no required relation to its tag's
+# version beyond the cross-artifact floor (`zig build version-floor`, checked
+# below): it publishes whatever Cargo.toml says and no-ops if that exact
+# version is already out.
 #
-# Required repository secrets:
-# NPM_TOKEN             — npm automation token with publish rights (not yet
-#                         set — the npm jobs will fail at the publish step
-#                         until it's added: `gh secret set NPM_TOKEN`); it
-#                         needs publish rights to both @adammharris/fig and
-#                         @adammharris/fig-wasi.
+# Required repository secret:
 # CARGO_REGISTRY_TOKEN  — crates.io API token with publish rights (already set)
 on
 > workflow_dispatch = {}
-> push.tags = [cli/v*.*.*, rust/v*.*.*, npm/v*.*.*]
+> push.tags = [rust/v*.*.*]
 
 permissions.id-token = write
 permissions.contents = read
@@ -52,16 +38,52 @@ permissions.contents = read
 jobs.crate
 > name = Publish crate (crates.io)
 > runs-on = ubuntu-latest
-> if = startsWith(github.ref_name, 'rust/') || github.event_name == 'workflow_dispatch'
 
 jobs.crate.steps[]
 > uses = actions/checkout@v4
+> # cargo-semver-checks (below) needs full history + tags: its baseline is the
+> # most recent `rust/v*` tag, discovered the same way ci-rust.figl's
+> # `rust-semver` job discovers its own baseline.
+> with.fetch-depth = 0
 +
 > # build.rs compiles the core, and `vendor-rust` bundles the Zig source into
 > # the published crate.
 > uses = mlugg/setup-zig@v2
 > with.version = 0.16.0
 +
+> # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits —
+> # see ci-rust.figl's `rust-semver` job for why this is a dated pin rather
+> # than `@nightly`. Keep this pin in sync with that job's.
+> uses = dtolnay/rust-toolchain@master
+> with.toolchain = nightly-2026-06-15
++
+> uses = taiki-e/install-action@v2
+> with.tool = cargo-semver-checks
++
+> # Same gate ci-rust.figl's `rust-semver` job runs on every push/PR — re-run
+> # it here so a release can never ship a native Rust API break that exceeds
+> # what the crate's version bump allows, even if that CI job was skipped,
+> # disabled, or its result went unnoticed. Baseline discovery excludes the
+> # tag that triggered this run: HEAD *is* that tag's commit, so without
+> # `--exclude`, `git describe` would resolve to the tag itself and the check
+> # would always compare the crate against itself (i.e. never fail).
+> name = Check the fig crate's Rust API against the last release tag
+> working-directory = bindings/rust
+> run = '''
+set -euo pipefail
+tag="$(git describe --tags --abbrev=0 --match 'rust/v*' --exclude "$GITHUB_REF_NAME" 2>/dev/null || true)"
+if [ -z "$tag" ]; then
+  echo "cargo-semver-checks: no prior rust/v* tag found — skipping (nothing to diff against)."
+  exit 0
+fi
+echo "cargo-semver-checks: baseline $tag"
+cargo semver-checks --package fig --baseline-rev "$tag"
+
+'''
++
+> # Switch back to stable for the rest of the job (test/vendor/publish) — the
+> # nightly toolchain above was only needed for cargo-semver-checks' rustdoc
+> # JSON.
 > uses = dtolnay/rust-toolchain@stable
 +
 > # The crate is an independent track (see the header comment above) — this
@@ -113,134 +135,6 @@ else
   echo "$out"
   if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
     echo "::notice::fig version already on crates.io — skipping"
-  else
-    exit 1
-  fi
-fi
-
-'''
-
-jobs.npm
-> name = Publish package (npm) — fig (library)
-> runs-on = ubuntu-latest
-> if = startsWith(github.ref_name, 'npm/') || github.event_name == 'workflow_dispatch'
-
-jobs.npm.steps[]
-> uses = actions/checkout@v4
-+
-> uses = mlugg/setup-zig@v2
-> with.version = 0.16.0
-+
-> uses = actions/setup-node@v4
-> with
-> > # Node 24+: the test suite uses `using` (explicit resource management),
-> > # which only parses under `--experimental-transform-types` type
-> > # stripping on Node 24 and later.
-> > node-version = 24
-> > registry-url = https://registry.npmjs.org
-> > cache = npm
-> > cache-dependency-path = bindings/typescript/package-lock.json
-+
-> # The npm package is an independent track (see the header comment above) —
-> # this only checks it (and everything else) stays >= the core it embeds,
-> # not that it equals the tag.
-> name = Verify the cross-artifact version floor
-> run = zig build version-floor
-+
-> run = npm ci
-> working-directory = bindings/typescript
-+
-> run = npm run build
-> working-directory = bindings/typescript
-+
-> run = npm test
-> working-directory = bindings/typescript
-+
-> # Idempotent like the crate publishes: npm reports a duplicate version as
-> # E403 "cannot publish over the previously published versions" — only that
-> # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
-> # (a different E403, e.g. "Forbidden"/"do not have permission") still fails.
-> name = Publish to npm
-> working-directory = bindings/typescript
-> env.NODE_AUTH_TOKEN = ${{ secrets.NPM_TOKEN }}
-> run = '''
-if out=$(npm publish --access public 2>&1); then
-  echo "$out"
-else
-  echo "$out"
-  if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
-    echo "::notice::npm version already published — skipping"
-  else
-    exit 1
-  fi
-fi
-
-'''
-
-jobs.npm-wasi
-> name = Publish package (npm) — fig-wasi (experimental)
-> runs-on = ubuntu-latest
-> if = startsWith(github.ref_name, 'cli/') || github.event_name == 'workflow_dispatch'
-
-jobs.npm-wasi.steps[]
-> uses = actions/checkout@v4
-+
-> uses = mlugg/setup-zig@v2
-> with.version = 0.16.0
-+
-> uses = actions/setup-node@v4
-> with.node-version = 24
-> with.registry-url = https://registry.npmjs.org
-> with.cache = npm
-> with.cache-dependency-path = bindings/wasi/package-lock.json
-+
-> # fig-wasi repackages the CLI itself, so — unlike the crate/npm jobs above —
-> # it stays pinned exactly to the CLI's version, checked two ways: the floor
-> # tool's exact-equality pin (cli_version), and this tag check (the tag IS
-> # cli_version by convention — see the header comment above).
-> name = Verify the cross-artifact version floor
-> run = zig build version-floor
-+
-> name = Verify tag matches the package version
-> if = github.ref_type == 'tag'
-> run = '''
-pkg=$(node -p "require('./bindings/wasi/package.json').version")
-tag="${GITHUB_REF_NAME#cli/v}"
-if [ "$pkg" != "$tag" ]; then
-  echo "::error::tag $GITHUB_REF_NAME ($tag) != package.json version ($pkg)"
-  exit 1
-fi
-echo "version $pkg matches tag $GITHUB_REF_NAME"
-
-'''
-+
-> run = npm ci
-> working-directory = bindings/wasi
-+
-> # Builds its own `zig build wasi` (see scripts/build-wasm.mjs) rather than
-> # reusing release-binaries.yml's copy: independent workflows on the same
-> # tag have no ordering guarantee (the same reasoning homebrew.yml's doc
-> # comment gives for why its Linux binaries live in that workflow instead).
-> run = npm run build
-> working-directory = bindings/wasi
-+
-> run = npm test
-> working-directory = bindings/wasi
-+
-> # Idempotent like the other publishes: npm reports a duplicate version as
-> # E403 "cannot publish over the previously published versions" — only that
-> # exact conflict is swallowed, so a bad token (E401) or a forbidden scope
-> # still fails.
-> name = Publish to npm
-> working-directory = bindings/wasi
-> env.NODE_AUTH_TOKEN = ${{ secrets.NPM_TOKEN }}
-> run = '''
-if out=$(npm publish --access public 2>&1); then
-  echo "$out"
-else
-  echo "$out"
-  if echo "$out" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
-    echo "::notice::npm version already published — skipping"
   else
     exit 1
   fi

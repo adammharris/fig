@@ -1,11 +1,12 @@
 name = CI
 
-# Build + test the core and both bindings, and keep the C ABI surface honest
-# (zig build abi-check: symbol diff + C/C++ header probe + version-drift check).
+# Build + test the core, and keep the C ABI surface honest (zig build
+# abi-check: symbol diff + C/C++ header probe + version-drift check).
 #
-# DISABLED FOR NOW: runs only via manual `workflow_dispatch`. This workflow needs
-# no secrets and is safe to re-enable any time — restore the push/pull_request
-# triggers below to run it automatically.
+# Rust CI (cargo test + cargo-semver-checks) and npm/TypeScript CI live in
+# their own files — ci-rust.figl and ci-npm.figl — split out from this one so
+# each binding's checks run (and can be re-triggered) independently of the
+# core gate and of each other.
 on
 > workflow_dispatch = {}
 > push.branches = [main]
@@ -31,115 +32,6 @@ jobs.zig.steps[]
 > # The one pre-release gate: zig test + abi-check + semver-check +
 > # version-floor. `check` also folds in cargo-semver-checks and the Rust/TS
 > # test suites, but those degrade gracefully — with no cargo/npm toolchain in
-> # this job they skip with a note, and the dedicated jobs below run them for
+> # this job they skip with a note, and ci-rust.figl / ci-npm.figl run them for
 > # real (in parallel, with their pinned toolchains). See VERSIONING.md.
 > run = zig build check
-
-jobs.rust
-> name = Rust — cargo test
-> runs-on = ubuntu-latest
-
-jobs.rust.steps[]
-> uses = actions/checkout@v4
-+
-> # build.rs compiles the fig core with `zig build`, so Zig is required here
-> # even though this is a Rust job.
-> uses = mlugg/setup-zig@v2
-> with.version = 0.16.0
-+
-> uses = dtolnay/rust-toolchain@stable
-+
-> uses = Swatinem/rust-cache@v2
-> with.workspaces = bindings/rust
-+
-> # --all-features so the serde- and derive-gated integration tests
-> # (deserialize/serialize/edit/derive) run — none are in the default feature
-> # set, so a plain `cargo test` would silently skip them.
-> run = cargo test --workspace --all-features
-> working-directory = bindings/rust
-
-# cargo-semver-checks guards the *native Rust* public surface (Value, Document,
-# the editor, the #[derive] macros, serde impls, cargo features) — the contract
-# the Zig `semver-check` cannot see, since none of it crosses the C ABI. Like
-# semver-check it is version-aware: it only fails if the API delta exceeds what
-# the crate's current version bump allows. It diffs against the most recent
-# `rust/v*` tag (not crates.io) — the Rust crate's own release line, distinct
-# from `semver-check`'s `core/v*` baseline, since the crate and the core move
-# independently (see "Independent versioning" in docs/VERSIONING.md).
-jobs.rust-semver
-> name = Rust — cargo-semver-checks
-> runs-on = ubuntu-latest
-> steps
-> > *
-> > > uses = actions/checkout@v4
-> > > # Needs full history + tags: the baseline is the most recent `rust/v*`
-> > > # tag, discovered the same way semver-check discovers its own baseline.
-> > > with.fetch-depth = 0
-> > *
-> > > # build.rs compiles the fig core with `zig build`, so building the crate's
-> > > # rustdoc (current AND the baseline rev) needs Zig.
-> > > uses = mlugg/setup-zig@v2
-> > > with.version = 0.16.0
-> > * { uses = dtolnay/rust-toolchain@stable }
-> > *
-> > > # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits.
-> > > # PINNED, not @nightly: rustdoc's JSON format is unstable and nightly ships a
-> > > # new FORMAT_VERSION days-to-weeks before cargo-semver-checks learns to read
-> > > # it. `@nightly` raced ahead to v58 (rustdoc-types 0.58.0, 2026-06-24) while
-> > > # the released tool only reads v56/v57, breaking CI. This pin is the last
-> > > # nightly comfortably within v57 (rustdoc-types 0.57.x ran through 2026-06-19).
-> > > # When you bump cargo-semver-checks to a release that supports a newer format,
-> > > # advance this date to a nightly that emits it.
-> > > # NB: the @<ref> selects a *branch* of the action repo (no per-date branch
-> > > # exists), so a dated nightly must go through @master + the `toolchain` input.
-> > > uses = dtolnay/rust-toolchain@master
-> > > with.toolchain = nightly-2026-06-15
-> > *
-> > > uses = Swatinem/rust-cache@v2
-> > > with.workspaces = bindings/rust
-> > *
-> > > uses = taiki-e/install-action@v2
-> > > with.tool = cargo-semver-checks
-> > *
-> > > name = Check the fig crate's Rust API against the last release tag
-> > > working-directory = bindings/rust
-> > > run = '''
-set -euo pipefail
-tag="$(git describe --tags --abbrev=0 --match 'rust/v*' 2>/dev/null || true)"
-if [ -z "$tag" ]; then
-  echo "cargo-semver-checks: no rust/v* tag found — skipping (nothing to diff against)."
-  exit 0
-fi
-echo "cargo-semver-checks: baseline $tag"
-cargo semver-checks --package fig --baseline-rev "$tag"
-
-'''
-
-jobs.typescript
-> name = TypeScript — build + test
-> runs-on = ubuntu-latest
-
-jobs.typescript.steps[]
-> uses = actions/checkout@v4
-+
-> # `npm run build` runs `zig build wasm` to (re)generate the embedded module.
-> uses = mlugg/setup-zig@v2
-> with.version = 0.16.0
-+
-> uses = actions/setup-node@v4
-> with
-> > # Node 24+: the test suite uses `using` (explicit resource management),
-> > # which only parses under `--experimental-transform-types` type
-> > # stripping on Node 24 and later.
-> > node-version = 24
-> > cache = npm
-> > cache-dependency-path = bindings/typescript/package-lock.json
-+
-> run = npm ci
-> working-directory = bindings/typescript
-+
-> run = npm run build
-> working-directory = bindings/typescript
-+
-> run = npm test
-> working-directory = bindings/typescript

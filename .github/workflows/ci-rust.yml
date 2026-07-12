@@ -1,0 +1,85 @@
+name: Rust CI
+# Rust binding CI: cargo test for bindings/rust, plus cargo-semver-checks
+# guarding the native Rust public surface. Split out from ci.figl (the core
+# Zig check) and ci-npm.figl (the TypeScript/npm binding) so each runs (and
+# can be re-triggered) independently.
+on:
+  workflow_dispatch: {}
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+# A newer push to the same branch/PR supersedes any in-flight run.
+concurrency: { group: 'ci-rust-${{ github.ref }}', cancel-in-progress: true }
+jobs:
+  rust:
+    name: Rust — cargo test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    # build.rs compiles the fig core with `zig build`, so Zig is required here
+    # even though this is a Rust job.
+    - uses: mlugg/setup-zig@v2
+      with: { version: 0.16.0 }
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with: { workspaces: bindings/rust }
+    # --all-features so the serde- and derive-gated integration tests
+    # (deserialize/serialize/edit/derive) run — none are in the default feature
+    # set, so a plain `cargo test` would silently skip them.
+    - run: cargo test --workspace --all-features
+      working-directory: bindings/rust
+  # cargo-semver-checks guards the *native Rust* public surface (Value, Document,
+  # the editor, the #[derive] macros, serde impls, cargo features) — the contract
+  # the Zig `semver-check` cannot see, since none of it crosses the C ABI. Like
+  # semver-check it is version-aware: it only fails if the API delta exceeds what
+  # the crate's current version bump allows. It diffs against the most recent
+  # `rust/v*` tag (not crates.io) — the Rust crate's own release line, distinct
+  # from `semver-check`'s `core/v*` baseline, since the crate and the core move
+  # independently (see "Independent versioning" in docs/VERSIONING.md).
+  #
+  # The Rust crate release workflow (release.figl's `crate` job) re-runs this
+  # same check right before publishing, as a release-time gate — see that job's
+  # comments for why its baseline discovery differs slightly (it must exclude
+  # the tag that triggered the release run itself).
+  rust-semver:
+    name: Rust — cargo-semver-checks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # Needs full history + tags: the baseline is the most recent `rust/v*`
+        # tag, discovered the same way semver-check discovers its own baseline.
+        fetch-depth: 0
+    # build.rs compiles the fig core with `zig build`, so building the crate's
+    # rustdoc (current AND the baseline rev) needs Zig.
+    - uses: mlugg/setup-zig@v2
+      with: { version: 0.16.0 }
+    - uses: dtolnay/rust-toolchain@stable
+    # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits.
+    # PINNED, not @nightly: rustdoc's JSON format is unstable and nightly ships a
+    # new FORMAT_VERSION days-to-weeks before cargo-semver-checks learns to read
+    # it. `@nightly` raced ahead to v58 (rustdoc-types 0.58.0, 2026-06-24) while
+    # the released tool only reads v56/v57, breaking CI. This pin is the last
+    # nightly comfortably within v57 (rustdoc-types 0.57.x ran through 2026-06-19).
+    # When you bump cargo-semver-checks to a release that supports a newer format,
+    # advance this date to a nightly that emits it.
+    # NB: the @<ref> selects a *branch* of the action repo (no per-date branch
+    # exists), so a dated nightly must go through @master + the `toolchain` input.
+    # Keep this pin in sync with release.figl's `crate` job — it runs the same
+    # check before publishing and pins the same nightly.
+    - uses: dtolnay/rust-toolchain@master
+      with: { toolchain: nightly-2026-06-15 }
+    - uses: Swatinem/rust-cache@v2
+      with: { workspaces: bindings/rust }
+    - uses: taiki-e/install-action@v2
+      with: { tool: cargo-semver-checks }
+    - name: Check the fig crate's Rust API against the last release tag
+      working-directory: bindings/rust
+      run: |
+        set -euo pipefail
+        tag="$(git describe --tags --abbrev=0 --match 'rust/v*' 2>/dev/null || true)"
+        if [ -z "$tag" ]; then
+          echo "cargo-semver-checks: no rust/v* tag found — skipping (nothing to diff against)."
+          exit 0
+        fi
+        echo "cargo-semver-checks: baseline $tag"
+        cargo semver-checks --package fig --baseline-rev "$tag"

@@ -20,8 +20,9 @@ name = Homebrew
 # needs them ready in the same workflow run, via `needs:`, before it downloads
 # them to compute checksums — two independent workflows triggered by the same
 # tag have no ordering guarantee between them. Windows + WASI binaries have no
-# such downstream dependency, so they stay in release-binaries.yml. The npm +
-# crates.io bindings are release.yml.
+# such downstream dependency, so they stay in release-binaries.yml. The
+# crates.io crate is release.yml; the two npm packages are release-npm.yml and
+# release-npm-wasi.yml.
 #
 # Prerequisites before the first tagged release succeeds:
 # 1. Create the tap repo `adammharris/homebrew-tap` (already done).
