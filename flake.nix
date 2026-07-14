@@ -15,12 +15,15 @@
         pkgs = import nixpkgs { inherit system; };
         zig = zig-overlay.packages.${system}."0.16.0";
 
-        # Single source of truth for the version: parse `.version` straight out
-        # of build.zig.zon so the flake never drifts from the real package.
-        zonVersion =
-          let m = builtins.match ''.*\.version = "([^"]+)".*'' (builtins.readFile ./build.zig.zon);
+        # This flake ships the `fig` CLI binary, which carries its OWN SemVer
+        # track (`cli_version` in build.zig), independent of the core library
+        # version in build.zig.zon. Parse that so the flake reports the same
+        # version as `fig version` rather than the core number.
+        cliVersion =
+          let m = builtins.match ''.*cli_version = std\.SemanticVersion\.parse\("([^"]+)"\).*''
+                    (builtins.readFile ./build.zig);
           in if m == null
-             then throw "fig flake: could not find `.version` in build.zig.zon"
+             then throw "fig flake: could not find `cli_version` in build.zig"
              else builtins.head m;
       in {
         packages = rec {
@@ -28,7 +31,7 @@
 
           fig = pkgs.stdenv.mkDerivation {
             pname = "fig";
-            version = zonVersion;
+            version = cliVersion;
             src = ./.;
 
             nativeBuildInputs = [ zig ];
