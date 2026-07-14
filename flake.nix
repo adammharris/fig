@@ -14,13 +14,21 @@
       let
         pkgs = import nixpkgs { inherit system; };
         zig = zig-overlay.packages.${system}."0.16.0";
+
+        # Single source of truth for the version: parse `.version` straight out
+        # of build.zig.zon so the flake never drifts from the real package.
+        zonVersion =
+          let m = builtins.match ''.*\.version = "([^"]+)".*'' (builtins.readFile ./build.zig.zon);
+          in if m == null
+             then throw "fig flake: could not find `.version` in build.zig.zon"
+             else builtins.head m;
       in {
         packages = rec {
           default = fig;
 
           fig = pkgs.stdenv.mkDerivation {
             pname = "fig";
-            version = "2.5.0";
+            version = zonVersion;
             src = ./.;
 
             nativeBuildInputs = [ zig ];
