@@ -14,6 +14,14 @@ contents = [[fig docs](docs/docs.md)]
   </picture>
 </h1>
 
+<p align="center">
+  <a href="https://github.com/adammharris/fig/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/adammharris/fig/ci.yml?branch=main" alt="CI"></a>
+  <a href="https://crates.io/crates/fig"><img src="https://img.shields.io/crates/v/fig.svg" alt="crates.io"></a>
+  <a href="https://www.npmjs.com/package/@adammharris/fig"><img src="https://img.shields.io/npm/v/%40adammharris%2Ffig.svg" alt="npm"></a>
+  <a href="https://docs.rs/fig"><img src="https://img.shields.io/docsrs/fig" alt="docs.rs"></a>
+  <a href="LICENSE-MIT"><img src="https://img.shields.io/crates/l/fig.svg" alt="license"></a>
+</p>
+
 `fig` is a Zig library for parsing and editing config files.
 
 Originally made for [Diaryx](https://diaryx.org), `fig` allows editing frontmatter in markdown files without reserializing the data, preserving comments and other trivia. `fig` has since been expanded to include many different kinds of configuration formats and different kinds of embedding.
