@@ -14,7 +14,7 @@ jobs:
     name: Rust — cargo test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     # build.rs compiles the fig core with `zig build`, so Zig is required here
     # even though this is a Rust job.
     - uses: mlugg/setup-zig@v2
@@ -44,7 +44,7 @@ jobs:
     name: Rust — cargo-semver-checks
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         # Needs full history + tags: the baseline is the most recent `rust/v*`
         # tag, discovered the same way semver-check discovers its own baseline.

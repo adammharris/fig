@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
     - name: Build Windows x86_64
@@ -41,7 +41,7 @@ jobs:
         zig build wasi --prefix zig-out/wasi
         cp zig-out/wasi/bin/fig-wasi.wasm fig-wasi.wasm
     - name: Attach to the GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref_name }}
         files: |

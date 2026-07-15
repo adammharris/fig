@@ -17,7 +17,7 @@ jobs:
     name: Zig — check (test + abi/semver/floor guards)
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
       with:
         # semver-check diffs the C ABI against the most recent `v*` tag via
         # `git describe`/`git show`, so it needs full history + tags, not the

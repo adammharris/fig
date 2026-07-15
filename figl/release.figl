@@ -40,7 +40,7 @@ jobs.crate
 > runs-on = ubuntu-latest
 
 jobs.crate.steps[]
-> uses = actions/checkout@v4
+> uses = actions/checkout@v7
 > # cargo-semver-checks (below) needs full history + tags: its baseline is the
 > # most recent `rust/v*` tag, discovered the same way ci-rust.figl's
 > # `rust-semver` job discovers its own baseline.

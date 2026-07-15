@@ -42,7 +42,7 @@ jobs:
     runs-on: macos-latest
     if: github.ref_type == 'tag'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
     - name: Build macOS arm64
@@ -54,7 +54,7 @@ jobs:
         zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=x86_64-macos --prefix zig-out/macos-x64
         tar -czf fig-macos-x86_64.tar.gz -C zig-out/macos-x64/bin fig
     - name: Attach to the GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref_name }}
         files: |
@@ -65,7 +65,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
     - name: Build Linux x86_64
@@ -77,7 +77,7 @@ jobs:
         zig build -Doptimize=ReleaseFast -Dstrip=true -Dtarget=aarch64-linux --prefix zig-out/linux-arm64
         tar -czf fig-linux-aarch64.tar.gz -C zig-out/linux-arm64/bin fig
     - name: Attach to the GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name: ${{ github.ref_name }}
         files: |
@@ -89,7 +89,7 @@ jobs:
     needs: [macos-binaries, linux-binaries]
     if: github.ref_type == 'tag'
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     # Downloads the four tarballs the jobs above just attached to this tag's
     # Release and hashes them — cheaper and less brittle than passing checksums
     # between jobs via artifacts, and it's what mislav/bump-homebrew-formula-action

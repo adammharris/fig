@@ -38,12 +38,12 @@ jobs.npm-wasi
 > runs-on = ubuntu-latest
 
 jobs.npm-wasi.steps[]
-> uses = actions/checkout@v4
+> uses = actions/checkout@v7
 +
 > uses = mlugg/setup-zig@v2
 > with.version = 0.16.0
 +
-> uses = actions/setup-node@v4
+> uses = actions/setup-node@v7
 > with.node-version = 24
 > with.registry-url = https://registry.npmjs.org
 > with.cache = npm

@@ -20,7 +20,7 @@ jobs.zig
 > runs-on = ubuntu-latest
 
 jobs.zig.steps[]
-> uses = actions/checkout@v4
+> uses = actions/checkout@v7
 > # semver-check diffs the C ABI against the most recent `v*` tag via
 > # `git describe`/`git show`, so it needs full history + tags, not the
 > # default shallow checkout.

@@ -17,7 +17,7 @@ jobs.rust
 > runs-on = ubuntu-latest
 
 jobs.rust.steps[]
-> uses = actions/checkout@v4
+> uses = actions/checkout@v7
 +
 > # build.rs compiles the fig core with `zig build`, so Zig is required here
 > # even though this is a Rust job.
@@ -53,7 +53,7 @@ jobs.rust-semver
 > runs-on = ubuntu-latest
 > steps
 > > *
-> > > uses = actions/checkout@v4
+> > > uses = actions/checkout@v7
 > > > # Needs full history + tags: the baseline is the most recent `rust/v*`
 > > > # tag, discovered the same way semver-check discovers its own baseline.
 > > > with.fetch-depth = 0

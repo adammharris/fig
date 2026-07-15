@@ -14,11 +14,11 @@ jobs:
     name: TypeScript — build + test
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v7
     # `npm run build` runs `zig build wasm` to (re)generate the embedded module.
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
-    - uses: actions/setup-node@v4
+    - uses: actions/setup-node@v7
       with:
         # Node 24+: the test suite uses `using` (explicit resource management),
         # which only parses under `--experimental-transform-types` type
