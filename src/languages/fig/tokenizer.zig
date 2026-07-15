@@ -55,10 +55,36 @@ pub fn sniffBare(token: []const u8) Sniffed {
 
 pub const NumberResult = struct { raw: []const u8, kind: enum { integer, float } };
 
+/// Scan a digit run at `start`: `pred` digits with optional `_` separators.
+/// Returns the index just past the run, or null if the run is empty or a
+/// separator is unanchored. The TOML parser's `validUnderscored` is the same
+/// rule, but *validates a known slice*; fig has to scan to a boundary because
+/// the `.`/`e` that ends a run is only found by walking the digits.
+fn scanUnderscored(s: []const u8, start: usize, pred: *const fn (u8) bool) ?usize {
+    var j = start;
+    var prev_us = true; // a separator may not open the run...
+    while (j < s.len) : (j += 1) {
+        const c = s[j];
+        if (c == '_') {
+            if (prev_us) return null; // ...nor be doubled
+            prev_us = true;
+        } else if (pred(c)) {
+            prev_us = false;
+        } else break;
+    }
+    if (prev_us) return null; // ...nor close it; an empty run trips this too
+    return j;
+}
+
 /// TOML-style bare-number sniff: decimal integers/floats (with optional
 /// exponent) and `0x`/`0o`/`0b` integers. A leading zero on a multi-digit
 /// decimal integer part is NOT a number — it stays a string, keeping
 /// zero-padded IDs/zip codes intact (DESIGN.md "Leading-zero rule").
+///
+/// `_` digit separators are accepted in every digit run — radix, integer part,
+/// fraction, and exponent (`0xdead_beef`, `1_000`, `1_000.000_1e1_0`) — each
+/// anchored between two digits, matching TOML and ZON. They are part of the
+/// lexeme (§ 2), so `0xff` and `0xf_f` are distinct numbers.
 pub fn sniffNumber(token: []const u8) ?NumberResult {
     if (token.len == 0) return null;
     var i: usize = 0;
@@ -67,42 +93,32 @@ pub fn sniffNumber(token: []const u8) ?NumberResult {
     const body = token[i..];
 
     if (body.len >= 2 and body[0] == '0' and (body[1] == 'x' or body[1] == 'o' or body[1] == 'b')) {
-        const digits = body[2..];
-        if (digits.len == 0) return null;
         // Pick the radix classifier once — `body[1]` is loop-invariant.
-        const isValidDigit = switch (body[1]) {
+        const isValidDigit: *const fn (u8) bool = switch (body[1]) {
             'x' => &ascii.isHex,
             'o' => &ascii.isOctal,
             'b' => &ascii.isBinary,
             else => unreachable,
         };
-        for (digits) |c| {
-            if (!isValidDigit(c)) return null;
-        }
+        const end = scanUnderscored(body, 2, isValidDigit) orelse return null;
+        if (end != body.len) return null; // trailing garbage -> not a number
         return .{ .raw = token, .kind = .integer };
     }
 
-    var j: usize = i;
-    const int_start = j;
-    while (j < token.len and ascii.isDigit(token[j])) : (j += 1) {}
-    const int_len = j - int_start;
-    if (int_len == 0) return null;
-    if (int_len > 1 and token[int_start] == '0') return null; // leading zero
+    var j = scanUnderscored(token, i, &ascii.isDigit) orelse return null;
+    // Separators count toward the length, so `0_1` is a leading zero too.
+    if (j - i > 1 and token[i] == '0') return null; // leading zero
     var is_float = false;
     if (j < token.len and token[j] == '.') {
         is_float = true;
-        j += 1;
-        const frac_start = j;
-        while (j < token.len and ascii.isDigit(token[j])) : (j += 1) {}
-        if (j == frac_start) return null; // a dot needs >=1 fractional digit
+        // A dot needs >=1 fractional digit; the fraction may lead with a zero.
+        j = scanUnderscored(token, j + 1, &ascii.isDigit) orelse return null;
     }
     if (j < token.len and (token[j] == 'e' or token[j] == 'E')) {
         is_float = true;
         j += 1;
         if (j < token.len and (token[j] == '+' or token[j] == '-')) j += 1;
-        const exp_start = j;
-        while (j < token.len and ascii.isDigit(token[j])) : (j += 1) {}
-        if (j == exp_start) return null;
+        j = scanUnderscored(token, j, &ascii.isDigit) orelse return null;
     }
     if (j != token.len) return null; // trailing garbage -> not a clean number
     return .{ .raw = token, .kind = if (is_float) .float else .integer };
@@ -423,6 +439,50 @@ test "sniffNumber rejects leading zero, accepts hex/float/exponent" {
     try std.testing.expectEqualStrings("0xFF", sniffNumber("0xFF").?.raw);
     try std.testing.expect(sniffNumber("1.5e3").?.kind == .float);
     try std.testing.expect(sniffNumber("12 monkeys") == null);
+}
+
+test "sniffNumber accepts `_` separators in radix integers" {
+    // Kept verbatim in `raw` — the lexeme is the value (§ 2).
+    try std.testing.expectEqualStrings("0xdead_beef", sniffNumber("0xdead_beef").?.raw);
+    try std.testing.expect(sniffNumber("0xdead_beef").?.kind == .integer);
+    try std.testing.expectEqualStrings("0b1010_1010", sniffNumber("0b1010_1010").?.raw);
+    try std.testing.expectEqualStrings("0o7_5_5", sniffNumber("0o7_5_5").?.raw);
+    try std.testing.expectEqualStrings("-0xf_f", sniffNumber("-0xf_f").?.raw);
+
+    // A separator must be anchored between two digits.
+    try std.testing.expect(sniffNumber("0x_ff") == null); // leading
+    try std.testing.expect(sniffNumber("0xff_") == null); // trailing
+    try std.testing.expect(sniffNumber("0xf__f") == null); // doubled
+    try std.testing.expect(sniffNumber("0x_") == null);
+    try std.testing.expect(sniffNumber("0b1_2") == null); // still radix-checked
+    try std.testing.expect(sniffNumber("0xff_.5") == null); // run ends on `_`
+}
+
+test "sniffNumber accepts `_` separators in decimal integers, fractions, exponents" {
+    try std.testing.expectEqualStrings("1_000", sniffNumber("1_000").?.raw);
+    try std.testing.expect(sniffNumber("1_000").?.kind == .integer);
+    try std.testing.expect(sniffNumber("1_0.5").?.kind == .float);
+    try std.testing.expect(sniffNumber("1.000_1").?.kind == .float); // fraction
+    try std.testing.expect(sniffNumber("1e1_0").?.kind == .float); // exponent
+    try std.testing.expect(sniffNumber("-1_0.0_1e-1_0").?.kind == .float); // all runs at once
+    try std.testing.expectEqualStrings("+9_9", sniffNumber("+9_9").?.raw);
+
+    // Anchored in every run, independently.
+    try std.testing.expect(sniffNumber("_1") == null);
+    try std.testing.expect(sniffNumber("1_") == null);
+    try std.testing.expect(sniffNumber("1__0") == null);
+    try std.testing.expect(sniffNumber("1_.5") == null); // integer part
+    try std.testing.expect(sniffNumber("1._5") == null); // fraction
+    try std.testing.expect(sniffNumber("1.5_") == null);
+    try std.testing.expect(sniffNumber("1e_5") == null); // exponent
+    try std.testing.expect(sniffNumber("1e5_") == null);
+    try std.testing.expect(sniffNumber("1e+_5") == null);
+
+    // The leading-zero rule still wins, and separators count toward the run.
+    try std.testing.expect(sniffNumber("0_1") == null);
+    try std.testing.expect(sniffNumber("007_5") == null);
+    try std.testing.expect(sniffNumber("0") != null);
+    try std.testing.expect(sniffNumber("0.000_1") != null); // a lone `0` may lead a float
 }
 
 test "sniffBare classifies literals" {

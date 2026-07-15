@@ -117,9 +117,11 @@ A bare token is a number iff it is, after an optional `+`/`-` sign:
 - a **decimal integer**: digits, with **no leading zero** on a multi-digit value (`007` is a string — the TOML leading-zero rule; `0` is a number);
 - a **float**: a decimal integer part (same no-leading-zero rule: `01.5` is a string), then an optional `.` + at least one fractional digit, and/or an optional exponent (`e`/`E`, optional sign, digits). At least one of fraction/exponent makes it a float.
 
-A token that would be a valid number but for a leading zero on its integer part — sign included — produces the `string_leading_zero` warning (`007`, `-07`, `01.5`, `-01e2`). There are no digit separators (`1_000` is a string). Numbers never accept a leading-dot or trailing-dot float: a bare trailing-dot token (`1.`) and a bare leading-dot token (`.5`) are **strings**, and both shapes produce the `string_looks_like_number` warning — write `1.0` / `0.5`. `: float =` coercion accepts the trailing-dot lexeme (`x: float = 1.`) but NOT a leading-dot one: `x: float = .5` is a `FigTypeMismatch`.
+Any run of digits above MAY carry `_` **digit separators** — the radix digits, the integer part, the fraction, and the exponent each independently (`0xdead_beef`, `1_000`, `1_000.000_1e1_0`). Each `_` MUST be anchored between two digits of its own run, so a leading, trailing, or doubled separator is a string (`0x_ff`, `1_`, `1__0`, `1_.5`, `1e_5`). Separators count toward the leading-zero rule (`0_1` is a string).
 
-The lexeme is preserved verbatim (§ 2): `1.10`, `1e2`, `0xFF`, `+9` all keep their spelling.
+A token that would be a valid number but for a leading zero on its integer part — sign included — produces the `string_leading_zero` warning (`007`, `-07`, `01.5`, `-01e2`, `007_5`). Numbers never accept a leading-dot or trailing-dot float: a bare trailing-dot token (`1.`) and a bare leading-dot token (`.5`) are **strings**, and both shapes produce the `string_looks_like_number` warning — write `1.0` / `0.5`. `: float =` coercion accepts the trailing-dot lexeme (`x: float = 1.`) but NOT a leading-dot one: `x: float = .5` is a `FigTypeMismatch`.
+
+The lexeme is preserved verbatim (§ 2): `1.10`, `1e2`, `0xFF`, `0xdead_beef`, `1_000`, `+9` all keep their spelling. Separators are part of the lexeme, so `0xff` and `0xf_f` — like `1000` and `1_000` — are distinct numbers under § 2 equality even though each pair denotes one value.
 
 ### 4.4 Datetimes
 
