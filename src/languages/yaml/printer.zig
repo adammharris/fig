@@ -2,6 +2,7 @@ const Printer = @This();
 const std = @import("std");
 const AST = @import("../../ast/ast.zig");
 const width = @import("../../util/util.zig").width;
+const num = @import("../../util/number.zig");
 const Writer = std.Io.Writer;
 
 /// Prints a document in YAML block style, using default serialize options.
@@ -33,7 +34,7 @@ pub fn printNode(writer: *Writer, ast: *const AST, id: AST.Node.Id, depth: usize
             try writer.writeByte('\n');
         },
         .number => |value| {
-            try writer.writeAll(value.raw);
+            try num.write(writer, value.raw, num.yaml_1_2);
             try writer.writeByte('\n');
         },
         .extended => |value| {
@@ -285,7 +286,7 @@ fn writeFlow(writer: *Writer, ast: *const AST, id: AST.Node.Id) Writer.Error!voi
     switch (ast.nodes[id].kind) {
         .null_ => try writer.writeAll("null"),
         .boolean => |b| try writer.writeAll(if (b) "true" else "false"),
-        .number => |n| try writer.writeAll(n.raw),
+        .number => |n| try num.write(writer, n.raw, num.yaml_1_2),
         .string => |s| try printFlowScalar(writer, s),
         .sequence => |first| {
             if (first == null) {
@@ -353,7 +354,7 @@ fn printInlineValue(writer: *Writer, document: *const AST, id: AST.Node.Id) Writ
     switch (node.kind) {
         .null_ => try writer.writeAll("null"),
         .boolean => |value| try writer.writeAll(if (value) "true" else "false"),
-        .number => |value| try writer.writeAll(value.raw),
+        .number => |value| try num.write(writer, value.raw, num.yaml_1_2),
         .extended => |value| switch (value.kind) {
             .enum_literal => try printScalar(writer, value.text),
             else => try writer.writeAll(value.text),

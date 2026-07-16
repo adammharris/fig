@@ -2,6 +2,7 @@ const Printer = @This();
 const std = @import("std");
 const AST = @import("../../ast/ast.zig");
 const json_string = @import("../../util/json_string.zig");
+const num = @import("../../util/number.zig");
 const Writer = std.Io.Writer;
 
 /// JSON cannot represent a YAML alias. A materialized AST contains none (aliases
@@ -132,75 +133,13 @@ fn isBareIdentifier(name: []const u8) bool {
     return true;
 }
 
-/// Render a number. JSON5 keeps the source lexeme verbatim (hex, leading/
-/// trailing `.`, leading `+` are all valid JSON5). Plain JSON has none of those,
-/// so a non-JSON lexeme — whether from a JSON5 source (`0xFF`, `.5`, `+15`) or a
-/// TOML one (`0xFF`, `0o17`, `1_000`) — is normalized to a valid JSON number.
+/// Render a number. JSON5 keeps the source lexeme where it can read it back —
+/// hex, leading/trailing `.`, and leading `+` are all valid JSON5 — but NOT
+/// `0o`/`0b`, `_`, or a leading zero, which its own tokenizer rejects; those
+/// canonicalize, as does every non-decimal lexeme under plain JSON.
 fn number(self: *Printer, raw: []const u8) Error!void {
-    if (self.dialect == .json5) {
-        try self.writer.writeAll(raw);
-        return;
-    }
-    try writeJsonNumber(self.writer, raw);
-}
-
-fn writeJsonNumber(writer: *Writer, raw: []const u8) Writer.Error!void {
-    // Leading sign: JSON keeps `-`, drops `+`.
-    var s = raw;
-    if (s.len > 0 and s[0] == '-') {
-        try writer.writeByte('-');
-        s = s[1..];
-    } else if (s.len > 0 and s[0] == '+') {
-        s = s[1..];
-    }
-
-    // Radix-prefixed integers (`0x`/`0o`/`0b`) convert to decimal. Plain decimal
-    // integers are passed through (arbitrary precision; never reformatted).
-    if (s.len >= 2 and s[0] == '0' and (s[1] | 0x20 == 'x' or s[1] | 0x20 == 'o' or s[1] | 0x20 == 'b')) {
-        const base: u8 = switch (s[1] | 0x20) {
-            'x' => 16,
-            'o' => 8,
-            else => 2,
-        };
-        var buf: [128]u8 = undefined;
-        if (stripUnderscores(s[2..], &buf)) |digits| {
-            if (std.fmt.parseInt(u128, digits, base)) |v| {
-                try writer.print("{d}", .{v});
-                return;
-            } else |_| {}
-        }
-        // Fallback: emit the (sign-stripped) lexeme rather than nothing.
-        try writer.writeAll(s);
-        return;
-    }
-
-    // Decimal/float: drop digit-group underscores and pad a bare `.`
-    // (`.5` -> `0.5`, `5.` -> `5.0`) so the result is a valid JSON number.
-    const e_idx = std.mem.indexOfAny(u8, s, "eE");
-    const mantissa = if (e_idx) |i| s[0..i] else s;
-    const exponent = if (e_idx) |i| s[i..] else "";
-
-    if (mantissa.len > 0 and mantissa[0] == '.') try writer.writeByte('0');
-    for (mantissa) |c| {
-        if (c != '_') try writer.writeByte(c);
-    }
-    if (mantissa.len > 0 and mantissa[mantissa.len - 1] == '.') try writer.writeByte('0');
-
-    for (exponent) |c| {
-        if (c != '_') try writer.writeByte(c);
-    }
-}
-
-/// Copy `s` into `buf` without `_` digit separators; null if it would overflow.
-fn stripUnderscores(s: []const u8, buf: []u8) ?[]const u8 {
-    var n: usize = 0;
-    for (s) |c| {
-        if (c == '_') continue;
-        if (n >= buf.len) return null;
-        buf[n] = c;
-        n += 1;
-    }
-    return buf[0..n];
+    const spelling = if (self.dialect == .json5) num.json5 else num.json;
+    try num.write(self.writer, raw, spelling);
 }
 
 fn sequence(self: *Printer, node_id: AST.Node.Id, first_child: ?AST.Node.Id, depth: usize) Error!void {
