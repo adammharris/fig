@@ -1,10 +1,14 @@
 # fig authoring dialect — specification
 
-**Version: 1.0**
+**Version: 1.1**
 
 This document is normative: where the implementation and this document disagree, that is an implementation bug. The reference implementation is the reader at `src/languages/fig/parser.zig` (with `tokenizer.zig`) and the formatter at `src/languages/fig/printer.zig`.
 
 Key words MUST, MUST NOT, SHOULD, and MAY are to be interpreted as in RFC 2119.
+
+**Changelog**
+- 1.0: Initial release
+- 1.1: added support for `_` separators in numbers
 
 ---
 
