@@ -5,6 +5,7 @@ part_of = [fig](/fig.md)
 contents
 > * [BUILD](BUILD.md)
 > * [CONTRIBUTING](CONTRIBUTING.md)
+> * [Testing](testing.md)
 > * [VERSIONING](VERSIONING.md)
 > * [Upcoming breaking changes](BREAKING-CHANGES.md)
 > * [Devlog](devlogs/devlogs.md)

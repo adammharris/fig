@@ -37,6 +37,7 @@ const mappings = [_]Mapping{
     .{ .src = "figl/ci.figl", .dest = ".github/workflows/ci.yml", .format = "yaml" },
     .{ .src = "figl/ci-rust.figl", .dest = ".github/workflows/ci-rust.yml", .format = "yaml" },
     .{ .src = "figl/ci-npm.figl", .dest = ".github/workflows/ci-npm.yml", .format = "yaml" },
+    .{ .src = "figl/fuzz.figl", .dest = ".github/workflows/fuzz.yml", .format = "yaml" },
     .{ .src = "figl/homebrew.figl", .dest = ".github/workflows/homebrew.yml", .format = "yaml" },
     .{ .src = "figl/release-binaries.figl", .dest = ".github/workflows/release-binaries.yml", .format = "yaml" },
     .{ .src = "figl/release.figl", .dest = ".github/workflows/release.yml", .format = "yaml" },

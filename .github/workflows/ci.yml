@@ -25,9 +25,17 @@ jobs:
         fetch-depth: 0
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
-    # The one pre-release gate: zig test + abi-check + semver-check +
-    # version-floor. `check` also folds in cargo-semver-checks and the Rust/TS
+    # The one pre-release gate: zig test + conformance + abi-check + semver-check
+    # + version-floor. `check` also folds in cargo-semver-checks and the Rust/TS
     # test suites, but those degrade gracefully — with no cargo/npm toolchain in
     # this job they skip with a note, and ci-rust.figl / ci-npm.figl run them for
     # real (in parallel, with their pinned toolchains). See VERSIONING.md.
+    #
+    # `conformance` scores the vendored corpora in testdata/ (yaml-test-suite,
+    # toml-test, json5-tests, JSONTestSuite, NestedText, plist). It rides this
+    # step rather than a job of its own precisely so it cannot be forgotten: it
+    # is wired into `check` in build.zig, so a newly added suite is scored here
+    # the moment it is added, with no workflow edit to remember. Fuzzing is the
+    # deliberate exception — it has no natural stopping point, so it runs nightly
+    # (fuzz.figl) rather than on the critical path.
     - run: zig build check

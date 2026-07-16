@@ -59,6 +59,11 @@ test {
     _ = @import("deserialize.zig");
     _ = @import("c_api.zig");
     _ = @import("util/util.zig");
+    // Unconditional, unlike the gated suites below: the fuzz targets double as
+    // deterministic smoke tests under a plain `zig build test` (Zig runs each
+    // one over an empty Smith tape when the binary is not built in fuzz mode),
+    // so they should never need a flag to be compiled or discovered.
+    _ = @import("fuzz.zig");
     if (build_options.json_conformance) {
         _ = @import("languages/json/conformance.zig");
     }
