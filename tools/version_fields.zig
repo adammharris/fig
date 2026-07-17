@@ -48,12 +48,15 @@ pub fn zonVersion(text: []const u8) ?[]const u8 {
 
 /// Range of the quoted version string passed to `std.SemanticVersion.parse(...)`
 /// in `build.zig`'s `const cli_version = std.SemanticVersion.parse("X.Y.Z") ...`
-/// declaration. Anchors on the `cli_version` identifier (not just `parse(`,
-/// since `version` above is parsed the same way) then takes the first quoted
-/// string after it.
+/// declaration. Anchors on the `const cli_version` DECLARATION (not just the
+/// bare `cli_version` identifier, which also appears in prose comments — e.g.
+/// the note explaining why the constant lives in build.zig — and not just
+/// `parse(`, since `version` above is parsed the same way) then takes the first
+/// quoted string after it.
 pub fn buildZigCliVersionRange(text: []const u8) ?Range {
-    const at = std.mem.indexOf(u8, text, "cli_version") orelse return null;
-    return quotedRangeAfter(text, at + "cli_version".len);
+    const decl = "const cli_version";
+    const at = std.mem.indexOf(u8, text, decl) orelse return null;
+    return quotedRangeAfter(text, at + decl.len);
 }
 pub fn buildZigCliVersion(text: []const u8) ?[]const u8 {
     const r = buildZigCliVersionRange(text) orelse return null;

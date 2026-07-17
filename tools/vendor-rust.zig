@@ -15,9 +15,10 @@
 const std = @import("std");
 const Dir = std.Io.Dir;
 
-// The set `zig build install-c-lib` actually reads: the build scripts, the whole
-// Zig source rooted at src/c_api.zig, and the public header. testdata/, tools/,
-// and the other bindings are not needed to build the static library.
+// The set `zig build install-c-lib` actually reads: the build scripts (build.zig
+// plus its src/build/ helper tree, which rides along inside `src`), the whole Zig
+// source rooted at src/c_api.zig, and the public header. testdata/, tools/, and
+// the other bindings are not needed to build the static library.
 const files = [_][]const u8{ "build.zig", "build.zig.zon" };
 const trees = [_][]const u8{ "src", "bindings/c/include" };
 
