@@ -227,10 +227,18 @@ const DocumentHandle = struct {
 };
 
 fn activeAllocator() std.mem.Allocator {
-    return if (builtin.cpu.arch.isWasm())
-        std.heap.wasm_allocator
-    else
-        std.heap.c_allocator;
+    // wasm: no libc, `wasm_allocator` is the only option.
+    if (builtin.cpu.arch.isWasm()) return std.heap.wasm_allocator;
+    // Android: the shared library is built WITHOUT libc, because Zig ships
+    // glibc/musl but not Bionic, so a self-contained (NDK-free) `.so` cannot
+    // link one (see `addCApiLibrary` in build.zig). That rules out
+    // `c_allocator` (it wraps libc `malloc`), so use the libc-free
+    // `smp_allocator`. This stays internally consistent — every fig allocation
+    // and its matching `fig_free`/`fig_document_free` route back through here —
+    // so the swapped allocator never crosses the ABI boundary.
+    if (builtin.abi.isAndroid()) return std.heap.smp_allocator;
+    // Everywhere else: the process libc allocator.
+    return std.heap.c_allocator;
 }
 
 // ==================

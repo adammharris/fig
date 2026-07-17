@@ -147,6 +147,48 @@ fn addFigOptions(b: *std.Build, cfg: BuildOptions) *std.Build.Step.Options {
     return options;
 }
 
+/// Build one C ABI library artifact (`src/c_api.zig`) at the given `linkage`.
+///
+/// Factored out because the C ABI is now emitted twice from identical module
+/// config: once `.static` (`libfig.a`, the default install + what the abi
+/// probes link against) and once `.dynamic` (`libfig.so`/`.dylib`/`.dll`, the
+/// `shared` step). A shared object is the integration surface every non-wasm
+/// consumer that isn't a Zig/Rust build actually wants — Android/iOS via
+/// JNI/`System.loadLibrary`, and any `dlopen`/`ctypes`/FFI binding — none of
+/// which can link a `.a`. Keeping both behind one function is what stops the
+/// two from drifting as `c_api.zig`'s build config changes.
+fn addCApiLibrary(
+    b: *std.Build,
+    linkage: std.builtin.LinkMode,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    strip: bool,
+    options_mod: *std.Build.Module,
+) *std.Build.Step.Compile {
+    const lib = b.addLibrary(.{
+        .linkage = linkage,
+        .name = "fig",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/c_api.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            // `c_api.zig` reaches for `std.heap.c_allocator` on every target
+            // that links libc, so libc must be linked there — EXCEPT two cases
+            // that have no libc to link and select a different allocator (see
+            // `activeAllocator` in c_api.zig):
+            //   * wasm — uses `wasm_allocator`.
+            //   * Android — Zig bundles glibc/musl but NOT Bionic, so a
+            //     self-contained `.so` can't link one; it uses the libc-free
+            //     `smp_allocator`. Dropping libc here is what lets
+            //     `-Dtarget=*-linux-android` cross-compile with no NDK sysroot.
+            .link_libc = !target.result.cpu.arch.isWasm() and !target.result.abi.isAndroid(),
+        }),
+    });
+    lib.root_module.addImport("build_options", options_mod);
+    return lib;
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -278,23 +320,29 @@ pub fn build(b: *std.Build) void {
     const lsp_run_step = b.step("run-lsp", "Run the fig language server (LSP over stdio)");
     lsp_run_step.dependOn(&lsp_run.step);
 
-    const c_lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "fig",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/c_api.zig"),
-            .target = target,
-            .optimize = optimize,
-            .strip = strip,
-            .link_libc = !resolved_target.cpu.arch.isWasm(),
-        }),
-    });
-    c_lib.root_module.addImport("build_options", options_mod);
+    const c_lib = addCApiLibrary(b, .static, target, optimize, strip, options_mod);
     const install_c_lib = b.addInstallArtifact(c_lib, .{});
     b.getInstallStep().dependOn(&install_c_lib.step);
 
     const install_c_lib_step = b.step("install-c-lib", "Install the C ABI static library");
     install_c_lib_step.dependOn(&install_c_lib.step);
+
+    // Shared-library variant of the same C ABI: `libfig.so` (ELF, incl.
+    // `*-linux-android`), `libfig.dylib` (Mach-O), or `fig.dll` (PE), chosen by
+    // the target. This is the enabler for consumers that can only load a shared
+    // object — Android/iOS through JNI/`System.loadLibrary`, and any
+    // `dlopen`/`ctypes`/FFI binding. Kept OFF the default install (like the
+    // `wasm`/`wasi` steps) so desktop/Homebrew builds stay lean; cross-compile
+    // it explicitly, e.g.
+    //   zig build shared -Dtarget=aarch64-linux-android -Doptimize=ReleaseSmall
+    // (repeat per Android ABI: aarch64/x86_64/arm/x86). No NDK sysroot is
+    // needed: the Android build links no libc at all (see `addCApiLibrary`'s
+    // `link_libc` gate and `activeAllocator` in c_api.zig), producing a
+    // self-contained `static-pie` `.so`.
+    const c_shared = addCApiLibrary(b, .dynamic, target, optimize, strip, options_mod);
+    const install_c_shared = b.addInstallArtifact(c_shared, .{});
+    const shared_step = b.step("shared", "Build the C ABI as a shared library (.so/.dylib/.dll) — for Android/iOS/dlopen consumers");
+    shared_step.dependOn(&install_c_shared.step);
 
     // Vendor this Zig source into the Rust crate (bindings/rust/fig/zig) so the
     // published crate is self-contained — build.rs compiles the core from there
