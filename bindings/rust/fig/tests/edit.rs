@@ -302,7 +302,7 @@ fn fig_dialect_container_splices_render_flow_and_round_trip() {
 #[test]
 fn fig_dialect_block_map_splices_into_a_fence_with_the_width_knob() {
     // The `*_with` twin honors the layout knob: a block map value lands as a
-    // nested section under its key inside a ```fig``` fence — the colophon case
+    // nested section under its key inside a ```fig``` fence — the prov case
     // that plain `set_value` (forced inline flow) could not express.
     use fig::SerializeOptions;
     let mut em = Embed::open(b"```fig\ntitle = hi\n```\nbody\n", EmbedType::FrontmatterFig).unwrap();

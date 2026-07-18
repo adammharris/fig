@@ -681,7 +681,7 @@ test "fig replace value nested under marker depth" {
 }
 
 test "fig set: a block-map value re-frames as a nested section (not an inline splice)" {
-    // The colophon case: splice a whole block map as a new key's value. A block
+    // The prov case: splice a whole block map as a new key's value. A block
     // container has no valid inline `key = <block>` spelling, so it descends
     // under a `registry` header with its entries one marker level deeper.
     var ed = try newFigEditor("title = hi\n");

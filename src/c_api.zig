@@ -3379,7 +3379,7 @@ test "embed c abi edits a <code> block span-aware (untouched entity encoding pre
 
 test "embed c abi fig_embed_set splices a block map into a ```fig fence" {
     if (comptime !build_options.lang_fig) return error.SkipZigTest;
-    // Regression for the colophon follow-up: a block-map value CAN now be
+    // Regression for the prov follow-up: a block-map value CAN now be
     // spliced into a fenced embed — it re-frames as a nested section under the
     // key rather than failing (previously the caller had to fall back to
     // per-key flow inserts).
