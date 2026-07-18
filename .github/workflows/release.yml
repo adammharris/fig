@@ -99,10 +99,14 @@ jobs:
     # Publish the whole graph bottom-up — crates.io rejects an upload whose
     # dependencies aren't already indexed, so the order is:
     # payload crates -> fig-sys -> fig-macros -> fig
-    # Publishes are idempotent: re-running for a version already on crates.io is a
-    # no-op (the "already uploaded/exists" signal is swallowed), but auth/network
-    # failures still fail the job. A short retry loop absorbs index-propagation lag
-    # before a dependent tier resolves the tier below it.
+    # Two hazards this loop survives, both worst on the FIRST release (all crates
+    # brand new):
+    # * crates.io throttles *new-crate* creation to a small burst (~5) then a slow
+    # refill; publishing >5 first-time crates (6 new here: fig-sys + 5 payloads)
+    # trips a 429, so we wait out one refill window (~11 min) and retry. Later
+    # releases publish new *versions* (far higher limit), so this matters once.
+    # * idempotent: an "already uploaded/exists" response counts as success, so a
+    # re-run after a partial publish skips the crates that already landed.
     - name: Publish to crates.io (bottom-up)
       working-directory: bindings/rust
       env: { CARGO_REGISTRY_TOKEN: '${{ secrets.CARGO_REGISTRY_TOKEN }}' }
@@ -110,13 +114,17 @@ jobs:
         set -uo pipefail
         publish() {
           local crate="$1" attempt out
-          for attempt in 1 2 3 4 5; do
+          for attempt in $(seq 1 8); do
             if out=$(cargo publish -p "$crate" --allow-dirty 2>&1); then
               echo "$out"; return 0
             fi
             echo "$out"
             if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
               echo "::notice::$crate already on crates.io — skipping"; return 0
+            fi
+            if echo "$out" | grep -qiE 'rate limit|too many|429|try again'; then
+              echo "::warning::$crate rate-limited by crates.io (new-crate burst); waiting 11m for refill"
+              sleep 660; continue
             fi
             echo "publish $crate failed (attempt $attempt); retrying in 30s (index propagation?)"
             sleep 30
