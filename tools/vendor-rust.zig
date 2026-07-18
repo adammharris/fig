@@ -1,11 +1,12 @@
 //! Dev tool: vendor fig's Zig source into the Rust crate so the published crate
 //! is self-contained.
 //!
-//! The Rust binding compiles the fig core from source with `zig build` (see
-//! bindings/rust/fig/build.rs). In a checkout that source is found by walking up
-//! to the repo root, but a crate published to crates.io cannot reach outside its
-//! own directory — so before packaging we copy the minimal source set into
-//! bindings/rust/fig/zig, which Cargo.toml's `include` force-adds to the tarball.
+//! The `fig-sys` crate compiles the fig core from source with `zig build` (see
+//! bindings/rust/fig-sys/build.rs) as a fallback. In a checkout that source is
+//! found by walking up to the repo root, but a crate published to crates.io
+//! cannot reach outside its own directory — so before packaging we copy the
+//! minimal source set into bindings/rust/fig-sys/zig, which Cargo.toml's
+//! `include` force-adds to the tarball.
 //!
 //! This is the cross-platform replacement for a shell `cp`: it runs through the
 //! same Zig toolchain the crate already requires, so it works on Windows too.
@@ -27,7 +28,7 @@ const trees = [_][]const u8{ "src", "bindings/c/include" };
 // *text*; copy it into each crate dir (git-ignored, `include`-added for fig,
 // default-packaged for fig-macros) so neither has to vendor its own copy.
 const license_files = [_][]const u8{ "LICENSE-MIT", "LICENSE-APACHE" };
-const crate_dirs = [_][]const u8{ "bindings/rust/fig", "bindings/rust/fig-macros" };
+const crate_dirs = [_][]const u8{ "bindings/rust/fig", "bindings/rust/fig-sys", "bindings/rust/fig-macros" };
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

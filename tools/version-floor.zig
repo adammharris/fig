@@ -74,8 +74,11 @@ pub fn main(init: std.process.Init) !void {
     const ts_str = fields.jsonVersion(pkg) orelse return fail("package.json", "no `\"version\"` field");
     const wasi_str = fields.jsonVersion(wasi_pkg) orelse return fail("bindings/wasi/package.json", "no `\"version\"` field");
 
-    const macros_pin = fields.cargoFigMacrosPin(cargo) orelse
-        return fail("Cargo.toml", "no `fig-macros` version pin in [workspace.dependencies]");
+    var internal_pins: std.ArrayList(fields.Range) = .empty;
+    const n_pins = fields.cargoInternalPinRanges(cargo, arena, &internal_pins) catch
+        return fail("Cargo.toml", "could not scan [workspace.dependencies] pins");
+    if (n_pins == 0)
+        return fail("Cargo.toml", "no internal version pins in [workspace.dependencies]");
 
     const core = std.SemanticVersion.parse(core_str) catch return fail("build.zig.zon", "unparseable `.version`");
     const cli = std.SemanticVersion.parse(cli_str) catch return fail("build.zig", "unparseable `cli_version`");
@@ -85,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("version-floor: core (build.zig.zon) {s}\n", .{core_str});
     std.debug.print("  cli (build.zig cli_version)  {s}\n", .{cli_str});
-    std.debug.print("  rust crate (Cargo.toml)      {s}  (fig-macros pin {s})\n", .{ rust_str, macros_pin });
+    std.debug.print("  rust crate (Cargo.toml)      {s}  ({d} internal pins)\n", .{ rust_str, n_pins });
     std.debug.print("  npm package (package.json)   {s}\n", .{ts_str});
     std.debug.print("  fig-wasi (wasi/package.json) {s}\n", .{wasi_str});
 
@@ -102,9 +105,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("  FAIL: npm package {s} < core {s} (an artifact must be >= the core it embeds)\n", .{ ts_str, core_str });
         failed = true;
     }
-    if (!std.mem.eql(u8, macros_pin, rust_str)) {
-        std.debug.print("  FAIL: fig-macros pin {s} != workspace version {s} (the pin must track the Rust crate version)\n", .{ macros_pin, rust_str });
-        failed = true;
+    for (internal_pins.items) |r| {
+        const pin = cargo[r.start..r.end];
+        if (!std.mem.eql(u8, pin, rust_str)) {
+            std.debug.print("  FAIL: internal [workspace.dependencies] pin {s} != workspace version {s} (all intra-workspace pins must track the Rust crate version)\n", .{ pin, rust_str });
+            failed = true;
+        }
     }
     if (wasi.order(cli) != .eq) {
         std.debug.print("  FAIL: fig-wasi {s} != cli {s} (fig-wasi repackages the CLI, so it must track cli_version exactly)\n", .{ wasi_str, cli_str });
@@ -112,7 +118,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (failed) std.process.exit(1);
-    std.debug.print("version-floor: OK (cli/bindings >= embedded core; fig-macros pin matches; fig-wasi tracks cli_version)\n", .{});
+    std.debug.print("version-floor: OK (cli/bindings >= embedded core; internal pins match; fig-wasi tracks cli_version)\n", .{});
 }
 
 fn fail(file: []const u8, why: []const u8) noreturn {

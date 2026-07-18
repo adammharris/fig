@@ -13,6 +13,7 @@ name = "fig"
 version = "2.5.0"
 dependencies = [
  "fig-macros",
+ "fig-sys",
  "indexmap",
  "serde",
 ]
@@ -25,6 +26,37 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "fig-sys"
+version = "2.5.0"
+dependencies = [
+ "fig-sys-linux-arm64-gnu",
+ "fig-sys-linux-x64-gnu",
+ "fig-sys-macos-arm64",
+ "fig-sys-wasm32",
+ "fig-sys-windows-x64-msvc",
+]
+
+[[package]]
+name = "fig-sys-linux-arm64-gnu"
+version = "2.5.0"
+
+[[package]]
+name = "fig-sys-linux-x64-gnu"
+version = "2.5.0"
+
+[[package]]
+name = "fig-sys-macos-arm64"
+version = "2.5.0"
+
+[[package]]
+name = "fig-sys-wasm32"
+version = "2.5.0"
+
+[[package]]
+name = "fig-sys-windows-x64-msvc"
+version = "2.5.0"
 
 [[package]]
 name = "hashbrown"

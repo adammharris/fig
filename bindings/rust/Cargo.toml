@@ -1,15 +1,26 @@
 [workspace]
 resolver = "3"
-members = ["fig", "fig-macros"]
+members = ["fig", "fig-macros", "fig-sys", "fig-sys-*"]
 
 [workspace.package]
 version = "2.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
-# Shared across the workspace so `fig` and `fig-macros` pin one set of versions.
+# Shared across the workspace so every crate pins one set of versions. The
+# internal `fig*` crates all share the project version; scripts/sync-version.sh
+# rewrites these `version = "…"` fields in lockstep (and --check fails on drift),
+# so the version lives in exactly one place.
 [workspace.dependencies]
 fig-macros = { path = "fig-macros", version = "2.5.0" }
+# default-features = false so `fig`'s own per-language features are the sole
+# driver of which formats fig-sys compiles (fig forwards json/yaml/… -> fig-sys).
+fig-sys = { path = "fig-sys", version = "2.5.0", default-features = false }
+fig-sys-macos-arm64 = { path = "fig-sys-macos-arm64", version = "2.5.0" }
+fig-sys-linux-x64-gnu = { path = "fig-sys-linux-x64-gnu", version = "2.5.0" }
+fig-sys-linux-arm64-gnu = { path = "fig-sys-linux-arm64-gnu", version = "2.5.0" }
+fig-sys-windows-x64-msvc = { path = "fig-sys-windows-x64-msvc", version = "2.5.0" }
+fig-sys-wasm32 = { path = "fig-sys-wasm32", version = "2.5.0" }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "extra-traits"] }

@@ -11,22 +11,11 @@ repository = "https://github.com/adammharris/fig"
 # not run the vendor step simply has no README.md; cargo only requires it when
 # packaging/publishing, not for `build`/`test`.
 readme = "README.md"
-links = "fig"
-# The crate builds the fig core from Zig source (see build.rs). That source is
-# not in this directory in a checkout — build.rs walks up to the repo root — so
-# `zig build vendor-rust` copies it into ./zig before publishing. ./zig is
-# git-ignored, so `include` (an allowlist that bypasses VCS rules) is what
-# actually puts it in the packaged tarball.
-# Precise paths (not `zig/**/*`) so a stray build cache — a `.zig-cache/` or
-# `zig-out/` left by running `zig build` inside the vendor dir — never lands in
-# the tarball. These mirror the set `vendor-rust` copies.
+# The native library and its Zig source now live entirely in `fig-sys` (a
+# dependency), so this crate packages only its own Rust sources plus the
+# vendored README/licenses. No `build.rs`, no `zig/` tree, no `links` here.
 include = [
-    "build.rs",
     "src/**/*",
-    "zig/build.zig",
-    "zig/build.zig.zon",
-    "zig/src/**/*",
-    "zig/bindings/c/include/**/*",
     # Vendored in by `zig build vendor-rust` from the repo root (git-ignored here).
     "LICENSE-MIT",
     "LICENSE-APACHE",
@@ -55,20 +44,25 @@ derive = ["dep:fig-macros"]
 # `ToValue`/`FromValue` impls for `indexmap::IndexMap<String, T>`, preserving
 # insertion order (unlike the std map impls). Opt-in to keep the dep optional.
 indexmap = ["dep:indexmap"]
-# Per-language gates, mirroring `build.zig`'s `-D<lang>` options. Each is passed
-# through to the bundled `zig build` (see `build.rs`), so disabling a feature
-# compiles that format's parser/printer out of the linked `libfig.a` and shrinks
-# the binary. `json` gates the shared JSON/JSONC/JSON5 core. The `Format` enum
-# keeps every variant regardless; selecting a format whose feature is off returns
-# `Error::UnsupportedFormat` at runtime.
-json = []
-yaml = []
-toml = []
-zon = []
-xml = []
-fig = []
+# Per-language gates, mirroring `build.zig`'s `-D<lang>` options. Each forwards
+# to the like-named `fig-sys` feature, which `fig-sys`'s build script reads to
+# compile that format's parser/printer in or out of `libfig.a` (the `default`
+# set links a prebuilt archive with no Zig toolchain; any other combination
+# builds from source). The `Format` enum keeps every variant regardless;
+# selecting a format whose feature is off returns `Error::UnsupportedFormat`.
+# `json` gates the shared JSON/JSONC/JSON5 core.
+json = ["fig-sys/json"]
+yaml = ["fig-sys/yaml"]
+toml = ["fig-sys/toml"]
+zon = ["fig-sys/zon"]
+xml = ["fig-sys/xml"]
+fig = ["fig-sys/fig"]
 
 [dependencies]
+# The `-sys` layer: raw FFI + the `links = "fig"` build script that provides
+# `libfig.a`. The workspace entry sets `default-features = false` so this
+# crate's own per-language features are the sole driver of what fig-sys compiles.
+fig-sys = { workspace = true }
 serde = { version = "1", optional = true }
 fig-macros = { workspace = true, optional = true }
 indexmap = { version = "2", optional = true }

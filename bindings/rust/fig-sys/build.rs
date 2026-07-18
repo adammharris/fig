@@ -4,8 +4,73 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=FIG_SYS_FORCE_SOURCE");
+
     let cargo_target = env::var("TARGET").expect("Cargo should set TARGET");
     let cargo_host = env::var("HOST").expect("Cargo should set HOST");
+
+    // Preferred path: link the prebuilt `libfig.a` shipped by the
+    // `fig-sys-<target>` payload crate for this target — no Zig toolchain
+    // required. Only usable when the active language features match the set the
+    // prebuilt was compiled with (fig's `default`); any other combination
+    // (extra or missing languages) needs a source build. Cargo reruns this
+    // script when the feature set changes. Set FIG_SYS_FORCE_SOURCE=1 to always
+    // build from source.
+    if env::var_os("FIG_SYS_FORCE_SOURCE").is_none() && features_match_prebuilt() {
+        if let Some(libdir) = prebuilt_libdir(&cargo_target) {
+            println!("cargo:rustc-link-search=native={}", libdir.display());
+            println!("cargo:rustc-link-lib=static=fig");
+            println!("cargo:rerun-if-changed={}", libdir.display());
+            return;
+        }
+    }
+
+    build_from_source(&cargo_target, &cargo_host);
+}
+
+/// Whether the active cargo feature set matches the prebuilt `libfig.a`, which
+/// is compiled with fig's **default** language set: `json`, `yaml`, `toml`,
+/// `fig` on; `zon`, `xml` off. Any other combination — an extra language or a
+/// disabled default — requires compiling the core from source so the linked
+/// archive matches. (serde/derive/indexmap are Rust-only and don't affect this;
+/// they aren't fig-sys features.)
+fn features_match_prebuilt() -> bool {
+    let on = |name: &str| env::var_os(format!("CARGO_FEATURE_{name}")).is_some();
+    on("JSON") && on("YAML") && on("TOML") && on("FIG") && !on("ZON") && !on("XML")
+}
+
+/// Directory holding the prebuilt `libfig.a`/`fig.lib` for `target`, if a
+/// payload crate is providing one. The active `fig-sys-<target>` payload crate
+/// publishes its `lib/` directory as `DEP_FIG_PREBUILT_<KEY>_LIBDIR` (via its
+/// `links` key); we resolve `<KEY>` from the target triple.
+fn prebuilt_libdir(target: &str) -> Option<PathBuf> {
+    let key = payload_env_key(target)?;
+    let dir = PathBuf::from(env::var_os(format!("DEP_FIG_PREBUILT_{key}_LIBDIR"))?);
+    let has_archive = ["libfig.a", "fig.lib"]
+        .iter()
+        .any(|name| dir.join(name).is_file());
+    has_archive.then_some(dir)
+}
+
+/// Map a Rust target triple to its payload crate's env-var key, or `None` for
+/// targets with no prebuilt library (which use the source build). Mirror of
+/// `../prebuilt-targets.tsv` and the cfg-gated deps in `Cargo.toml`.
+fn payload_env_key(target: &str) -> Option<&'static str> {
+    Some(match target {
+        "aarch64-apple-darwin" => "MACOS_ARM64",
+        "x86_64-unknown-linux-gnu" => "LINUX_X64_GNU",
+        "aarch64-unknown-linux-gnu" => "LINUX_ARM64_GNU",
+        "x86_64-pc-windows-msvc" => "WINDOWS_X64_MSVC",
+        "wasm32-unknown-unknown" => "WASM32",
+        _ => return None,
+    })
+}
+
+/// Compile `libfig.a` from the vendored/repo Zig source with the `zig`
+/// toolchain, honoring the per-language cargo features. The fallback for
+/// targets without a prebuilt payload, non-default feature sets, or
+/// `FIG_SYS_FORCE_SOURCE`.
+fn build_from_source(cargo_target: &str, cargo_host: &str) {
     let manifest_dir = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let source_root = zig_source_root(&manifest_dir);
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -27,7 +92,7 @@ fn main() {
         // everywhere; the parser is not vector-bound, so the cost is negligible.
         .arg("-Dcpu=baseline");
 
-    if let Some(zig_target) = zig_target_for_cargo_target(&cargo_target, &cargo_host) {
+    if let Some(zig_target) = zig_target_for_cargo_target(cargo_target, cargo_host) {
         command.arg(format!("-Dtarget={zig_target}"));
     }
 
@@ -55,7 +120,19 @@ fn main() {
         .arg(&prefix)
         .current_dir(&source_root)
         .status()
-        .expect("failed to run `zig build`");
+        .unwrap_or_else(|e| {
+            panic!(
+                "fig-sys: this build needs to compile the fig core from source \
+                 (target `{cargo_target}` has no prebuilt library, a non-default \
+                 language feature set is active, or FIG_SYS_FORCE_SOURCE is set), \
+                 but running `zig` failed: {e}.\n\
+                 Default-feature builds for these targets need no Zig: \
+                 aarch64-apple-darwin, x86_64-unknown-linux-gnu, \
+                 aarch64-unknown-linux-gnu, x86_64-pc-windows-msvc, \
+                 wasm32-unknown-unknown.\n\
+                 Otherwise install Zig 0.16+ (https://ziglang.org/download/)."
+            )
+        });
 
     if !status.success() {
         panic!("`zig build` failed with status {status}");

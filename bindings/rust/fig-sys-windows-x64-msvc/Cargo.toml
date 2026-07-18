@@ -1,0 +1,17 @@
+[package]
+name = "fig-sys-windows-x64-msvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prebuilt libfig.a (default features) for x86_64-pc-windows-msvc. Support crate for fig-sys; not for direct use."
+repository = "https://github.com/adammharris/fig"
+# The build script hands `lib/fig.lib`'s location to `fig-sys` via this
+# `links` key (as `DEP_FIG_PREBUILT_WINDOWS_X64_MSVC_LIBDIR`). Unique per payload crate.
+links = "fig_prebuilt_windows_x64_msvc"
+# Allowlist: the prebuilt archive plus the trivial crate skeleton. `lib/` is
+# git-ignored and populated by scripts/build-payload-lib.sh (or CI) before publish.
+include = ["build.rs", "src/lib.rs", "lib/fig.lib", "README.md"]
+
+[lib]
+name = "fig_sys_windows_x64_msvc"
+path = "src/lib.rs"

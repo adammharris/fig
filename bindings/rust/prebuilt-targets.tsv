@@ -1,0 +1,15 @@
+# Canonical tier-1 prebuilt target table for fig-sys payload crates.
+# Consumed by scripts/gen-payloads.sh, scripts/build-payload-lib.sh, and mirrored
+# (by hand) into fig-sys/Cargo.toml cfg deps + fig-sys/build.rs payload_env_key.
+# Adding a target = one row here + rerun gen-payloads.sh + add the cfg dep and
+# build.rs arm. Targets NOT listed here fall back to the vendored zig source build.
+#
+# The prebuilt library is compiled with fig's DEFAULT language set (json, yaml,
+# toml, fig on; zon, xml off); non-default feature sets always build from source.
+#
+# rust_target	zig_target	key	cfg
+aarch64-apple-darwin	aarch64-macos	macos-arm64	all(target_os = "macos", target_arch = "aarch64")
+x86_64-unknown-linux-gnu	x86_64-linux-gnu	linux-x64-gnu	all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+aarch64-unknown-linux-gnu	aarch64-linux-gnu	linux-arm64-gnu	all(target_os = "linux", target_arch = "aarch64", target_env = "gnu")
+x86_64-pc-windows-msvc	x86_64-windows-msvc	windows-x64-msvc	all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+wasm32-unknown-unknown	wasm32-freestanding	wasm32	all(target_arch = "wasm32", target_os = "unknown")

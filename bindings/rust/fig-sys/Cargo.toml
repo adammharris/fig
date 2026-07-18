@@ -1,0 +1,71 @@
+[package]
+name = "fig-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "FFI bindings and native library for fig (the comment-preserving JSON/YAML/TOML/… config engine). Used by the `fig` crate."
+repository = "https://github.com/adammharris/fig"
+homepage = "https://github.com/adammharris/fig"
+documentation = "https://docs.rs/fig-sys"
+readme = "README.md"
+keywords = ["config", "json", "ffi", "sys", "bindings"]
+categories = ["external-ffi-bindings", "config", "parser-implementations"]
+# The `links` key belongs to the -sys crate: its build script emits the
+# `cargo:rustc-link-lib=static=fig` directive, which propagates to `fig`.
+links = "fig"
+
+# `include` is an allowlist. It carries the vendored `zig/` tree (synced by
+# `zig build vendor-rust` before publish, otherwise git-ignored) and the license
+# text (also vendored) so the published crate builds standalone. Precise paths so
+# a stray `.zig-cache/`/`zig-out/` never lands in the tarball.
+include = [
+    "build.rs",
+    "src/**/*.rs",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "zig/build.zig",
+    "zig/build.zig.zon",
+    "zig/src/**/*",
+    "zig/bindings/c/include/**/*",
+]
+
+[lib]
+name = "fig_sys"
+path = "src/lib.rs"
+
+# Per-language gates, mirroring `build.zig`'s `-D<lang>` options. `fig` forwards
+# its own like-named features here (see fig/Cargo.toml); `build.rs` reads these
+# to decide both the prebuilt-vs-source path and, on the source path, which
+# `-D<lang>=false` flags to pass. The prebuilt `libfig.a` is compiled with this
+# exact `default` set, so a default-feature build links it with no Zig toolchain;
+# any other language combination triggers a source build.
+[features]
+default = ["json", "yaml", "toml", "fig"]
+json = []
+yaml = []
+toml = []
+zon = []
+xml = []
+fig = []
+
+# Prebuilt-library payload crates, one per tier-1 target. Each is a target-gated
+# dependency: Cargo activates (and downloads) only the one whose `cfg` matches
+# the build target, so a consumer pulls exactly one archive. The active payload
+# hands its `libfig.a` location to `build.rs` via `links` metadata
+# (`DEP_FIG_PREBUILT_<KEY>_LIBDIR`). Keep in sync with ../prebuilt-targets.tsv
+# and the `payload_env_key` table in build.rs.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+fig-sys-macos-arm64 = { workspace = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.dependencies]
+fig-sys-linux-x64-gnu = { workspace = true }
+
+[target.'cfg(all(target_os = "linux", target_arch = "aarch64", target_env = "gnu"))'.dependencies]
+fig-sys-linux-arm64-gnu = { workspace = true }
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))'.dependencies]
+fig-sys-windows-x64-msvc = { workspace = true }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+fig-sys-wasm32 = { workspace = true }

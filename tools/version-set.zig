@@ -118,7 +118,6 @@ pub fn main(init: std.process.Init) !void {
     const core_cur = fields.zonVersion(zon) orelse fail("no `.version` in {s}", .{zon_rel});
     const cli_cur = fields.buildZigCliVersion(build_zig) orelse fail("no `cli_version` in {s}", .{build_zig_rel});
     const rust_cur = fields.cargoWorkspaceVersion(cargo) orelse fail("no `[workspace.package] version` in {s}", .{cargo_rel});
-    const macros_cur = fields.cargoFigMacrosPin(cargo) orelse fail("no `fig-macros` pin in {s}", .{cargo_rel});
     const npm_cur = fields.jsonVersion(ts_pkg) orelse fail("no `\"version\"` in {s}", .{ts_pkg_rel});
     const wasi_cur = fields.jsonVersion(wasi_pkg) orelse fail("no `\"version\"` in {s}", .{wasi_pkg_rel});
 
@@ -158,7 +157,8 @@ pub fn main(init: std.process.Init) !void {
     raiseToFloor(&d_rust, d_core, "rust");
     raiseToFloor(&d_npm, d_core, "npm");
     const d_wasi = d_cli; // exact pin
-    const d_macros = d_rust; // exact pin
+    // Every intra-workspace pin (fig-sys, fig-macros, the payload crates) tracks
+    // the Rust crate version exactly.
 
     // Build the per-file edit sets against the original text.
     var touched_cargo = false;
@@ -212,14 +212,24 @@ pub fn main(init: std.process.Init) !void {
         var cargo_edits: std.ArrayList(Edit) = .empty;
         if (!std.mem.eql(u8, d_rust, rust_cur))
             try cargo_edits.append(arena, .{ .range = fields.cargoWorkspaceVersionRange(cargo).?, .value = d_rust });
-        if (!std.mem.eql(u8, d_macros, macros_cur))
-            try cargo_edits.append(arena, .{ .range = fields.cargoFigMacrosPinRange(cargo).?, .value = d_macros });
+        // Bring every internal [workspace.dependencies] pin (fig-sys, fig-macros,
+        // and the per-target payload crates) up to the Rust version in lockstep.
+        var pins: std.ArrayList(fields.Range) = .empty;
+        _ = try fields.cargoInternalPinRanges(cargo, arena, &pins);
+        var pins_changed: usize = 0;
+        for (pins.items) |r| {
+            if (!std.mem.eql(u8, cargo[r.start..r.end], d_rust)) {
+                try cargo_edits.append(arena, .{ .range = r, .value = d_rust });
+                pins_changed += 1;
+            }
+        }
         if (cargo_edits.items.len > 0) {
             any = true;
             touched_cargo = true;
             try writeEdits(io, arena, cwd, repo_root, cargo_rel, cargo, cargo_edits.items, dry_run);
             if (!std.mem.eql(u8, d_rust, rust_cur)) report(cargo_rel, "rust", rust_cur, d_rust);
-            if (!std.mem.eql(u8, d_macros, macros_cur)) report(cargo_rel, "fig-macros pin", macros_cur, d_macros);
+            if (pins_changed > 0)
+                std.debug.print("  {s}: {d} internal dependency pin(s) -> {s}\n", .{ cargo_rel, pins_changed, d_rust });
         }
     }
     if (!std.mem.eql(u8, d_npm, npm_cur)) {
@@ -254,7 +264,7 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("\nversion-set: result\n", .{});
     std.debug.print("  core (build.zig.zon)         {s}\n", .{d_core});
     std.debug.print("  cli (build.zig cli_version)  {s}\n", .{d_cli});
-    std.debug.print("  rust crate (Cargo.toml)      {s}  (fig-macros pin {s})\n", .{ d_rust, d_macros });
+    std.debug.print("  rust crate (Cargo.toml)      {s}  (internal pins tracked)\n", .{d_rust});
     std.debug.print("  npm package (package.json)   {s}\n", .{d_npm});
     std.debug.print("  fig-wasi (wasi/package.json) {s}\n", .{d_wasi});
     std.debug.print("  fig.md (frontmatter version) {s}\n", .{d_core});

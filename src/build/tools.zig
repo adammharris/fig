@@ -22,7 +22,7 @@ pub fn add(ctx: Context, arts: artifacts.Result) Result {
     const mod = arts.fig_mod;
     const exe = arts.exe;
 
-    // Vendor this Zig source into the Rust crate (bindings/rust/fig/zig) so the
+    // Vendor this Zig source into fig-sys (bindings/rust/fig-sys/zig) so the
     // published crate is self-contained — build.rs compiles the core from there
     // when there is no repo above it. A small Zig program rather than a shell
     // script, so it runs anywhere the crate's own `zig build` already does.
@@ -36,7 +36,7 @@ pub fn add(ctx: Context, arts: artifacts.Result) Result {
     });
     const vendor_rust_run = b.addRunArtifact(vendor_rust);
     vendor_rust_run.addArg(b.pathFromRoot("."));
-    vendor_rust_run.addArg(b.pathFromRoot("bindings/rust/fig/zig"));
+    vendor_rust_run.addArg(b.pathFromRoot("bindings/rust/fig-sys/zig"));
     const vendor_rust_step = b.step("vendor-rust", "Vendor the Zig source into the Rust crate for publishing");
     vendor_rust_step.dependOn(&vendor_rust_run.step);
 

@@ -1,3 +1,12 @@
+//! Low-level FFI bindings for fig's C ABI, plus the build script that compiles
+//! and links the native `libfig.a`.
+//!
+//! This is the `-sys` layer: raw `extern "C"` functions, `#[repr(C)]` type
+//! mirrors, and status/format constants — nothing else. The safe, ergonomic
+//! API (and serde/derive integration) lives in the `fig` crate, which depends
+//! on this one. Direct use is `unsafe` and unstable across ABI-version bumps.
+#![allow(non_camel_case_types)]
+
 use std::os::raw::c_int;
 
 /// A fig C ABI status code, as a transparent wrapper over the raw `c_int` the
@@ -7,7 +16,8 @@ use std::os::raw::c_int;
 /// is undefined behavior the instant the callee returns a discriminant the enum
 /// does not list, and fig's status set is allowed to grow after 1.0. The newtype
 /// preserves any code unchanged; compare against the associated constants and
-/// route unrecognized values through a fallback (see [`crate::error::Error::from_status`]).
+/// route unrecognized values through a fallback (the `fig` crate does this in
+/// its `Error::from_status`).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FigStatus(pub c_int);
@@ -68,7 +78,7 @@ impl FigNodeKind {
     /// being reinterpreted as an out-of-range enum value — which, for a value
     /// returned by an `extern "C"` function into a Rust enum, is undefined
     /// behavior. This is the only place a raw kind crosses into the enum.
-    pub(crate) fn from_c(raw: c_int) -> Self {
+    pub fn from_c(raw: c_int) -> Self {
         match raw {
             0 => FigNodeKind::Null,
             1 => FigNodeKind::Bool,

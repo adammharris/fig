@@ -1,0 +1,17 @@
+[package]
+name = "fig-sys-linux-arm64-gnu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Prebuilt libfig.a (default features) for aarch64-unknown-linux-gnu. Support crate for fig-sys; not for direct use."
+repository = "https://github.com/adammharris/fig"
+# The build script hands `lib/libfig.a`'s location to `fig-sys` via this
+# `links` key (as `DEP_FIG_PREBUILT_LINUX_ARM64_GNU_LIBDIR`). Unique per payload crate.
+links = "fig_prebuilt_linux_arm64_gnu"
+# Allowlist: the prebuilt archive plus the trivial crate skeleton. `lib/` is
+# git-ignored and populated by scripts/build-payload-lib.sh (or CI) before publish.
+include = ["build.rs", "src/lib.rs", "lib/libfig.a", "README.md"]
+
+[lib]
+name = "fig_sys_linux_arm64_gnu"
+path = "src/lib.rs"

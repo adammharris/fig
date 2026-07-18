@@ -6,8 +6,12 @@ mod diagnostics;
 mod editor;
 mod embed;
 mod error;
-mod ffi;
 mod value;
+
+// The raw FFI layer moved to the `fig-sys` crate. Alias it as `ffi` so every
+// `ffi::…` / `crate::ffi::…` reference in this crate keeps resolving unchanged,
+// and so `fig-sys`'s build script (via its `links = "fig"`) links `libfig.a`.
+pub(crate) use fig_sys as ffi;
 
 #[cfg(feature = "derive")]
 mod convert;

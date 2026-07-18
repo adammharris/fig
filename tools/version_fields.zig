@@ -115,6 +115,43 @@ pub fn cargoFigMacrosPin(text: []const u8) ?[]const u8 {
     return text[r.start..r.end];
 }
 
+/// Ranges of the `version = "..."` value in every *internal* path-dependency
+/// pin under `[workspace.dependencies]` — each `name = { path = "...", version =
+/// "X" }` line (fig, fig-sys, and the per-target fig-sys-<target> payload
+/// crates). These intra-workspace crates all share the one project version, so
+/// version-set rewrites them together and version-floor asserts they match.
+/// External deps (no `path`, e.g. `proc-macro2 = "1"`) are skipped. Appends in
+/// file order to `out`; returns the count appended.
+pub fn cargoInternalPinRanges(
+    text: []const u8,
+    arena: std.mem.Allocator,
+    out: *std.ArrayList(Range),
+) !usize {
+    const sec = std.mem.indexOf(u8, text, "[workspace.dependencies]") orelse return 0;
+    var i = (std.mem.indexOfScalarPos(u8, text, sec, '\n') orelse return 0) + 1;
+    var count: usize = 0;
+    while (i < text.len) {
+        const nl = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const line = text[i..nl];
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "[")) break; // next section ends the block
+        // An internal pin is an inline table carrying both a `path` and a
+        // `version`; the version's value range is what a setter splices.
+        if (std.mem.indexOf(u8, line, "path = \"") != null) {
+            if (std.mem.indexOfPos(u8, text[0..nl], i, "version")) |ver| {
+                if (std.mem.indexOfScalarPos(u8, text[0..nl], ver, '=')) |veq| {
+                    if (quotedRangeAfter(text[0..nl], veq + 1)) |r| {
+                        try out.append(arena, r);
+                        count += 1;
+                    }
+                }
+            }
+        }
+        i = nl + 1;
+    }
+    return count;
+}
+
 fn skipSpace(text: []const u8, idx: usize) usize {
     var i = idx;
     while (i < text.len and (text[i] == ' ' or text[i] == '\t')) i += 1;

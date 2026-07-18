@@ -4,7 +4,11 @@ zig-out/*
 .DS_STORE
 /spec.md
 bindings/rust/target/
-bindings/rust/fig/zig/
+# Zig source vendored into fig-sys at publish time by `zig build vendor-rust`.
+bindings/rust/fig-sys/zig/
+# Prebuilt static libraries stamped into the per-target payload crates by
+# scripts/build-payload-lib.sh (or CI) before publish — regenerated, never committed.
+bindings/rust/fig-sys-*/lib/
 .diaryx
 # License text and README vendored into each crate at publish time by
 # `zig build vendor-rust`; the canonical copies live at the repo root
@@ -12,6 +16,8 @@ bindings/rust/fig/zig/
 bindings/rust/fig/LICENSE-MIT
 bindings/rust/fig/LICENSE-APACHE
 bindings/rust/fig/README.md
+bindings/rust/fig-sys/LICENSE-MIT
+bindings/rust/fig-sys/LICENSE-APACHE
 bindings/rust/fig-macros/LICENSE-MIT
 bindings/rust/fig-macros/LICENSE-APACHE
 src/languages/yaml/spec-1.1-tag-repository.md

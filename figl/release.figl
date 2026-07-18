@@ -97,47 +97,54 @@ cargo semver-checks --package fig --baseline-rev "$tag"
 > run = cargo test --workspace --all-features --locked
 > working-directory = bindings/rust
 +
-> # Vendors the Zig source into the fig crate AND fans the root LICENSE files
-> # out into both crate dirs — must run before either publish so the license
-> # text is present in each packaged tarball.
+> # Cross-compile each tier-1 target's libfig.a (default language set) into its
+> # fig-sys-<target> payload crate's git-ignored lib/. Zig cross-compiles every
+> # target from this one runner. Must precede packaging: the payload crates ship
+> # lib/<archive> via their `include` list.
+> name = Build prebuilt payload libraries
+> working-directory = bindings/rust
+> run = bash scripts/build-payload-lib.sh all
++
+> # Vendors the Zig source into fig-sys AND fans the root LICENSE files out into
+> # each crate dir — must run before publishing so the license text (and the
+> # source-build fallback tree) are present in every packaged tarball.
 > name = Vendor the Zig source and licenses into the crates
 > run = zig build vendor-rust
 +
-> # Publishes are idempotent: re-running the release for a version that's
-> # already on crates.io is a no-op, but auth/permission/network failures
-> # still fail the job. crates.io reports a duplicate as "already uploaded"
-> # / "already exists"; only that exact signal is swallowed.
-> # fig-macros must be on crates.io before fig.
-> name = Publish fig-macros
+> # Publish the whole graph bottom-up — crates.io rejects an upload whose
+> # dependencies aren't already indexed, so the order is:
+> #   payload crates -> fig-sys -> fig-macros -> fig
+> # Publishes are idempotent: re-running for a version already on crates.io is a
+> # no-op (the "already uploaded/exists" signal is swallowed), but auth/network
+> # failures still fail the job. A short retry loop absorbs index-propagation lag
+> # before a dependent tier resolves the tier below it.
+> name = Publish to crates.io (bottom-up)
 > working-directory = bindings/rust
 > env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
 > run = '''
-if out=$(cargo publish -p fig-macros --allow-dirty 2>&1); then
-  echo "$out"
-else
-  echo "$out"
-  if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
-    echo "::notice::fig-macros version already on crates.io — skipping"
-  else
-    exit 1
-  fi
-fi
-
-'''
-+
-> name = Publish fig
-> working-directory = bindings/rust
-> env.CARGO_REGISTRY_TOKEN = ${{ secrets.CARGO_REGISTRY_TOKEN }}
-> run = '''
-if out=$(cargo publish -p fig --allow-dirty 2>&1); then
-  echo "$out"
-else
-  echo "$out"
-  if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
-    echo "::notice::fig version already on crates.io — skipping"
-  else
-    exit 1
-  fi
-fi
+set -uo pipefail
+publish() {
+  local crate="$1" attempt out
+  for attempt in 1 2 3 4 5; do
+    if out=$(cargo publish -p "$crate" --allow-dirty 2>&1); then
+      echo "$out"; return 0
+    fi
+    echo "$out"
+    if echo "$out" | grep -qiE 'already (uploaded|exists)'; then
+      echo "::notice::$crate already on crates.io — skipping"; return 0
+    fi
+    echo "publish $crate failed (attempt $attempt); retrying in 30s (index propagation?)"
+    sleep 30
+  done
+  echo "::error::failed to publish $crate after retries"; return 1
+}
+for crate in \
+  fig-sys-macos-arm64 fig-sys-linux-x64-gnu fig-sys-linux-arm64-gnu \
+  fig-sys-windows-x64-msvc fig-sys-wasm32; do
+  publish "$crate"
+done
+publish fig-sys
+publish fig-macros
+publish fig
 
 '''
