@@ -1,6 +1,6 @@
 {
   "name": "@diaryx/fig",
-  "version": "2.5.1",
+  "version": "2.5.2",
   "description": "JSON/JSONC/JSON5/YAML/TOML parsing (plus optional ZON), comment-preserving editing, and cross-format serialization, backed by a Zig core compiled to WebAssembly.",
   "type": "module",
   "publishConfig": {

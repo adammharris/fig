@@ -18,7 +18,7 @@ extern "C" {
 // ============================================================================
 #define FIG_VERSION_MAJOR 2
 #define FIG_VERSION_MINOR 5
-#define FIG_VERSION_PATCH 1
+#define FIG_VERSION_PATCH 2
 #define FIG_VERSION_NUM (((uint32_t)FIG_VERSION_MAJOR << 16) | \
                          ((uint32_t)FIG_VERSION_MINOR << 8)  | \
                          (uint32_t)FIG_VERSION_PATCH)
