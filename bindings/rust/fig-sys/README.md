@@ -1,7 +1,7 @@
 # fig-sys
 
 Low-level FFI bindings and the native static library for
-[fig](https://github.com/adammharris/fig) — the comment-preserving
+[fig](https://github.com/diaryx-org/fig) — the comment-preserving
 JSON / YAML / TOML / … configuration engine.
 
 This crate builds and links `libfig.a` and exposes the raw C ABI (`extern "C"`

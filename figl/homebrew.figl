@@ -25,7 +25,7 @@ name = Homebrew
 # release-npm-wasi.yml.
 #
 # Prerequisites before the first tagged release succeeds:
-# 1. Create the tap repo `adammharris/homebrew-tap` (already done).
+# 1. Create the tap repo `diaryx-org/homebrew-tap` (already done).
 # 2. Add a HOMEBREW_TAP_TOKEN secret: a PAT with contents:write on the tap
 # (already done).
 #
@@ -128,7 +128,7 @@ jobs.bump-formula.steps[]
 > name = Compute checksums and render the Homebrew formula
 > run = '''
 version="${GITHUB_REF_NAME#cli/v}"
-base="https://github.com/adammharris/fig/releases/download/${GITHUB_REF_NAME}"
+base="https://github.com/diaryx-org/fig/releases/download/${GITHUB_REF_NAME}"
 mac_arm64_sha=$(curl -sL "$base/fig-macos-arm64.tar.gz" | sha256sum | cut -d' ' -f1)
 mac_x64_sha=$(curl -sL "$base/fig-macos-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
 linux_x64_sha=$(curl -sL "$base/fig-linux-x86_64.tar.gz" | sha256sum | cut -d' ' -f1)
@@ -136,28 +136,28 @@ linux_arm64_sha=$(curl -sL "$base/fig-linux-aarch64.tar.gz" | sha256sum | cut -d
 cat > /tmp/fig.rb <<RUBY
 class Fig < Formula
   desc "Parse, edit, and convert config files while preserving comments. Supports JSON, YAML, TOML, and more."
-  homepage "https://github.com/adammharris/fig"
+  homepage "https://github.com/diaryx-org/fig"
   version "$version"
   license "MIT OR Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-macos-arm64.tar.gz"
+      url "https://github.com/diaryx-org/fig/releases/download/cli/v$version/fig-macos-arm64.tar.gz"
       sha256 "$mac_arm64_sha"
     end
     on_intel do
-      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-macos-x86_64.tar.gz"
+      url "https://github.com/diaryx-org/fig/releases/download/cli/v$version/fig-macos-x86_64.tar.gz"
       sha256 "$mac_x64_sha"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-linux-aarch64.tar.gz"
+      url "https://github.com/diaryx-org/fig/releases/download/cli/v$version/fig-linux-aarch64.tar.gz"
       sha256 "$linux_arm64_sha"
     end
     on_intel do
-      url "https://github.com/adammharris/fig/releases/download/cli/v$version/fig-linux-x86_64.tar.gz"
+      url "https://github.com/diaryx-org/fig/releases/download/cli/v$version/fig-linux-x86_64.tar.gz"
       sha256 "$linux_x64_sha"
     end
   end
@@ -177,7 +177,7 @@ RUBY
 > name = Push to the tap
 > env.COMMITTER_TOKEN = ${{ secrets.HOMEBREW_TAP_TOKEN }}
 > run = '''
-git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/adammharris/homebrew-tap" tap
+git clone "https://x-access-token:${COMMITTER_TOKEN}@github.com/diaryx-org/homebrew-tap" tap
 cp /tmp/fig.rb tap/Formula/fig.rb
 cd tap
 git config user.name "github-actions[bot]"

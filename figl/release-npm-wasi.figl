@@ -1,11 +1,11 @@
 name = Release (npm-wasi)
 
-# Publish @adammharris/fig-wasi (EXPERIMENTAL, bindings/wasi), the npx-able
+# Publish @diaryx/fig-wasi (EXPERIMENTAL, bindings/wasi), the npx-able
 # *CLI* (same actions as the native binary), backed by the wasm32-wasi
 # command module (`zig build wasi`) run under Node's built-in (also
 # experimental) WASI support. See docs/npm-wasi.md. Split out from
 # release.figl (crates.io: fig + fig-macros) and release-npm.figl (the
-# @adammharris/fig library) so each publish, on its own tag line and with its
+# @diaryx/fig library) so each publish, on its own tag line and with its
 # own version-pin checks, can run (and be re-triggered) independently of the
 # others.
 #
@@ -25,7 +25,7 @@ name = Release (npm-wasi)
 # Required repository secret:
 # NPM_TOKEN  — npm automation token with publish rights (not yet set — this
 #              job will fail at the publish step until it's added: `gh secret
-#              set NPM_TOKEN`); needs publish rights to @adammharris/fig-wasi.
+#              set NPM_TOKEN`); needs publish rights to @diaryx/fig-wasi.
 on
 > workflow_dispatch = {}
 > push.tags = [cli/v*.*.*]

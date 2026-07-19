@@ -53,7 +53,7 @@
 
             meta = {
               description = "Format-preserving config-file parser/editor (YAML, JSON, TOML, ZON, INI, ...)";
-              homepage = "https://github.com/adammharris/fig";
+              homepage = "https://github.com/diaryx-org/fig";
               license = with pkgs.lib.licenses; [ mit asl20 ];
               mainProgram = "fig";
               platforms = pkgs.lib.platforms.unix ++ pkgs.lib.platforms.windows;

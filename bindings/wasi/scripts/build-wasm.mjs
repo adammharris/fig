@@ -6,7 +6,7 @@
 // optimize/strip settings are hardcoded in build.zig, so no -D flags are
 // needed here) — then copies the result into wasm/fig-wasi.wasm.
 //
-// Unlike the sibling `@adammharris/fig` library package, this ships the
+// Unlike the sibling `@diaryx/fig` library package, this ships the
 // module as a real file rather than inlining it as base64: there's no
 // bundler to appease here, just a plain `fs.readFileSync` from bin/fig.mjs.
 //

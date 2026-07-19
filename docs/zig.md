@@ -40,7 +40,7 @@ state or GC — you manage every `deinit`).
 ## Install
 
 ```sh
-zig fetch --save https://github.com/adammharris/fig
+zig fetch --save https://github.com/diaryx-org/fig
 ```
 
 Then wire it into `build.zig`:

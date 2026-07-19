@@ -16,7 +16,7 @@ part_of = [docs](docs.md)
 > prefer a native install (Homebrew, a downloaded release binary, `cargo
 > install`) — see [the main CLI docs](/fig.md#command-line-interface).
 
-`@adammharris/fig-wasi` runs the real `fig` command-line tool — the same
+`@diaryx/fig-wasi` runs the real `fig` command-line tool — the same
 `get`/`set`/`edit`/`insert`/`delete`/`comment`/`check`/`fmt`/`convert` actions
 the native binary has — with **no install step, no per-platform binary, and no
 native build**. It ships a single WASI (WebAssembly System Interface) module
@@ -34,7 +34,7 @@ committing to an install.
 Nothing to install — just run it:
 
 ```sh
-npx @adammharris/fig-wasi get config.yaml
+npx @diaryx/fig-wasi get config.yaml
 ```
 
 `npx` fetches the package, and because it declares a single `bin` (`fig`),
@@ -42,7 +42,7 @@ runs that command directly — you don't need `npx --package=... fig`. If you'd
 rather have `fig` on your `PATH` permanently:
 
 ```sh
-npm install -g @adammharris/fig-wasi
+npm install -g @diaryx/fig-wasi
 fig get config.yaml
 ```
 
@@ -54,11 +54,11 @@ Same CLI, same actions, same flags as the native binary — see `fig help` and
 `fig <action> --help` for the full reference:
 
 ```sh
-npx @adammharris/fig-wasi get config.yaml
-npx @adammharris/fig-wasi get -o json config.toml
-npx @adammharris/fig-wasi set config.yaml server.port 9090
-npx @adammharris/fig-wasi check config.yaml
-npx @adammharris/fig-wasi fmt --dry-run config.yaml
+npx @diaryx/fig-wasi get config.yaml
+npx @diaryx/fig-wasi get -o json config.toml
+npx @diaryx/fig-wasi set config.yaml server.port 9090
+npx @diaryx/fig-wasi check config.yaml
+npx @diaryx/fig-wasi fmt --dry-run config.yaml
 ```
 
 Set `FIG_WASI_DEBUG=1` to print diagnostics (fd classifications, internal
@@ -122,5 +122,5 @@ patterns than fig's, may surface more.
 ## See also
 
 - [The Zig CLI / library](/fig.md) — install via Homebrew or a release binary.
-- [fig in TypeScript](typescript.md) — the `@adammharris/fig` *library*
+- [fig in TypeScript](typescript.md) — the `@diaryx/fig` *library*
   package (parse/edit/serialize as a JS API), not a CLI.

@@ -49,7 +49,7 @@ Since each artifact versions independently, no single tag number could honestly 
 | `cli/v<cli-version>` | `release-binaries.yml` + `homebrew.yml` (build/attach the CLI binaries, create the GitHub Release) and `release-npm-wasi.yml` | the CLI's own compatibility contract; this is the tag end users actually see and fetch (Homebrew, npx, direct download) |
 | `core/v<core-version>` | nothing — no workflow triggers on it | the core has no package registry of its own — `zig fetch`'s "pushing the tag *is* the Zig release" needs a tag that means *core*, and `zig build semver-check`'s ABI diff needs a baseline on the core's own line, so it gets a plain (no CI, no GitHub Release) tag purely as that anchor |
 | `rust/v<rust-version>` | `release.yml`'s `crate` job (crates.io: `fig` + `fig-macros`) | also the `cargo-semver-checks` baseline, so the Rust API diff compares against the Rust crate's own release history, not core's or the CLI's |
-| `npm/v<npm-version>` | `release-npm.yml` (`@adammharris/fig`, the TS library) | independent track, same reasoning |
+| `npm/v<npm-version>` | `release-npm.yml` (`@diaryx/fig`, the TS library) | independent track, same reasoning |
 
 `fig-wasi` doesn't get its own prefix — it's pinned exactly to `cli_version` (see above), so it rides the `cli/` tag; its job keeps an explicit "tag matches package version" check (in addition to the floor) to enforce that pin.
 

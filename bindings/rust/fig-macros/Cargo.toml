@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Derive macros (ToValue/FromValue) for the `fig` crate."
-repository = "https://github.com/adammharris/fig"
+repository = "https://github.com/diaryx-org/fig"
 # Allowlist so the LICENSE files (git-ignored, vendored in by `zig build
 # vendor-rust` from the repo root) are force-added to the published tarball.
 include = [

@@ -4,7 +4,7 @@ version = "0.0.1"
 schema_version = 1
 authors = ["Adam Harris <amh421@icloud.com>"]
 description = "Syntax highlighting for the fig authoring dialect"
-repository = "https://github.com/adammharris/fig"
+repository = "https://github.com/diaryx-org/fig"
 
 # The grammar lives in a subdirectory of this same repo (a monorepo layout).
 # Zed clones `repository` at `rev`, then looks in `path` for the grammar.

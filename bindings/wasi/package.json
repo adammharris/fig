@@ -1,5 +1,5 @@
 {
-  "name": "@adammharris/fig-wasi",
+  "name": "@diaryx/fig-wasi",
   "version": "3.5.0",
   "description": "EXPERIMENTAL: the fig CLI (parse/edit/convert JSON, JSONC, JSON5, YAML, TOML — while preserving comments) as an npx-able command, running the real fig CLI's WASI build under Node's built-in (experimental) WASI support. No install, no per-platform binary, no native build step.",
   "type": "module",
@@ -33,14 +33,14 @@
   ],
   "author": "Adam Harris <amh421@icloud.com>",
   "license": "MIT OR Apache-2.0",
-  "homepage": "https://github.com/adammharris/fig/blob/main/docs/npm-wasi.md",
+  "homepage": "https://github.com/diaryx-org/fig/blob/main/docs/npm-wasi.md",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adammharris/fig.git",
+    "url": "git+https://github.com/diaryx-org/fig.git",
     "directory": "bindings/wasi"
   },
   "bugs": {
-    "url": "https://github.com/adammharris/fig/issues"
+    "url": "https://github.com/diaryx-org/fig/issues"
   },
   "engines": {
     "node": ">=20"

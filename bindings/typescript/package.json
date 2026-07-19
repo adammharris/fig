@@ -1,5 +1,5 @@
 {
-  "name": "@adammharris/fig",
+  "name": "@diaryx/fig",
   "version": "2.5.1",
   "description": "JSON/JSONC/JSON5/YAML/TOML parsing (plus optional ZON), comment-preserving editing, and cross-format serialization, backed by a Zig core compiled to WebAssembly.",
   "type": "module",
@@ -32,14 +32,14 @@
   ],
   "author": "Adam Harris <amh421@icloud.com>",
   "license": "MIT OR Apache-2.0",
-  "homepage": "https://github.com/adammharris/fig/blob/main/docs/typescript.md",
+  "homepage": "https://github.com/diaryx-org/fig/blob/main/docs/typescript.md",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adammharris/fig.git",
+    "url": "git+https://github.com/diaryx-org/fig.git",
     "directory": "bindings/typescript"
   },
   "bugs": {
-    "url": "https://github.com/adammharris/fig/issues"
+    "url": "https://github.com/diaryx-org/fig/issues"
   },
   "engines": {
     "node": ">=20"

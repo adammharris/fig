@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // The `fig` CLI, running under Node's built-in WASI (preview1) support — no
-// native binary, no per-platform install: `npx @adammharris/fig-wasi` works
+// native binary, no per-platform install: `npx @diaryx/fig-wasi` works
 // anywhere Node 20+ runs. See ../../../docs/npm-wasi.md for the full guide,
 // including the filesystem/platform caveats this host can't paper over.
 //

@@ -15,9 +15,9 @@ contents = [[fig docs](docs/docs.md)]
 </h1>
 
 <p align="center">
-  <a href="https://github.com/adammharris/fig/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/adammharris/fig/ci.yml?branch=main" alt="CI"></a>
+  <a href="https://github.com/diaryx-org/fig/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/diaryx-org/fig/ci.yml?branch=main" alt="CI"></a>
   <a href="https://crates.io/crates/fig"><img src="https://img.shields.io/crates/v/fig.svg" alt="crates.io"></a>
-  <a href="https://www.npmjs.com/package/@adammharris/fig"><img src="https://img.shields.io/npm/v/%40adammharris%2Ffig.svg" alt="npm"></a>
+  <a href="https://www.npmjs.com/package/@diaryx/fig"><img src="https://img.shields.io/npm/v/%40diaryx%2Ffig.svg" alt="npm"></a>
   <a href="https://docs.rs/fig"><img src="https://img.shields.io/docsrs/fig" alt="docs.rs"></a>
   <a href="LICENSE-MIT"><img src="https://img.shields.io/crates/l/fig.svg" alt="license"></a>
 </p>
@@ -51,15 +51,15 @@ And has bindings in the following programming languages:
 Download from Github Releases or with Homebrew:
 
 ```bash
-brew tap adammharris/tap
-brew install adammharris/tap/fig
+brew tap diaryx-org/tap
+brew install diaryx-org/tap/fig
 ```
 
 Or run it with no install at all (needs Node 20+; experimental — see
 [docs/npm-wasi.md](docs/npm-wasi.md)):
 
 ```bash
-npx @adammharris/fig-wasi get config.yaml
+npx @diaryx/fig-wasi get config.yaml
 ```
 
 Run `fig help` for instructions for how to use it on your files.

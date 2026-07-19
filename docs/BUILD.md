@@ -20,7 +20,7 @@ You will:
 Put these commands into the terminal and run them:
 
 ```bash
-git clone https://github.com/adammharris/fig
+git clone https://github.com/diaryx-org/fig
 cd fig
 zig build
 ```
@@ -72,8 +72,8 @@ mv zig-out/bin/fig ~/.local/bin
 You can use a **package manager** to make updating easier. Right now, `fig` only supports Homebrew for macOS:
 
 - [Install Homebrew](https://brew.sh)
-- Run `brew tap adammharris/tap && brew install adammharris/tap/fig`
-- To update, run `brew upgrade adammharris/tap/fig`
+- Run `brew tap diaryx-org/tap && brew install diaryx-org/tap/fig`
+- To update, run `brew upgrade diaryx-org/tap/fig`
 
 ## nix-darwin
 
@@ -83,7 +83,7 @@ I personally use Nix on my Macbook to manage packages. I integrate it with Homeb
 homebrew = {
   enable = true;
   taps = [
-    "adammharris/tap"
+    "diaryx-org/tap"
   ];
   brews = [
     "fig"

@@ -5,8 +5,8 @@ name: Release (crate)
 # CLI binary + Homebrew tap bump is a separate workflow (homebrew.yml);
 # Linux/Windows/WASI CLI binaries are release-binaries.yml.
 #
-# The two npm packages (bindings/typescript's @adammharris/fig and
-# bindings/wasi's @adammharris/fig-wasi) live in their own files —
+# The two npm packages (bindings/typescript's @diaryx/fig and
+# bindings/wasi's @diaryx/fig-wasi) live in their own files —
 # release-npm.figl and release-npm-wasi.figl — split out from this one so
 # each publish, on its own tag line and with its own required secret, can run
 # (and be re-triggered) independently of the others.

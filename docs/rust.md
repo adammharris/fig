@@ -43,7 +43,7 @@ machine that compiles your crate. Then add the git dependency:
 
 ```toml
 [dependencies]
-fig = { git = "https://github.com/adammharris/fig" }
+fig = { git = "https://github.com/diaryx-org/fig" }
 ```
 
 There is no separate native library to ship — the core is linked straight into

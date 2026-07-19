@@ -31,7 +31,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Prebuilt libfig.a (default features) for $rust_target. Support crate for fig-sys; not for direct use."
-repository = "https://github.com/adammharris/fig"
+repository = "https://github.com/diaryx-org/fig"
 # The build script hands \`lib/$archive\`'s location to \`fig-sys\` via this
 # \`links\` key (as \`DEP_${links^^}_LIBDIR\`). Unique per payload crate.
 links = "$links"

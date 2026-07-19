@@ -37,7 +37,7 @@ serve** — it runs in Node, Bun, Deno, and the browser.
 ## Install
 
 ```sh
-npm install @adammharris/fig
+npm install @diaryx/fig
 ```
 
 Requires Node 20+ (or any runtime with `Symbol.dispose`). The package is ESM-only
@@ -50,7 +50,7 @@ compiles it. Under Node, Bun, Deno, and Web Workers that "just works" and you ca
 call any API directly:
 
 ```ts
-import { parse, Format } from "@adammharris/fig";
+import { parse, Format } from "@diaryx/fig";
 
 parse('{"ok":true}', Format.Json); // → { ok: true }
 ```
@@ -60,7 +60,7 @@ In the **browser main thread**, synchronous compilation of a module larger than
 other fig API:
 
 ```ts
-import { init, parse, Format } from "@adammharris/fig";
+import { init, parse, Format } from "@diaryx/fig";
 
 await init();                       // do this once, e.g. during app bootstrap
 parse('{"ok":true}', Format.Json);  // now synchronous everywhere
@@ -73,7 +73,7 @@ call throws a clear error telling you to `await init()`.
 ## Quick start
 
 ```ts
-import { parse, stringify, convert, Format } from "@adammharris/fig";
+import { parse, stringify, convert, Format } from "@diaryx/fig";
 
 // Parse any format straight to plain JS values.
 const cfg = parse('name = "fig"\nport = 8080\n', Format.Toml);
@@ -126,7 +126,7 @@ format. Whichever module you're running, don't hard-code the table above — ask
 the build at runtime, since a format can be compiled out:
 
 ```ts
-import { capabilities, Format } from "@adammharris/fig";
+import { capabilities, Format } from "@diaryx/fig";
 
 capabilities(Format.Toml); // → { read: true, edit: true, serialize: true }
 capabilities(Format.Zon);  // → { read: false, edit: false, serialize: false } in the published module
@@ -139,7 +139,7 @@ For most cases, `parse` is all you need. When you want one value out of a large
 document without materializing the whole thing, open a `Document` and use `get`:
 
 ```ts
-import { Document, Format } from "@adammharris/fig";
+import { Document, Format } from "@diaryx/fig";
 
 using doc = Document.parse(
   "[server]\nhost = \"localhost\"\nports = [80, 443]\n",
@@ -179,7 +179,7 @@ When you need full fidelity — distinguishing `int` from `uint`, ordered non-st
 keys, or building datetimes — use the `Value` tree and its `V` constructors:
 
 ```ts
-import { V, serialize, Format } from "@adammharris/fig";
+import { V, serialize, Format } from "@diaryx/fig";
 
 const value = V.map([
   [V.string("name"), V.string("fig")],
@@ -197,7 +197,7 @@ This is what sets `fig` apart. `Editor` splices only the bytes of the node you
 touch — everything else in the file is preserved exactly.
 
 ```ts
-import { Editor, Format } from "@adammharris/fig";
+import { Editor, Format } from "@diaryx/fig";
 
 using ed = Editor.open(
   "# app config\nhost = \"localhost\"  # dev box\nport = 8080\n",
@@ -258,7 +258,7 @@ Every value method has a `*Raw` twin — `replaceValueRaw`, `insertValueRaw`,
 frontmatter, or YAML endmatter — leaving the fences and surrounding prose intact.
 
 ```ts
-import { Embed, EmbedType } from "@adammharris/fig";
+import { Embed, EmbedType } from "@diaryx/fig";
 
 const md = "---\ntitle: Hello\ntags:\n- draft\n---\n# Body\n\ntext\n";
 
@@ -311,7 +311,7 @@ datetimes or comments. `diagnose` tells you exactly what *would* be lost, withou
 doing it:
 
 ```ts
-import { Document, Format, WarningCode } from "@adammharris/fig";
+import { Document, Format, WarningCode } from "@diaryx/fig";
 
 using doc = Document.parse("a: null\nb: 1 # keep\n", Format.Yaml);
 
@@ -338,7 +338,7 @@ Failures throw a `FigError` carrying a `status` (`Status` enum) and, for parse
 failures, the core's diagnostic message and source location when available:
 
 ```ts
-import { Document, Format, FigError, Status } from "@adammharris/fig";
+import { Document, Format, FigError, Status } from "@diaryx/fig";
 
 try {
   Document.parse("{ not valid", Format.Json);
@@ -421,7 +421,7 @@ manage the handle for you, so no cleanup is needed.
 
 - [The Zig CLI / library](/fig.md) — install via Homebrew or a release binary.
 - [fig CLI via npm/npx](npm-wasi.md) (experimental) — the
-  `@adammharris/fig-wasi` *CLI* package (same actions as the native binary,
+  `@diaryx/fig-wasi` *CLI* package (same actions as the native binary,
   running under Node's WASI support), not a JS library — if you want to
-  `import { parse } from "@adammharris/fig"` in your own code, this package
+  `import { parse } from "@diaryx/fig"` in your own code, this package
   (the one this guide is about) is the one you want instead.

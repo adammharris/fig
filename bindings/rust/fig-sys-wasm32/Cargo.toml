@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Prebuilt libfig.a (default features) for wasm32-unknown-unknown. Support crate for fig-sys; not for direct use."
-repository = "https://github.com/adammharris/fig"
+repository = "https://github.com/diaryx-org/fig"
 # The build script hands `lib/libfig.a`'s location to `fig-sys` via this
 # `links` key (as `DEP_FIG_PREBUILT_WASM32_LIBDIR`). Unique per payload crate.
 links = "fig_prebuilt_wasm32"

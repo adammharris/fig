@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Parse, edit, and convert config files while preserving comments. Supports JSON, YAML, TOML, and more."
-repository = "https://github.com/adammharris/fig"
+repository = "https://github.com/diaryx-org/fig"
 # Rendered by crates.io on the package page. The file is the repo-root `fig.md`,
 # copied in by `zig build vendor-rust` before publishing (git-ignored here, so
 # `include` force-adds it to the tarball — see below). A local checkout that has

@@ -1,5 +1,5 @@
 name: Release (npm)
-# Publish @adammharris/fig (bindings/typescript), a JS *library* (parse/edit/
+# Publish @diaryx/fig (bindings/typescript), a JS *library* (parse/edit/
 # serialize as an API) backed by a freestanding wasm reactor module. Split out
 # from release.figl (crates.io: fig + fig-macros) and release-npm-wasi.figl
 # (the npx-able fig-wasi CLI package) so each publish, on its own tag line
@@ -20,7 +20,7 @@ name: Release (npm)
 # Required repository secret:
 # NPM_TOKEN  — npm automation token with publish rights (not yet set — this
 # job will fail at the publish step until it's added: `gh secret
-# set NPM_TOKEN`); needs publish rights to @adammharris/fig.
+# set NPM_TOKEN`); needs publish rights to @diaryx/fig.
 on:
   workflow_dispatch: {}
   push: { tags: [npm/v*.*.*] }
