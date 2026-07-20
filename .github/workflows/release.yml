@@ -39,7 +39,7 @@ jobs:
     - uses: actions/checkout@v7
       with:
         # cargo-semver-checks (below) needs full history + tags: its baseline is the
-        # most recent `rust/v*` tag, discovered the same way ci-rust.figl's
+        # most recent `rust/v*` tag, discovered the same way ci.figl's
         # `rust-semver` job discovers its own baseline.
         fetch-depth: 0
     # build.rs compiles the core, and `vendor-rust` bundles the Zig source into
@@ -47,13 +47,13 @@ jobs:
     - uses: mlugg/setup-zig@v2
       with: { version: 0.16.0 }
     # cargo-semver-checks reads rustdoc JSON, which only nightly rustdoc emits —
-    # see ci-rust.figl's `rust-semver` job for why this is a dated pin rather
+    # see ci.figl's `rust-semver` job for why this is a dated pin rather
     # than `@nightly`. Keep this pin in sync with that job's.
     - uses: dtolnay/rust-toolchain@master
       with: { toolchain: nightly-2026-06-15 }
     - uses: taiki-e/install-action@v2
       with: { tool: cargo-semver-checks }
-    # Same gate ci-rust.figl's `rust-semver` job runs on every push/PR — re-run
+    # Same gate ci.figl's `rust-semver` job runs on every push/PR — re-run
     # it here so a release can never ship a native Rust API break that exceeds
     # what the crate's version bump allows, even if that CI job was skipped,
     # disabled, or its result went unnoticed. Baseline discovery excludes the
